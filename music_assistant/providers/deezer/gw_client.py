@@ -7,6 +7,7 @@ cookie based on the api_token.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
@@ -24,6 +25,8 @@ USER_AGENT_HEADER = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/79.0.3945.130 Safari/537.36"
 )
+
+LOGGER = logging.getLogger(__name__)
 
 GW_LIGHT_URL = "https://www.deezer.com/ajax/gw-light.php"
 MEDIA_GET_URL = "https://media.deezer.com/v1/get_url"
@@ -242,8 +245,11 @@ class GWClient:
 
     async def _update_user_data(self) -> None:
         user_data = await self._get_user_data()
-        if self._account_id and str(user_data["results"]["USER"]["USER_ID"]) != self._account_id:
-            user_data = await self._switch_account(user_data)
+        if self._account_id:
+            if str(user_data["results"]["USER"]["USER_ID"]) == self._account_id:
+                LOGGER.info("The Deezer GW session is on Family profile %s", self._account_id)
+            else:
+                user_data = await self._switch_account(user_data)
 
         if not user_data["results"]["OFFER_ID"]:
             msg = "The Deezer account has no streaming subscription."
@@ -290,14 +296,26 @@ class GWClient:
             await self._gw_api_call(
                 "user.loginMulti", args={"account_id": int(self._account_id)}, retry=False
             )
-            await self._gw_api_call("deezer.userAutolog", retry=False)
         except DeezerGWError as err:
             msg = f"Deezer refused to switch to account {self._account_id}: {err}"
             raise DeezerGWAccountError(msg) from err
-        user_data = await self._get_user_data()
+        try:
+            await self._gw_api_call("deezer.userAutolog", retry=False)
+        except DeezerGWError as err:
+            # the web player does not wait for this call either, getUserData decides below
+            LOGGER.info("deezer.userAutolog failed after user.loginMulti: %s", err)
+        try:
+            user_data = await self._get_user_data()
+        except DeezerGWError as err:
+            msg = f"Deezer returned no user after switching to account {self._account_id}"
+            raise DeezerGWAccountError(msg) from err
         if (user_id := str(user_data["results"]["USER"]["USER_ID"])) != self._account_id:
             msg = f"Deezer kept the session on account {user_id} instead of {self._account_id}"
             raise DeezerGWAccountError(msg)
+        LOGGER.info(
+            "Switched the Deezer GW session to Family profile %s with user.loginMulti",
+            self._account_id,
+        )
         return user_data
 
     async def _get_license(self) -> str | None:
