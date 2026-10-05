@@ -14,7 +14,12 @@ from collections.abc import AsyncGenerator, Sequence
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from deezer_python_gql import DeezerGQLClient, GraphQLClientAuthError, GraphQLClientError
+from deezer_python_gql import (
+    DeezerGQLClient,
+    GraphQLClientAccountError,
+    GraphQLClientAuthError,
+    GraphQLClientError,
+)
 from music_assistant_models.enums import MediaType, ProviderFeature
 from music_assistant_models.errors import LoginFailed
 
@@ -26,6 +31,7 @@ from music_assistant.models.recommendation_payload import RecommendationPayloadM
 from .browse import DeezerBrowseManager
 from .constants import DECRYPT_KEY_ERROR, DECRYPT_KEY_LENGTH
 from .gw_client import (
+    DeezerGWAccountError,
     DeezerGWAuthError,
     DeezerGWError,
     DeezerGWNoSubscriptionError,
@@ -90,6 +96,7 @@ SUPPORTED_FEATURES = {
 }
 
 CONF_ARL_TOKEN = "arl_token"
+CONF_FAMILY_PROFILE = "family_profile"
 
 
 class DeezerProvider(RecommendationPayloadMixin, MusicProvider):
@@ -114,17 +121,41 @@ class DeezerProvider(RecommendationPayloadMixin, MusicProvider):
     async def handle_async_init(self) -> None:
         """Handle async init of the Deezer provider."""
         arl_token = str(self.get_setup_value(CONF_ARL_TOKEN))
+        # a Family profile has no ARL of its own, it is reached through the admin's ARL
+        family_profile = str(self.get_setup_value(CONF_FAMILY_PROFILE) or "") or None
 
         try:
-            self.gql_client = DeezerGQLClient(arl=arl_token, session=self.mass.http_session)
+            self.gql_client = DeezerGQLClient(
+                arl=arl_token, session=self.mass.http_session, account_id=family_profile
+            )
             logging.getLogger("deezer_python_gql").setLevel(self.logger.level + 10)
             me = await self.gql_client.get_me()
             if not me:
                 msg = "Authentication returned no user data"
                 raise GraphQLClientError(msg)
             self.user_id = me.id
-            self.gw_client = GWClient(self.mass.http_session, arl_token)
-            await self.gw_client.setup()
+            if family_profile:
+                self.logger.info("Using Deezer Family profile %s", me.id)
+            self.gw_client = GWClient(self.mass.http_session, arl_token, family_profile)
+            try:
+                await self.gw_client.setup()
+            except DeezerGWAccountError as err:
+                # Streaming works with the admin's session as well, only listens and
+                # personal uploads then belong to the admin.
+                self.logger.warning(
+                    "Deezer did not switch playback to the Family profile, "
+                    "using the admin account for streaming: %s",
+                    err,
+                )
+                self.gw_client = GWClient(self.mass.http_session, arl_token)
+                await self.gw_client.setup()
+        except GraphQLClientAccountError as err:
+            self.logger.error("Deezer did not sign in as the Family profile: %s", err)
+            raise LoginFailed(
+                "Deezer could not sign in as the selected Family profile.",
+                translation_key="family_profile_unavailable",
+                translation_owner=self.translation_owner,
+            ) from err
         except DeezerGWNoSubscriptionError as err:
             self.logger.error("Deezer account has no streamable subscription: %s", err)
             raise LoginFailed(

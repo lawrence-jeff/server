@@ -9,7 +9,11 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 from aiohttp import CookieJar
-from deezer_python_gql import GraphQLClientAuthError, GraphQLClientError
+from deezer_python_gql import (
+    GraphQLClientAccountError,
+    GraphQLClientAuthError,
+    GraphQLClientError,
+)
 from music_assistant_models.errors import LoginFailed
 
 from music_assistant.providers.deezer.gw_client import (
@@ -111,6 +115,7 @@ async def test_missing_offer_raises_no_subscription_error(gw_user_data: dict[str
     [
         (DeezerGWNoSubscriptionError("no offer"), "no_subscription"),
         (DeezerGWAuthError("no user"), "gw_no_session"),
+        (GraphQLClientAccountError("no profile token"), "family_profile_unavailable"),
         (GraphQLClientAuthError("rejected"), "arl_rejected"),
         (GraphQLClientError("boom"), "auth_failed"),
         (DeezerGWError("boom"), "auth_failed"),
@@ -134,5 +139,11 @@ async def test_cause_is_chained_and_logged(caplog: pytest.LogCaptureFixture) -> 
 def test_every_translation_key_exists_in_strings() -> None:
     """A key without a string would silently fall back to the generic message."""
     errors = json.loads(STRINGS.read_text(encoding="utf-8"))["errors"]
-    for key in ("no_subscription", "arl_rejected", "gw_no_session", "auth_failed"):
+    for key in (
+        "no_subscription",
+        "arl_rejected",
+        "gw_no_session",
+        "auth_failed",
+        "family_profile_unavailable",
+    ):
         assert errors.get(key), f"missing errors.{key} in deezer strings.json"

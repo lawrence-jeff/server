@@ -42,6 +42,10 @@ class DeezerGWNoSubscriptionError(DeezerGWError):
     """The GW API returned an account without a streaming subscription."""
 
 
+class DeezerGWAccountError(DeezerGWError):
+    """The GW API did not switch the session to the requested Family profile."""
+
+
 class GWClient:
     """The GWClient class can be used to perform actions not being of the official API."""
 
@@ -65,9 +69,18 @@ class GWClient:
     formats: list[dict[str, str]]
     user_country: str
 
-    def __init__(self, session: ClientSession, arl_token: str) -> None:
-        """Provide an aiohttp ClientSession and the deezer ARL token."""
+    def __init__(
+        self, session: ClientSession, arl_token: str, account_id: str | None = None
+    ) -> None:
+        """
+        Provide an aiohttp ClientSession and the deezer ARL token.
+
+        :param session: The (shared) aiohttp session.
+        :param arl_token: The ARL of the account, for a Family profile the ARL of the admin.
+        :param account_id: Optional Family profile to switch the session to.
+        """
         self._arl_token = arl_token
+        self._account_id = account_id
         self.session = session
         # the session is shared server-wide, so this client keeps its cookies to itself
         self._cookies: dict[str, str] = {}
@@ -217,22 +230,20 @@ class GWClient:
         # aiohttp merges per-request cookies with the shared jar. Blank every cookie
         # the jar would send before applying this instance's cookies and ARL.
         blanked = dict.fromkeys(self.session.cookie_jar.filter_cookies(URL(url)), "")
-        return blanked | self._cookies | {"arl": self._arl_token}
+        cookies = blanked | self._cookies | {"arl": self._arl_token}
+        if self._account_id:
+            # the cookie Deezer's web player keeps the selected Family profile in
+            cookies["familyUserId"] = self._account_id
+        return cookies
 
     def _store_cookies(self, response: ClientResponse) -> None:
         """Store response cookies for this instance."""
         self._cookies.update({name: morsel.value for name, morsel in response.cookies.items()})
 
     async def _update_user_data(self) -> None:
-        # Retry an anonymous response with the session cookies Deezer just returned.
-        # Disable the API call's retry to avoid recursing into this method.
-        for _ in range(2):
-            user_data = await self._gw_api_call("deezer.getUserData", False, retry=False)
-            if int(user_data["results"]["USER"]["USER_ID"] or 0):
-                break
-        else:
-            msg = "The Deezer GW API returned no authenticated user after retrying."
-            raise DeezerGWAuthError(msg)
+        user_data = await self._get_user_data()
+        if self._account_id and str(user_data["results"]["USER"]["USER_ID"]) != self._account_id:
+            user_data = await self._switch_account(user_data)
 
         if not user_data["results"]["OFFER_ID"]:
             msg = "The Deezer account has no streaming subscription."
@@ -255,6 +266,39 @@ class GWClient:
         self.formats = formats
 
         self.user_country = user_data["results"]["COUNTRY"]
+
+    async def _get_user_data(self) -> dict[str, Any]:
+        """Return deezer.getUserData for an authenticated user."""
+        # Retry an anonymous response with the session cookies Deezer just returned.
+        # Disable the API call's retry to avoid recursing into _update_user_data.
+        for _ in range(2):
+            user_data = await self._gw_api_call("deezer.getUserData", False, retry=False)
+            if int(user_data["results"]["USER"]["USER_ID"] or 0):
+                return user_data
+        msg = "The Deezer GW API returned no authenticated user after retrying."
+        raise DeezerGWAuthError(msg)
+
+    async def _switch_account(self, user_data: dict[str, Any]) -> dict[str, Any]:
+        """
+        Switch the session to the Family profile, the way Deezer's web player does.
+
+        :param user_data: deezer.getUserData of the current session.
+        """
+        assert self._account_id is not None
+        self._gw_csrf_token = user_data["results"]["checkForm"]
+        try:
+            await self._gw_api_call(
+                "user.loginMulti", args={"account_id": int(self._account_id)}, retry=False
+            )
+            await self._gw_api_call("deezer.userAutolog", retry=False)
+        except DeezerGWError as err:
+            msg = f"Deezer refused to switch to account {self._account_id}: {err}"
+            raise DeezerGWAccountError(msg) from err
+        user_data = await self._get_user_data()
+        if (user_id := str(user_data["results"]["USER"]["USER_ID"])) != self._account_id:
+            msg = f"Deezer kept the session on account {user_id} instead of {self._account_id}"
+            raise DeezerGWAccountError(msg)
+        return user_data
 
     async def _get_license(self) -> str | None:
         if self._license_expiration_timestamp < future_timestamp(days=1):
