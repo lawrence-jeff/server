@@ -9,6 +9,6 @@
     "[deezer-python-gql](https://github.com/music-assistant/deezer-python-gql)"
   ],
   "documentation": "https://music-assistant.io/music-providers/deezer/",
-  "requirements": ["deezer-python-gql @ git+https://github.com/music-assistant/deezer-python-gql@332e1fcf5c62570d0dd8adcac38af4d4c7776960", "pycryptodome==3.23.0"],
+  "requirements": ["deezer-python-gql @ git+https://github.com/music-assistant/deezer-python-gql@dfbce3097611e3c6647bdbd8a6d0db7ea9b3da17", "pycryptodome==3.23.0"],
   "multi_instance": true
 }
