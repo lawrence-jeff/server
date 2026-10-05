@@ -90,10 +90,17 @@ class SqueezelitePlayerProvider(PlayerProvider):
             control_port=control_port,
         )
 
+    def _lookup_display_name(self, player_id: str) -> str | None:
+        """Return the Music Assistant display name for a player, or None if unknown."""
+        mass_player = self.mass.players.get_player(player_id)
+        return mass_player.display_name if mass_player else None
+
     async def loaded_in_mass(self) -> None:
         """Call after the provider has been loaded."""
         await super().loaded_in_mass()
         assert self.slimproto is not None  # for type checker
+        # let devices show the name set in Music Assistant (requires aioslimproto with display_name_lookup)
+        self.slimproto.cli.display_name_lookup = self._lookup_display_name
         # subscribe before starting the socket server: aioslimproto does not buffer
         # events, so a client connecting before we subscribe would be missed entirely
         self.slimproto.subscribe(self._handle_slimproto_event)
