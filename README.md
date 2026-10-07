@@ -1,6 +1,22 @@
 Music Assistant
 ==================================
 
+> **This branch (`ma-squeezelite-browse`)** carries a working set of patches to the Squeezelite
+> provider (`provider.py`/`browselibrary.py`/`player.py`, plus menu icons in `static/`) that let a
+> SlimProto client (JiveLite/piCorePlayer, or a real Squeezebox) browse the MA library directly
+> and stay in sync with queue/playback changes, instead of only playing whatever MA pushes to it.
+> It's a fork branch for other MA developers to read and build on, not an upstream release. Its
+> `aioslimproto` requirement is pinned to the
+> [`ma-squeezelite-browse` branch of lawrence-jeff/aioslimproto](https://github.com/lawrence-jeff/aioslimproto/tree/ma-squeezelite-browse)
+> (see `music_assistant/providers/squeezelite/manifest.json`), which this depends on and won't
+> work against released `aioslimproto`. See
+> [lawrence-jeff/MA-SqueezeliteBrowse](https://github.com/lawrence-jeff/MA-SqueezeliteBrowse) for
+> the full project and the `reinject.sh` workflow used to test against a live container. Pieces of
+> this are also up as separate PRs against upstream `music-assistant/server` and
+> `music-assistant/aioslimproto` - see that repo's README for current status.
+>
+> Everything below this point is upstream's own README, unmodified.
+
 **Music Assistant Server**
 
 [![CodSpeed](https://img.shields.io/endpoint?url=https://codspeed.io/badge.json)](https://app.codspeed.io/music-assistant/server?utm_source=badge)

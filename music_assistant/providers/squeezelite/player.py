@@ -25,6 +25,7 @@ from music_assistant_models.enums import (
     RepeatMode,
 )
 from music_assistant_models.errors import InvalidCommand, MusicAssistantError
+from music_assistant_models.media_items import AudioFormat
 
 from music_assistant.constants import (
     CONF_ENTRY_HTTP_PROFILE_FORCED_2,
@@ -129,6 +130,7 @@ class SqueezelitePlayer(Player):
         self.multi_client_stream: MultiClientStream | None = None
         self._sync_playpoints: deque[SyncPlayPoint] = deque(maxlen=MIN_REQ_PLAYPOINTS)
         self._do_not_resync_before: float = 0.0
+        self._audio_source_active: bool = False
 
     async def on_config_updated(self) -> None:
         """Handle logic when the PlayerConfig is first loaded or updated."""
@@ -218,6 +220,7 @@ class SqueezelitePlayer(Player):
 
     async def stop(self) -> None:
         """Handle STOP command on the player."""
+        self._audio_source_active = False
         # Clean up any existing multi-client stream
         if self.multi_client_stream is not None:
             await self.multi_client_stream.stop()
@@ -247,6 +250,30 @@ class SqueezelitePlayer(Player):
         if self.synced_to:
             msg = "A synced player cannot receive play commands directly"
             raise InvalidCommand(msg)
+
+        # Protocol players are powered on/off with the stream (see the
+        # same note in __init__, and stop()'s own matching client.power
+        # (False) a few methods up) - but that was only ever half-built:
+        # stop() explicitly powers off, and nothing anywhere in this
+        # file ever called client.power(True) to power back on when
+        # playback actually starts (confirmed via grep before writing
+        # this fix). A real device test found exactly the symptom this
+        # predicts: the server's own side correctly progresses (mode,
+        # elapsed time) once a stream starts, but the device's actual
+        # audio output stayed silent throughout - because the device
+        # itself was never told it was powered on, only ever told it
+        # was powered off (on stop). Powers every sync client (not
+        # just self.client), mirroring stop()'s own scope exactly, so
+        # a synced group powers on together the same way it powers off
+        # together.
+        if self.type == PlayerType.PROTOCOL:
+
+            async def _power_on(client: SlimClient) -> None:
+                await client.power(True)
+
+            async with TaskManager(self.mass) as tg:
+                for client in self._get_sync_clients():
+                    tg.create_task(_power_on(client))
 
         # Clean up any existing multi-client stream before starting a new one
         if self.multi_client_stream is not None:
@@ -332,6 +359,22 @@ class SqueezelitePlayer(Player):
     async def enqueue_next_media(self, media: PlayerMedia) -> None:
         """Handle enqueuing next media item."""
         stream_url = await self.provider.mass.streams.resolve_stream_url(self.player_id, media)
+        # [DIAG] Investigating a real device report (UE Radio, real
+        # Squeezebox firmware, not JiveLite): adding a second queue item
+        # while a track is playing froze the current track at ~16s in,
+        # with no further STMt/STMd/STMu from the device afterward.
+        # aioslimproto's own play_url() (enqueue=True) takes a completely
+        # passive "stash _next_media and return" path when
+        # self.client._decoder_ready is False, touching nothing about
+        # current playback - but falls through to immediately start the
+        # new stream right now (the "gapless handoff" path, meant for
+        # near-end-of-track) if _decoder_ready is already True. No STMd
+        # was seen in the real capture between this track starting and
+        # this enqueue call, so decoder_ready should be False - a
+        # temporary diagnostic print (removed for this branch) logged
+        # the real value here instead of assuming, confirming that's
+        # the one fact that distinguishes "should have been a no-op"
+        # from "jumped the gun and interrupted playback early".
         await self._handle_play_url_for_slimplayer(
             self.client,
             url=stream_url,
@@ -469,25 +512,100 @@ class SqueezelitePlayer(Player):
         mime_type: str | None = None,
     ) -> None:
         """Handle playback of an url on slimproto player(s)."""
-        if mime_type is None:
-            # derive from the url extension (only reliable for plain file urls; sync
-            # group member urls have no extension, so callers pass the codec mime)
-            mime_type = get_mime_type(url.rsplit(".", maxsplit=1)[-1].split("?", maxsplit=1)[0])
+        # player.py patch v4
+        # v1 populated real samplerate/samplesize. v2 added real "type"
+        # and a correctly-formatted "bitrate". v3 gated samplesize to
+        # lossless content only. v4 addresses a real, device-confirmed
+        # timing gap: a real client trace showed the Now Playing quality
+        # fields blank right after playback starts, only appearing after
+        # switching screens away and back - proven server-side (not a
+        # client rendering quirk) by comparing actual response sizes for
+        # the same track: 768 bytes on the first status query vs. 1295
+        # bytes on the second. Root cause: queue_item/audio_format aren't
+        # always resolvable yet at the exact instant this method builds
+        # the initial metadata. Extracted the field-building logic into
+        # _build_quality_metadata_fields() (reused by the new
+        # _recheck_quality_metadata()) and scheduled a few delayed
+        # re-checks below, using the same self.mass.call_later() pattern
+        # already used elsewhere in this method.
+        #
+        # Look up the queue item to get its real audio format. Same
+        # lookup pattern already used in play_media() above (see
+        # start_queue_item) for the sync-group master format - pulled in
+        # here too since this single-player/per-slimplayer path never
+        # resolved any format object at all before this patch.
+        queue_item = (
+            self.mass.player_queues.get_item(media.source_id, media.queue_item_id)
+            if media.source_id and media.queue_item_id
+            else None
+        )
+        audio_format = None
+        if queue_item and queue_item.streamdetails:
+            # decoded_audio_format reflects what's actually being sent to
+            # the player after any transcoding; audio_format is the
+            # source file's own format. Prefer decoded when MA
+            # transcoded, since that's what a real LMS Now Playing screen
+            # reflects - what's actually playing, not necessarily what's
+            # on disk. decoded_audio_format is optional (None when MA
+            # didn't need to transcode), hence the fallback.
+            audio_format = (
+                queue_item.streamdetails.decoded_audio_format
+                or queue_item.streamdetails.audio_format
+            )
+        quality_fields = self._build_quality_metadata_fields(audio_format)
+        # "duration" always the real, full track length - NOT
+        # media.stream_duration (confirmed via PlayerMedia's own field
+        # comment: "length of the audio stream as delivered to the
+        # player, differs from duration after a seek on transports
+        # whose stream restarts at position zero" - exactly this
+        # project's own situation, confirmed by a real device test: the
+        # audio itself correctly started from the seek point, but the
+        # displayed progress bar reset to 0:00 and the total time
+        # shrank to match the new, shorter stream instead of staying at
+        # the real track length). "elapsed_offset" is the real fix for
+        # the other half of that symptom - how many seconds into the
+        # track this new, shorter stream's own position 0 actually
+        # corresponds to - added to whatever raw, stream-relative
+        # position aioslimproto's own elapsed_seconds reports, wherever
+        # that gets surfaced to the client (see cli.py's own matching
+        # update, both the "time" status field and _handle_time's "?"
+        # query branch).
+        real_duration = (
+            media.duration if media.duration is not None else (media.stream_duration or 0)
+        )
+        elapsed_offset = (
+            media.duration - media.stream_duration
+            if media.duration is not None and media.stream_duration is not None
+            else 0
+        )
         metadata = {
             "item_id": media.uri,
             "title": media.title,
             "album": media.album,
             "artist": media.artist,
             "image_url": media.image_url,
-            "duration": media.stream_duration or media.duration,
+            "duration": real_duration,
+            "elapsed_offset": elapsed_offset,
             "source_id": media.source_id,
             "queue_item_id": media.queue_item_id,
+            "samplerate": str(audio_format.sample_rate) if audio_format else "",
+            **quality_fields,
         }
         queue = None
         if media.source_id and (queue := self.mass.player_queues.get(media.source_id)):
             self.extra_data["playlist repeat"] = REPEATMODE_MAP[queue.repeat_mode]
             self.extra_data["playlist shuffle"] = int(queue.shuffle_enabled)
-        low_latency_stream = media.media_type in (MediaType.AUDIO_SOURCE, MediaType.RADIO)
+        audio_source_active = media.media_type == MediaType.AUDIO_SOURCE
+        low_latency_stream = audio_source_active or media.media_type == MediaType.RADIO
+        # set the flag on the player that owns the slimclient (may differ from self
+        # during group playback where self is the leader but slimplayer is a member)
+        target_player = self.mass.players.get_player(slimplayer.player_id)
+        if isinstance(target_player, SqueezelitePlayer):
+            target_player._audio_source_active = audio_source_active
+        if mime_type is None:
+            # derive from the url extension (only reliable for plain file urls; sync
+            # group member urls have no extension, so callers pass the codec mime)
+            mime_type = get_mime_type(url.rsplit(".", maxsplit=1)[-1].split("?", maxsplit=1)[0])
         # live streams start on a smaller buffer (KB, tenths of a second) to cut latency
         stream_threshold, output_threshold = (64, 1) if low_latency_stream else (200, 20)
         await slimplayer.play_url(
@@ -528,8 +646,150 @@ class SqueezelitePlayer(Player):
                 ),
             )
 
+        # Real, device-confirmed timing issue: a real client trace showed
+        # the very first "status" response after play (768 bytes) was
+        # substantially smaller than the one triggered later by switching
+        # screens away and back (1295 bytes) for the SAME track - proof
+        # the server itself sent meaningfully more data the second time,
+        # not just a client-side re-render. Root cause: queue_item (and
+        # therefore audio_format) isn't always resolvable yet at the
+        # exact instant this method runs and builds the initial metadata
+        # above. Rather than guess one fixed delay long enough to always
+        # cover it, schedule a few re-checks at increasing intervals -
+        # each one cheap and safe to no-op if an earlier one (or the
+        # initial push) already had the real data, since
+        # _recheck_quality_metadata() only signals an update when
+        # something actually changed and it's still the same track.
+        for delay in (1.0, 3.0, 6.0):
+            self.mass.call_later(delay, self._recheck_quality_metadata(slimplayer, media))
+
+    def _build_quality_metadata_fields(self, audio_format: AudioFormat | None) -> dict[str, str]:
+        """
+        Build the "type"/"bitrate"/"samplesize" Now Playing fields from a real AudioFormat.
+
+        Split out from _handle_play_url_for_slimplayer() so the exact
+        same logic can be reused by _recheck_quality_metadata() below,
+        rather than duplicated.
+        """
+        return {
+            # "type": real LMS's own equivalent (Slim::Control::Queries's
+            # CLI tag table, confirmed via its real source: 'o' =>
+            # ['type', 'TYPE', 'content_type']) is the plain codec name
+            # (e.g. "mp3"), sent as its own field, not derived by the
+            # client from anything else. ContentType is a real StrEnum
+            # (confirmed via music_assistant_models.enums) whose value IS
+            # already that same plain lowercase name (ContentType.MP3 ==
+            # "mp3"), so no further formatting is needed here.
+            "type": str(audio_format.content_type) if audio_format else "",
+            # "bitrate": real LMS's own equivalent (Track.pm's
+            # buildPrettyBitRate, confirmed via its real source) sends a
+            # pre-formatted string like "192kbps CBR" - not a raw number
+            # the client formats itself. Two real, confirmed pieces
+            # replicated here, one deliberately left out:
+            #   - the "kbps" number: AudioFormat.bit_rate's own real
+            #     __post_init__ (confirmed via music_assistant_models
+            #     source) already normalizes it to kbps regardless of
+            #     what unit the original probe reported it in ("if
+            #     bit_rate > 10000: bit_rate = bit_rate / 1000") - so no
+            #     division needed here, unlike real LMS's own bits/sec
+            #     source field which its own buildPrettyBitRate divides.
+            #   - the " CBR"/" VBR" suffix: real LMS derives this from a
+            #     real vbr_scale field on its own Track model, which
+            #     AudioFormat has no equivalent for (confirmed via its
+            #     real fields: content_type, codec_type, sample_rate,
+            #     bit_depth, channels, output_format_str, bit_rate - no
+            #     VBR/CBR indicator anywhere). Deliberately not guessed
+            #     or hardcoded to either value here, since a wrong CBR/
+            #     VBR label would be misleading in a way a missing one
+            #     isn't - the number alone is still real and useful
+            #     without it.
+            "bitrate": f"{audio_format.bit_rate}kbps"
+            if audio_format and audio_format.bit_rate
+            else "",
+            # samplesize (bit depth) only sent for lossless content - real
+            # LMS's own equivalent field (Slim::Control::Queries's tag
+            # 'I' => samplesize) is only added to its response "if
+            # defined $samplesize" (confirmed via its real source), and
+            # for a lossy format like mp3, real LMS's own scanner leaves
+            # this undefined - bit depth isn't a meaningful file-level
+            # property for compressed audio the way it is for lossless/
+            # PCM sources. Confirmed via a real device test: without this
+            # gate, an mp3 showed an extra, unwanted "16 bits" that real
+            # LMS never displays for the same file - not a display-side
+            # difference, a real data difference: AudioFormat.bit_depth
+            # (confirmed via music_assistant_models source) always has a
+            # real value (default 16) regardless of format, unlike real
+            # LMS's samplesize which is genuinely absent for lossy
+            # sources. content_type.is_lossless() is the same real,
+            # confirmed method AudioFormat's own .quality property
+            # already uses internally for this exact distinction.
+            "samplesize": (
+                str(audio_format.bit_depth)
+                if audio_format and audio_format.content_type.is_lossless()
+                else ""
+            ),
+        }
+
+    async def _recheck_quality_metadata(self, slimplayer: SlimClient, media: PlayerMedia) -> None:
+        """
+        Re-check and, if needed, correct the Now Playing quality fields after the fact.
+
+        See the real, confirmed reasoning where this gets scheduled
+        (_handle_play_url_for_slimplayer above). Mutates
+        slimplayer.current_media.metadata in place and calls
+        signal_update() - confirmed via aioslimproto's own real source
+        (client.py) that signal_update() just fires the same
+        PLAYER_UPDATED event this project's existing "notify_playerX
+        Change"-driven pushes already rely on, without restarting
+        playback the way another play_url() call would.
+        """
+        current_media = slimplayer.current_media
+        # Safety check: only touch it if it's still the same track this
+        # was scheduled for, not a newer one the user has since skipped
+        # to - queue_item_id is real, confirmed unique per queue item
+        # (see MediaDetails.metadata's own "queue_item_id" key, set the
+        # same way in the metadata dict built above).
+        if not current_media or current_media.metadata.get("queue_item_id") != media.queue_item_id:
+            return
+        queue_item = (
+            self.mass.player_queues.get_item(media.source_id, media.queue_item_id)
+            if media.source_id and media.queue_item_id
+            else None
+        )
+        audio_format = None
+        if queue_item and queue_item.streamdetails:
+            audio_format = (
+                queue_item.streamdetails.decoded_audio_format
+                or queue_item.streamdetails.audio_format
+            )
+        quality_fields = self._build_quality_metadata_fields(audio_format)
+        quality_fields["samplerate"] = str(audio_format.sample_rate) if audio_format else ""
+        if any(
+            quality_fields[key] and quality_fields[key] != current_media.metadata.get(key)
+            for key in quality_fields
+        ):
+            current_media.metadata.update(quality_fields)
+            slimplayer.signal_update()
+
     def _handle_player_heartbeat(self) -> None:
-        """Process SlimClient elapsed_time update."""
+        """
+        Process SlimClient elapsed_time update.
+
+        Restored as its own method - confirmed via a real docker log
+        capture (AttributeError: 'SqueezelitePlayer' object has no
+        attribute '_handle_player_heartbeat') that this had lost its
+        own "def" line at some point, silently merging its entire body
+        into the end of _recheck_quality_metadata above instead (right
+        after that method's own real, final statement, signal_update()
+        - everything from this docstring down was unreachable dead code
+        there, since _recheck_quality_metadata has no loop or branch
+        that would reach it, but Python raises no error for dead code
+        after a function's last real statement, so this went unnoticed
+        until the real crash surfaced it). handle_slim_event's own
+        PLAYER_HEARTBEAT branch calls this un-awaited (no async here,
+        matching that call site exactly), and nothing in this body
+        awaits anything.
+        """
         if self._attr_playback_state != PlaybackState.PLAYING:
             # ignore server heartbeats when not playing
             # Some players keep sending heartbeat with increasing elapsed time
@@ -577,12 +837,12 @@ class SqueezelitePlayer(Player):
 
         # all child's ready (or timeout) - start play
         async with TaskManager(self.mass) as tg:
-            for sync_client in self._get_sync_clients():
+            for sync_child in self._get_sync_clients():
                 # NOTE: Officially you should do an unpause_at based on the player timestamp
                 # but I did not have any good results with that.
                 # Instead just start playback on all players and let the sync logic work out
                 # the delays etc.
-                tg.create_task(pause_and_unpause(sync_client, 200))
+                tg.create_task(pause_and_unpause(sync_child, 200))
 
     async def _handle_player_cli_event(self, event: SlimEvent) -> None:
         """Process CLI Event."""
