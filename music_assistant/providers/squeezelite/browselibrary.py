@@ -1252,12 +1252,25 @@ def tracks_base_actions(kwargs, index=0, quantity=None):
             "params": {**common, "cmd": "load"},
         }
     else:
+        # cmd:"add" (was "load") - a single tap on a track with no album
+        # context (root Tracks, playlist tracks, podcast episodes) always
+        # just adds to the end of the queue, never interrupts/replaces
+        # what's playing, and never shows a menu. This replaces a
+        # goAction swap to a confirm-menu that was decided from the
+        # queue's state when the LISTING was fetched, not at tap time, so
+        # an open, unrefreshed screen could act on a stale decision and
+        # interrupt what an earlier tap had just started. "add" is the
+        # same whatever the queue holds, so there is nothing stale.
+        # _handle_playlistcontrol starts playback itself if the queue
+        # was idle. "nextWindow": "refresh" (as the presets' add action
+        # does) keeps the client on the list; without a nextWindow it
+        # opens a bare screen with just the song title.
         go_action = {
             "player": 0,
             "cmd": ["playlistcontrol"],
             "itemsParams": "commonParams",
-            "nextWindow": "nowPlaying",
-            "params": {**ctx, "cmd": "load"},
+            "nextWindow": "refresh",
+            "params": {**ctx, "cmd": "add"},
         }
     actions = {
         # itemsParams: "playallParams" (was "commonParams") - confirmed
@@ -1491,15 +1504,10 @@ async def get_all_tracks(
     documented two-line text convention Albums already uses. Falls back
     to the bare title if a track genuinely has no artists attached.
 
-    player_id (v65) - same queue-emptiness check get_tracks() already
-    does, for the same reason: this is a flat list with no natural
-    "whole collection" to load, so unlike get_tracks() there is no
-    4-item "Play all songs" variant here at all - when the queue is
-    non-empty, goAction becomes "playControl" and the tap re-queries
-    this same listing (via tracks_base_actions' own matching update)
-    for get_track_play_control_menu_flat's 3-item menu (Add to End/Play
-    Next/Play), confirmed directly against a real LMS device for a
-    track with no natural collection.
+    player_id - unused here: a single tap always adds to the queue (see
+    tracks_base_actions), so no queue-state check is needed. Kept since
+    callers already pass it and the signature is shared with
+    get_tracks()/get_playlist_tracks()/get_podcast_episodes().
     """
     limit = quantity if quantity is not None else 500
     items = await mass.music.tracks.library_items(
@@ -1513,8 +1521,6 @@ async def get_all_tracks(
         total = len(items)  # library_count() has no search= param - see get_artists' docstring
     else:
         total = await mass.music.tracks.library_count(favorite_only=favorite_only)
-    queue = mass.player_queues.get(player_id) if player_id is not None else None
-    queue_has_items = bool(queue is not None and queue.items)
     item_loop = []
     for i, item in enumerate(items):
         text = item.name
@@ -1532,12 +1538,14 @@ async def get_all_tracks(
                 "favorites_title": item.name,
                 "favorites_url": item.uri,
             },
+            # No goAction override - the base "go" action itself is now
+            # cmd:"add" unconditionally (see tracks_base_actions' own
+            # matching update), so there's no "load vs. show a menu"
+            # decision left to swap into a different action for. The
+            # goAction/playControlParams mechanism (and the staleness bug
+            # it had) only ever existed to make that decision - removed
+            # along with it, not left in as dead weight.
         }
-        if queue_has_items:
-            row["goAction"] = "playControl"
-            row["playControlParams"] = {"xmlbrowserPlayControl": str(play_index)}
-        else:
-            row["goAction"] = "play"
         if item.album is not None:
             row["icon"] = f"music/{item.album.item_id}/cover"
             row["icon-id"] = str(item.album.item_id)
@@ -1662,22 +1670,22 @@ async def get_tracks(mass, album_id, kwargs, index=0, quantity=None, player_id=N
     album favorites_url below which are still LMS's own "db:" convention
     (see this module's docstring for why those are flagged, not fixed, here).
 
-    player_id (v62) - only needed to answer one question: is this
-    player's queue currently empty? Confirmed via a real proxy capture
-    (lms.log text log + the pcap's reassembled long-poll stream, since
-    the response landed past the log's own 8000-byte preview truncation)
-    that real LMS's own behavior for a regular tap differs by queue
-    state: empty queue -> "goAction":"play" (this server's existing,
-    already-working v61 behavior, unchanged); non-empty queue ->
-    "goAction":"playControl" plus a matching "playControlParams"
-    ({"xmlbrowserPlayControl": str(play_index)}) - confirmed as the
-    EXACT real field names/shapes from the capture, not guessed. Queue
-    emptiness resolved via mass.player_queues.get(player_id).items - a
-    real, confirmed field (controller.py's own get_diagnostics() sums
-    this same field across all queues as its item count). player_id may
-    be None (some call sites don't have one readily available yet), in
-    which case this falls back to the prior, always-"play" behavior -
-    same as if the queue were empty.
+    player_id - no longer used for a queue-emptiness check here. Earlier
+    (v62) this branched goAction on whether the queue was empty at the
+    time this listing was fetched (confirmed as real LMS's own behavior
+    via a proxy capture) - reverted (see the row-building loop below):
+    that's a snapshot taken once per listing fetch, not re-evaluated per
+    tap, so an already-open, unrefreshed screen kept stale goAction
+    values even after the queue changed underneath it (e.g. from an
+    earlier tap on the same screen). A real device test confirmed the
+    actual consequence: tapping a second track right after the first
+    started playing, still on the same screen, skipped the menu and
+    interrupted/replaced what was just started instead of asking Play
+    Now vs. Add to the queue. goAction is now unconditionally
+    "playControl", so this decision is always made live, per tap.
+    Kept as a parameter since callers already pass it and the signature
+    is shared with get_all_tracks()/get_playlist_tracks()/
+    get_podcast_episodes(), not because this function still needs it.
     """
     items = (
         await mass.music.albums.tracks(album_id, "library", in_library_only=False)
@@ -1685,8 +1693,6 @@ async def get_tracks(mass, album_id, kwargs, index=0, quantity=None, player_id=N
         else []
     )
     window, total, offset = _paginate(items, index, quantity)
-    queue = mass.player_queues.get(player_id) if player_id is not None else None
-    queue_has_items = bool(queue is not None and queue.items)
     item_loop = []
     for i, item in enumerate(window):
         play_index = offset + i
@@ -1701,12 +1707,13 @@ async def get_tracks(mass, album_id, kwargs, index=0, quantity=None, player_id=N
                 "favorites_title": item.name,
                 "favorites_url": item.uri,
             },
+            # goAction unconditionally "playControl" - see get_all_tracks'
+            # matching comment for the real, confirmed staleness bug this
+            # fixes (a stale, already-rendered row's goAction never
+            # reflected queue changes made after it was fetched).
+            "goAction": "playControl",
+            "playControlParams": {"xmlbrowserPlayControl": str(play_index)},
         }
-        if queue_has_items:
-            row["goAction"] = "playControl"
-            row["playControlParams"] = {"xmlbrowserPlayControl": str(play_index)}
-        else:
-            row["goAction"] = "play"
         item_loop.append(row)
     return {
         "count": total,
@@ -1843,23 +1850,24 @@ async def get_track_play_control_menu(mass, album_id, kwargs, play_index):
 
 def get_track_play_control_menu_flat(common_params):
     """
-    Real LMS's own 3-item "playControl" menu for a track with no
-
-    natural multi-item collection to load as a whole - confirmed
-    directly against a real LMS device (not this project's own code):
-    searching for a single track outside any album context shows
-    exactly this shape, in this order - "Add to End", "Play Next",
-    "Play" - and the user separately confirmed an album with only one
-    track collapses to this SAME 3-item shape rather than the 4-item
-    one above (see get_track_play_control_menu's own matching note).
-    The rule is "more than one item in the natural collection", not
-    "inside an album specifically".
+    Menu for a track with no natural multi-item collection to load as a
+    whole (reached via "playControl", e.g. a single-track album).
 
     Used for: a single-track album (delegated from
     get_track_play_control_menu above), and any track row with no
     collection at all - the root "My Music > Tracks" browse
     (get_all_tracks), playlist tracks, podcast episodes - via their own
     matching dispatch updates below.
+
+    Originally a real, confirmed 3-item LMS menu (Add to End/Play Next/
+    Play) - field-for-field verified against a real device. Replaced
+    with Music Assistant's own 5-option long-press wording instead (Play
+    Now/Play Next/Add to the queue, each with a keep-queue and a replace-
+    queue variant), matching _handle_trackinfo's long-press menu and the
+    project's general move toward Music-Assistant-style wording over
+    real-LMS-style wording. A deliberate divergence from the captured
+    real behavior, not an oversight - if real-LMS-exact wording is ever
+    wanted back here, this is the function to revert.
 
     common_params is whatever identity the row itself already carries -
     {"track_id": ...} (root Tracks/podcast episodes/a single-track
@@ -1884,9 +1892,11 @@ def get_track_play_control_menu_flat(common_params):
         }
 
     item_loop = [
-        _row("item_add", "Add to End", "parentNoRefresh", "add"),
-        _row("item_insert", "Play Next", "parentNoRefresh", "insert"),
-        _row("item_play", "Play", "nowPlaying", "load"),
+        _row("item_play", "Play Now (keep queue)", "nowPlaying", "load"),
+        _row("item_insert", "Play Next (keep queue)", "parentNoRefresh", "insert"),
+        _row("item_add", "Add to the queue", "parentNoRefresh", "add"),
+        _row("item_play", "Play Now (replace queue)", "nowPlaying", "replace"),
+        _row("item_insert", "Play Next (replace queue)", "parentNoRefresh", "replace_next"),
     ]
     return {
         "count": len(item_loop),
@@ -1992,11 +2002,11 @@ async def get_playlist_tracks(mass, playlist_id, kwargs, index=0, quantity=None,
             if len(items) >= 2000:  # defensive cap - see docstring above
                 break
     window, total, offset = _paginate(items, index, quantity)
-    queue = mass.player_queues.get(player_id) if player_id is not None else None
-    queue_has_items = bool(queue is not None and queue.items)
     item_loop = []
     for i, item in enumerate(window):
         play_index = offset + i
+        # No goAction override - base "go" action is cmd:"add" (see
+        # get_all_tracks' matching comment).
         row = {
             "text": item.name,
             "type": "audio",
@@ -2009,11 +2019,6 @@ async def get_playlist_tracks(mass, playlist_id, kwargs, index=0, quantity=None,
                 "favorites_url": item.uri,
             },
         }
-        if queue_has_items:
-            row["goAction"] = "playControl"
-            row["playControlParams"] = {"xmlbrowserPlayControl": str(play_index)}
-        else:
-            row["goAction"] = "play"
         item_loop.append(row)
     return {
         "count": total,
@@ -2242,11 +2247,11 @@ async def get_podcast_episodes(mass, podcast_id, kwargs, index=0, quantity=None,
             if len(items) >= 2000:  # defensive cap - see docstring above
                 break
     window, total, offset = _paginate(items, index, quantity)
-    queue = mass.player_queues.get(player_id) if player_id is not None else None
-    queue_has_items = bool(queue is not None and queue.items)
     item_loop = []
     for i, item in enumerate(window):
         play_index = offset + i
+        # No goAction override - base "go" action is cmd:"add" (see
+        # get_all_tracks' matching comment).
         row = {
             "text": item.name,
             "type": "audio",
@@ -2259,11 +2264,6 @@ async def get_podcast_episodes(mass, podcast_id, kwargs, index=0, quantity=None,
                 "favorites_url": item.uri,
             },
         }
-        if queue_has_items:
-            row["goAction"] = "playControl"
-            row["playControlParams"] = {"xmlbrowserPlayControl": str(play_index)}
-        else:
-            row["goAction"] = "play"
         item_loop.append(row)
     return {
         "count": total,
@@ -2986,6 +2986,9 @@ class BrowseLibraryHandler:
         if slim_command.command == "trackinfo":
             return await self._handle_trackinfo(slim_command)
 
+        if slim_command.command == "albuminfo":
+            return await self._handle_albuminfo(slim_command)
+
         if slim_command.command == "contextmenu":
             return await self._handle_contextmenu(slim_command)
 
@@ -3246,10 +3249,17 @@ class BrowseLibraryHandler:
         # real-device confirmation: queue something, use "Play Next" on a
         # second item while the first is still playing, and check it
         # doesn't jump the gun and interrupt.
+        # "replace"/"replace_next" - added for the trackinfo/albuminfo
+        # long-press menus' own "Play Now (replace queue)"/"Play Next
+        # (replace queue)" rows, matching Music Assistant's own 5-option
+        # long-press menu (not a real LMS concept - these two cmd tokens
+        # are invented by this project, same as "insert" already was).
         queue_options = {
             "load": QueueOption.PLAY,
             "add": QueueOption.ADD,
             "insert": QueueOption.NEXT,
+            "replace": QueueOption.REPLACE,
+            "replace_next": QueueOption.REPLACE_NEXT,
         }
         kwargs = slim_command.kwargs
         cmd = kwargs.get("cmd")
@@ -3258,9 +3268,27 @@ class BrowseLibraryHandler:
         if queue_option is None or player_id is None:
             raise NotImplementedError
 
+        # Captured BEFORE any play_media call: ADD/NEXT/REPLACE_NEXT stage
+        # items without starting playback (queue_loader's
+        # _ensure_current_index), so if nothing was playing a single tap
+        # on a track (always cmd:"add") would otherwise be silent.
+        queue = self.mass.player_queues.get(player_id)
+        was_idle = queue is None or queue.state == PlaybackState.IDLE
+        old_len = int(queue.items) if queue is not None else 0  # a count, not a list
+
+        async def _start_if_idle():
+            if not was_idle:
+                return
+            if queue_option == QueueOption.ADD:
+                start = old_len
+            elif queue_option in (QueueOption.NEXT, QueueOption.REPLACE_NEXT) and old_len == 0:
+                start = 0
+            else:
+                return
+            await self.mass.player_queues.play_index(queue_id=player_id, index=start)
+
         if (
-            cmd == "load"
-            and (album_id := kwargs.get("album_id")) is not None
+            (album_id := kwargs.get("album_id")) is not None
             and kwargs.get("track_id") is None
             and kwargs.get("uri") is None
         ):
@@ -3299,45 +3327,73 @@ class BrowseLibraryHandler:
             # rather than one call asked to do something its own real
             # signature cannot actually express.
             #
-            # Guarded to cmd=="load" specifically (not reused for
-            # add/insert) - tracks_base_actions' own "add" action also
-            # carries album_id with no track_id (via its "addallParams"
-            # item param-set, which is never actually defined on any row
-            # - a separate, already-flagged bug), and loading the whole
-            # album for a plain "add" would be new, wrong behavior this
-            # fix isn't about.
+            # Originally guarded to cmd=="load" only - broadened to also
+            # cover add/insert (v68) so albums_base_actions' own "add"/
+            # "add-hold" actions, and this new albuminfo context menu's
+            # "Add to End of Queue"/"Play Next" rows, actually do
+            # something instead of falling through to the generic
+            # track_id/uri branch below and raising NotImplementedError
+            # (confirmed: that branch has no album_id handling at all -
+            # this was a real, separate, already-flagged gap, not new
+            # scope invented for this fix).
             album = await self.mass.music.albums.get_library_item(album_id)
             tracks = await self.mass.music.albums.tracks(album_id, "library", in_library_only=False)
-            play_index = kwargs.get("play_index")
-            idx = int(play_index) if play_index is not None else 0
             await self.mass.player_queues.play_media(
                 queue_id=player_id,
                 media=tracks,
                 option=queue_option,
             )
-            if idx:
-                await self.mass.player_queues.play_index(queue_id=player_id, index=idx)
-            # Real, confirmed pair of showBriefly popups for a load -
-            # LMS fires these as two independent pushes, not one (see
-            # push_show_briefly's and push_play_icon's own docstrings in
-            # cli.py for the full, real-source-and-device-confirmed
-            # account of both): the "song"-type "Now Playing" + track
-            # title popup (30s duration, kind="song" here - NOT the
-            # default "mixed"), and the separate, icon-only "play"
-            # popup - "text" required there too now (see its own
-            # docstring: real client source crashes without it, even
-            # though it's never actually displayed for that popup).
-            if 0 <= idx < len(tracks):
+            if queue_option in (QueueOption.PLAY, QueueOption.REPLACE):
+                # play_index is only ever sent by the pre-existing single-
+                # tap-track-in-album flow (tracks_base_actions' own
+                # playallParams, cmd="load"/PLAY only - never reached with
+                # REPLACE) - defaults to 0 for this albuminfo menu's own
+                # "Play Now"/"Play Now (replace queue)" rows, which don't
+                # send it at all, so the play_index() jump below is
+                # naturally skipped for those.
+                play_index = kwargs.get("play_index")
+                idx = int(play_index) if play_index is not None else 0
+                if idx:
+                    await self.mass.player_queues.play_index(queue_id=player_id, index=idx)
+                # Real, confirmed pair of showBriefly popups for a load -
+                # LMS fires these as two independent pushes, not one (see
+                # push_show_briefly's and push_play_icon's own docstrings
+                # in cli.py for the full, real-source-and-device-confirmed
+                # account of both): the "song"-type "Now Playing" + track
+                # title popup (30s duration, kind="song" here - NOT the
+                # default "mixed"), and the separate, icon-only "play"
+                # popup - "text" required there too now (see its own
+                # docstring: real client source crashes without it, even
+                # though it's never actually displayed for that popup).
+                # Grouped by queue_option (not cmd=="load" literally)
+                # since REPLACE starts playing immediately too, same as
+                # PLAY.
+                if 0 <= idx < len(tracks):
+                    self.provider.slimproto.cli.push_show_briefly(
+                        player_id,
+                        text=["Now Playing", tracks[idx].name],
+                        icon_id=str(album.item_id),
+                        duration_ms=30000,
+                        kind="song",
+                    )
+                    self.provider.slimproto.cli.push_play_icon(
+                        player_id,
+                        text=["Now Playing", tracks[idx].name],
+                        icon_id=str(album.item_id),
+                    )
+            elif queue_option in (QueueOption.ADD, QueueOption.NEXT, QueueOption.REPLACE_NEXT):
+                await _start_if_idle()
+                # add/insert/replace_next: same showBriefly "Adding"/"to
+                # play next..." popup the track_id/uri path below sends
+                # for its own add/insert case - built from the album
+                # itself (there's no single track to name here), and the
+                # same real, immediate queue-view push (see
+                # _push_queue_update's own docstring for why that push is
+                # needed at all).
+                await self._push_queue_update(player_id)
                 self.provider.slimproto.cli.push_show_briefly(
                     player_id,
-                    text=["Now Playing", tracks[idx].name],
-                    icon_id=str(album.item_id),
-                    duration_ms=30000,
-                    kind="song",
-                )
-                self.provider.slimproto.cli.push_play_icon(
-                    player_id,
-                    text=["Now Playing", tracks[idx].name],
+                    text=["Adding" if queue_option == QueueOption.ADD else "to play next...", album.name],
                     icon_id=str(album.item_id),
                 )
             return
@@ -3377,8 +3433,9 @@ class BrowseLibraryHandler:
             media=media,
             option=queue_option,
         )
+        await _start_if_idle()
 
-        if cmd == "load":
+        if queue_option in (QueueOption.PLAY, QueueOption.REPLACE):
             # Real, confirmed PAIR of showBriefly popups for a load -
             # LMS fires these as two independent pushes, not one (see
             # push_show_briefly's and push_play_icon's own docstrings in
@@ -3387,6 +3444,12 @@ class BrowseLibraryHandler:
             # field, and the real-device test that disproved this
             # firing only when the player was previously stopped - it
             # fires on every cmd:load, unconditionally).
+            #
+            # Grouped by queue_option (not cmd=="load" literally) since
+            # REPLACE ("Play Now (replace queue)", the trackinfo/
+            # albuminfo long-press menu's own Music-Assistant-matching
+            # wording) starts playing immediately too, same as PLAY -
+            # same popup either way.
             #
             # Only covers the track_id case here (a genuine library
             # item, with a real title/album-art icon available directly) -
@@ -3410,7 +3473,14 @@ class BrowseLibraryHandler:
                     icon_id=icon_id,
                 )
 
-        if cmd in ("add", "insert"):
+        if queue_option in (QueueOption.ADD, QueueOption.NEXT, QueueOption.REPLACE_NEXT):
+            # Grouped by queue_option (not cmd in ("add","insert")
+            # literally) since REPLACE_NEXT ("Play Next (replace
+            # queue)") doesn't start playback immediately either - same
+            # "not interrupting what's currently playing" shape as NEXT,
+            # just replacing what's queued after the current item
+            # instead of inserting ahead of it.
+            #
             # Real, event-driven push for the queue-view screen -
             # cmd="load" doesn't need this: it already changes what's
             # actually playing, which triggers aioslimproto's own real
@@ -3457,7 +3527,7 @@ class BrowseLibraryHandler:
             icon_id = str(track.album.item_id) if uri is None and track.album is not None else None
             self.provider.slimproto.cli.push_show_briefly(
                 player_id,
-                text=["Adding" if cmd == "add" else "to play next...", title],
+                text=["Adding" if queue_option == QueueOption.ADD else "to play next...", title],
                 icon_id=icon_id,
             )
 
@@ -3547,21 +3617,26 @@ class BrowseLibraryHandler:
         NotImplementedError every time).
 
         IMPORTANT - NOT verified against a real LMS trackinfo capture, same
-        caveat playlists_base_actions already flags for itself: this returns
-        just the three playback options (Play/Add/Play Next), built by
-        analogy to tracks_base_actions' own "play"/"add"/"add-hold" entries
-        (same cmd/params shape), not real LMS's actual trackinfo menu (which
-        also has non-playback rows - credits, "more from this artist",
-        genre, etc. - backed by real metadata this project doesn't fetch).
-        If a real capture ever shows a different shape for the rows
-        themselves (text, "type", "nextWindow" specifics), this is the
-        function to fix.
+        caveat playlists_base_actions already flags for itself: real LMS's
+        actual trackinfo menu also has non-playback rows (credits, "more
+        from this artist", genre, etc.) backed by real metadata this
+        project doesn't fetch - this only builds the playback options.
+
+        As of this update, those playback options deliberately DON'T match
+        real LMS at all - they match Music Assistant's own long-press menu
+        instead (same 5 options, same wording, on tracks/albums/artists -
+        artists not yet implemented here), since that's the more useful
+        reference for anyone using this against Music Assistant: Play Now
+        (keep queue)/Play Next (keep queue)/Add to the queue/Play Now
+        (replace queue)/Play Next (replace queue), mapped onto
+        playlistcontrol's own PLAY/NEXT/ADD/REPLACE/REPLACE_NEXT
+        QueueOptions (see _handle_playlistcontrol's own queue_options dict).
 
         kwargs already has the item's own track_id/uri flattened directly in
         (see the log capture above) - aioslimproto resolves itemsParams
         before calling this handler, the same as it does for browselibrary/
         menu commands. No _standalone_actions()-style baking needed here the
-        way Search All rows needed it: this is one fixed 3-row menu built
+        way Search All rows needed it: this is one fixed 5-row menu built
         fresh per request, not a template shared across many item_loop rows.
         """
         kwargs = slim_command.kwargs
@@ -3581,18 +3656,20 @@ class BrowseLibraryHandler:
                         "params": {**base_params, "cmd": cmd},
                     },
                 },
-                # "load" replaces the queue and starts playing - jump to
-                # Now Playing, same as every other "play" action in this
-                # file. "add"/"insert" don't interrupt anything currently
+                # "load"/"replace" start playing immediately - jump to Now
+                # Playing, same as every other "play" action in this file.
+                # The other three don't interrupt anything currently
                 # playing, so there's nothing to jump to - close back out
                 # to the browse list instead.
-                "nextWindow": "nowPlaying" if cmd == "load" else "parent",
+                "nextWindow": "nowPlaying" if cmd in ("load", "replace") else "parent",
             }
 
         item_loop = [
-            _row("Play Song", "load"),
-            _row("Add to End of Queue", "add"),
-            _row("Play Next", "insert"),
+            _row("Play Now (keep queue)", "load"),
+            _row("Play Next (keep queue)", "insert"),
+            _row("Add to the queue", "add"),
+            _row("Play Now (replace queue)", "replace"),
+            _row("Play Next (replace queue)", "replace_next"),
         ]
         return {
             "count": len(item_loop),
@@ -3609,6 +3686,77 @@ class BrowseLibraryHandler:
             # bug - not verified working before now, since nothing had
             # compared this against real captured data until the queue
             # context-menu work surfaced it.
+            "window": {"windowStyle": "text_list"},
+            "item_loop": item_loop,
+        }
+
+    async def _handle_albuminfo(self, slim_command):
+        """
+        Handles the "more" action's albuminfo/items command - what
+        JiveLite sends on a long-press of an album row, per
+        albums_base_actions' own "more" entry (cmd: ["albuminfo",
+        "items"]). Same class of gap _handle_trackinfo's own docstring
+        already covers for tracks: _dispatch had no "albuminfo" branch at
+        all, so it fell straight through to NotImplementedError - a
+        long-press on an album got no response, a blank menu rather than
+        an error.
+
+        IMPORTANT - NOT verified against a real LMS albuminfo capture,
+        same caveat _handle_trackinfo flags for itself: real LMS's actual
+        albuminfo menu likely has non-playback rows too (album credits,
+        "more from this artist", etc.) backed by metadata this project
+        doesn't fetch - this only builds the playback options.
+
+        As of this update, those playback options deliberately DON'T
+        match real LMS at all - they match Music Assistant's own long-
+        press menu instead (same wording _handle_trackinfo now uses - see
+        its own docstring for the full reasoning). Artists aren't
+        implemented yet (there's no artist_id handling in
+        _handle_playlistcontrol, and no artistinfo _dispatch entry) -
+        only tracks and albums so far.
+
+        kwargs already has the row's own album_id flattened in
+        (commonParams, see get_albums above) - same mechanism
+        _handle_trackinfo relies on for track_id. Routed through
+        playlistcontrol exactly like a plain tap on the album row itself
+        (albums_base_actions' "play"/"add"/"add-hold"), so these rows and
+        a plain tap share the same album_id handling in
+        _handle_playlistcontrol (see its own queue_options dict).
+        """
+        kwargs = slim_command.kwargs
+        album_id = kwargs.get("album_id")
+        uri = kwargs.get("uri")
+        base_params = {"album_id": album_id} if album_id is not None else {"uri": uri}
+
+        def _row(text, cmd):
+            return {
+                "text": text,
+                "type": "text",
+                "style": "item",
+                "actions": {
+                    "go": {
+                        "player": 0,
+                        "cmd": ["playlistcontrol"],
+                        "params": {**base_params, "cmd": cmd},
+                    },
+                },
+                "nextWindow": "nowPlaying" if cmd in ("load", "replace") else "parent",
+            }
+
+        item_loop = [
+            _row("Play Now (keep queue)", "load"),
+            _row("Play Next (keep queue)", "insert"),
+            _row("Add to the queue", "add"),
+            _row("Play Now (replace queue)", "replace"),
+            _row("Play Next (replace queue)", "replace_next"),
+        ]
+        return {
+            "count": len(item_loop),
+            "offset": 0,
+            # windowStyle: "text_list" - same real, confirmed shape
+            # _handle_trackinfo's own response uses (see its docstring
+            # for the pcap-confirmed reasoning); not re-verified
+            # separately for albuminfo specifically.
             "window": {"windowStyle": "text_list"},
             "item_loop": item_loop,
         }
