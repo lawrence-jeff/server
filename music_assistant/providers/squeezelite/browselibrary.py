@@ -1879,26 +1879,23 @@ class BrowseLibraryHandler:
         )
         await _start_if_idle()
 
+        title, icon_id = await self._popup_details(uri, track if uri is None else None)
         if queue_option in (QueueOption.PLAY, QueueOption.REPLACE):
             # A load fires two independent pushes in LMS (see push_show_briefly and
             # push_play_icon in cli.py): the "song" popup and the icon-only "play" popup,
             # on every load. REPLACE starts playing immediately too, so it gets the same.
-            # Only the track_id case is covered: a "uri" item has no readily available
-            # title/icon without another lookup (_queue_album has its own).
-            if uri is None:
-                icon_id = str(track.album.item_id) if track.album is not None else None
-                self._slimproto.cli.push_show_briefly(
-                    player_id,
-                    text=["Now Playing", track.name],
-                    icon_id=icon_id,
-                    duration_ms=30000,
-                    kind="song",
-                )
-                self._slimproto.cli.push_play_icon(
-                    player_id,
-                    text=["Now Playing", track.name],
-                    icon_id=icon_id,
-                )
+            self._slimproto.cli.push_show_briefly(
+                player_id,
+                text=["Now Playing", title],
+                icon_id=icon_id,
+                duration_ms=30000,
+                kind="song",
+            )
+            self._slimproto.cli.push_play_icon(
+                player_id,
+                text=["Now Playing", title],
+                icon_id=icon_id,
+            )
 
         if queue_option in (QueueOption.ADD, QueueOption.NEXT, QueueOption.REPLACE_NEXT):
             # REPLACE_NEXT is grouped with ADD/NEXT: it doesn't interrupt playback either,
@@ -1910,10 +1907,8 @@ class BrowseLibraryHandler:
             await self._push_queue_update(player_id)
 
             # The "mixed"/add showBriefly popup LMS sends for add/insert ("Adding" /
-            # "to play next..." with the track title and artwork). A load gets the "song"
+            # "to play next..." with the item's title and artwork). A load gets the "song"
             # popup above instead.
-            title = track.name if uri is None else media
-            icon_id = str(track.album.item_id) if uri is None and track.album is not None else None
             self._slimproto.cli.push_show_briefly(
                 player_id,
                 text=["Adding" if queue_option == QueueOption.ADD else "to play next...", title],
@@ -1921,6 +1916,21 @@ class BrowseLibraryHandler:
             )
 
         return
+
+    async def _popup_details(self, uri: str | None, track: Any) -> tuple[str, str]:
+        """
+        Return the (title, icon id) a showBriefly popup shows for the item just queued.
+
+        A library track is already resolved; any other item (radio, podcast episode,
+        audiobook, playlist track) is looked up by its uri. The icon id is never empty.
+        """
+        if uri is None:
+            return track.name, _art_ref(track)
+        try:
+            item = await self.mass.music.get_item_by_uri(uri)
+        except MusicAssistantError, ValueError:
+            return uri, _uri_ref(uri)
+        return item.name, _art_ref(item) or _uri_ref(uri)
 
     async def _queue_album(
         self,
@@ -2006,6 +2016,7 @@ class BrowseLibraryHandler:
             self._slimproto.cli.push_show_briefly(
                 player_id,
                 text=["Now Playing", artist.name],
+                icon_id=f"artist-{artist.item_id}",
                 duration_ms=30000,
                 kind="song",
             )
@@ -2017,6 +2028,7 @@ class BrowseLibraryHandler:
                     "Adding" if queue_option == QueueOption.ADD else "to play next...",
                     artist.name,
                 ],
+                icon_id=f"artist-{artist.item_id}",
             )
 
     async def _push_queue_update(self, player_id: str) -> None:
@@ -2231,11 +2243,13 @@ class BrowseLibraryHandler:
             playlist_index == current_index and queue.state == PlaybackState.PLAYING
         )
 
-        def _row(text: str, cmd: list[str], style: str | None = None) -> dict[str, Any]:
+        def _row(
+            text: str, cmd: list[str], style: str | None = None, next_window: str = "parent"
+        ) -> dict[str, Any]:
             # The same action under all four keys, so whichever gesture JiveLite resolves
             # a tap or hold to does the same thing; addAction:"go" is part of the captured
             # LMS shape.
-            action = {"cmd": cmd, "player": 0, "nextWindow": "parent"}
+            action = {"cmd": cmd, "player": 0, "nextWindow": next_window}
             row = {
                 "text": text,
                 "type": "text",
@@ -2266,6 +2280,17 @@ class BrowseLibraryHandler:
             item_loop.append(_row("Move to End", ["playlist", "moveend", str(playlist_index)]))
         if can_edit:
             item_loop.append(_row("Delete item", ["playlist", "delete", str(playlist_index)]))
+        elif playlist_index == current_index and int(queue.items) == 1:
+            # MA won't delete the track the player already owns, but with a single track
+            # JiveLite never shows the queue list (so there is no "Clear queue" row), and
+            # this menu is the only place to empty it: Delete clears the queue, as that row
+            # does (stops playback, then home).
+            item_loop.append(_row("Delete item", ["playlist", "clear"], next_window="home"))
+        if not item_loop:
+            # Nothing to act on, e.g. the playing track of a one-track queue: JiveLite
+            # shows this menu (showTrackOne) instead of the queue list, so show the track's
+            # details rather than an empty window.
+            item_loop = self._track_detail_rows(queue, playlist_index)
 
         return {
             "count": len(item_loop),
@@ -2277,6 +2302,19 @@ class BrowseLibraryHandler:
             "window": {"windowStyle": "text_list"},
             "item_loop": item_loop,
         }
+
+    def _track_detail_rows(self, queue: PlayerQueue, index: int) -> list[dict[str, Any]]:
+        """Return read-only title, artist and album rows for the queue item at index."""
+        items = self.mass.player_queues.items(queue.queue_id, limit=1, offset=index)
+        if not items:
+            return []
+        media_item = items[0].media_item
+        details = [
+            items[0].name,
+            getattr(media_item, "artist_str", "") or "",
+            getattr(getattr(media_item, "album", None), "name", "") or "",
+        ]
+        return [{"text": text, "type": "text", "style": "itemNoAction"} for text in details if text]
 
     async def _handle_playlist(self, slim_command: SlimCLICommand) -> None:
         """
@@ -2485,30 +2523,8 @@ class BrowseLibraryHandler:
             # handle_icon, never a resolved image URL: a remotely-hosted image reached
             # the device as an "/imageproxy/<url>/..." request this server doesn't serve,
             # leaving some queue rows without art.
-            # Only a numeric (library) id can use the short music/<id>/cover route. A
-            # provider-native id (a file path, a URL) would become a path with spaces the
-            # server cannot parse, and a blank icon makes JiveLite fail fetching the art,
-            # so those items are identified by their uri instead, which the icon route
-            # resolves. A resolved image URL must never reach the client.
-            album_id = getattr(album_obj, "item_id", None)
-            track_id = getattr(track, "item_id", None)
-            if album_obj is not None and str(album_id).isdigit():
-                icon_path = f"music/{album_id}/cover"
-            elif (
-                track is not None
-                and getattr(track, "media_type", None)
-                in (MediaType.RADIO, MediaType.PODCAST, MediaType.AUDIOBOOK)
-                and str(track_id).isdigit()
-            ):
-                _type_prefix = {
-                    MediaType.RADIO: "radio",
-                    MediaType.PODCAST: "podcast",
-                    MediaType.AUDIOBOOK: "audiobook",
-                }[track.media_type]
-                icon_path = f"music/{_type_prefix}-{track_id}/cover"
-            else:
-                art_uri = getattr(album_obj, "uri", None) or uri
-                icon_path = _uri_icon_path(art_uri) if art_uri else ""
+            art_ref = _art_ref(track) if track is not None else ""
+            icon_path = f"music/{art_ref}/cover" if art_ref else ""
             media_details = MediaDetails(
                 url=uri,
                 metadata={
@@ -2588,10 +2604,40 @@ _STATIC_ICON_SUFFIX_RE = re.compile(
 )
 
 
-def _uri_icon_path(uri: str) -> str:
-    """Return the icon route for an item identified by its uri (see _fetch_real_item_art)."""
-    encoded = base64.urlsafe_b64encode(uri.encode()).decode().rstrip("=")
-    return f"music/uri-{encoded}/cover"
+# icon_id prefix per media type that has library ids of its own (see _fetch_real_item_art)
+_ART_PREFIX = {
+    MediaType.RADIO: "radio",
+    MediaType.PODCAST: "podcast",
+    MediaType.AUDIOBOOK: "audiobook",
+}
+
+
+def _uri_ref(uri: str) -> str:
+    """Return the icon id for an item identified by its uri (see _fetch_real_item_art)."""
+    return "uri-" + base64.urlsafe_b64encode(uri.encode()).decode().rstrip("=")
+
+
+def _art_ref(item: Any) -> str:
+    """
+    Return the icon id the server's icon route resolves to art for a media item.
+
+    Only a numeric (library) id can use the short form: a provider-native id (a file path,
+    a URL) would become a path with spaces the server cannot parse. Everything else is
+    identified by its uri instead. The client must always get an id: a blank one makes
+    JiveLite fail fetching the artwork (both for a row and for a showBriefly popup), and a
+    resolved image URL must never reach it.
+    """
+    album = getattr(item, "album", None)
+    album_id = getattr(album, "item_id", None)
+    if album is not None and str(album_id).isdigit():
+        return str(album_id)
+    media_type = getattr(item, "media_type", None)
+    prefix = _ART_PREFIX.get(media_type) if media_type is not None else None
+    item_id = getattr(item, "item_id", None)
+    if prefix is not None and str(item_id).isdigit():
+        return f"{prefix}-{item_id}"
+    art_uri = getattr(album, "uri", None) or getattr(item, "uri", None)
+    return _uri_ref(art_uri) if art_uri else ""
 
 
 def _resolve_static_icon_path(filename: str) -> Path | None:
