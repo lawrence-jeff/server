@@ -1663,6 +1663,7 @@ class BrowseLibraryHandler:
             "contextmenu": self._handle_contextmenu,
             "playlist": self._handle_playlist,
             "status": self._handle_queue_status,
+            "button": self._handle_button,
         }
         if (handler := handlers.get(command)) is not None:
             return await handler(slim_command)
@@ -2326,6 +2327,24 @@ class BrowseLibraryHandler:
             getattr(getattr(media_item, "album", None), "name", "") or "",
         ]
         return [{"text": text, "type": "text", "style": "itemNoAction"} for text in details if text]
+
+    async def _handle_button(self, slim_command: SlimCLICommand) -> None:
+        """
+        Handle the Next button (jump_fwd) through the queue.
+
+        aioslimproto answers jump_fwd itself by playing the player's own pre-buffered next
+        item, which is stale after a queue edit made while paused (Play Next, then Next, went
+        to the item after the inserted one). Music Assistant's queue Next uses the queue.
+        Every other button is left to the built-in handler and the provider's event handling.
+        """
+        if not slim_command.args or slim_command.args[0] != "jump_fwd":
+            raise NotImplementedError
+        # Must be answered here: unhandled, jump_fwd reaches aioslimproto's _handle_button, which
+        # plays the player's own buffered next item and skips the queue (stale after a paused edit).
+        queue = self.mass.player_queues.get_active_queue(slim_command.player_id)
+        if queue is None:
+            raise NotImplementedError
+        await self.mass.player_queues.next(queue.queue_id)
 
     async def _handle_playlist(self, slim_command: SlimCLICommand) -> None:
         """
