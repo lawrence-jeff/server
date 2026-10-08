@@ -484,7 +484,6 @@ class SqueezelitePlayer(Player):
         mime_type: str | None = None,
     ) -> None:
         """Handle playback of an url on slimproto player(s)."""
-        # player.py patch v4
         # Look up the queue item to get its real audio format (same lookup as
         # start_queue_item in play_media). The quality fields are re-checked
         # shortly after playback starts, see below.
