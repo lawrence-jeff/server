@@ -52,6 +52,7 @@ Known limitations:
 """
 
 import asyncio
+import base64
 import inspect
 import logging
 import re
@@ -71,7 +72,7 @@ from aiohttp import web
 from aioslimproto.cli import menu_item_from_media_details
 from aioslimproto.models import EventType, MediaDetails, SlimEvent
 from music_assistant_models.enums import ImageType, MediaType, PlaybackState, QueueOption
-from music_assistant_models.errors import MediaNotFoundError
+from music_assistant_models.errors import MediaNotFoundError, MusicAssistantError
 
 from music_assistant.controllers.player_queues.helpers import committed_index
 from music_assistant.helpers import datetime as mass_datetime
@@ -2484,30 +2485,30 @@ class BrowseLibraryHandler:
             # handle_icon, never a resolved image URL: a remotely-hosted image reached
             # the device as an "/imageproxy/<url>/..." request this server doesn't serve,
             # leaving some queue rows without art.
-            if album_obj is not None and getattr(album_obj, "item_id", None) is not None:
-                icon_path = f"music/{album_obj.item_id}/cover"
+            # Only a numeric (library) id can use the short music/<id>/cover route. A
+            # provider-native id (a file path, a URL) would become a path with spaces the
+            # server cannot parse, and a blank icon makes JiveLite fail fetching the art,
+            # so those items are identified by their uri instead, which the icon route
+            # resolves. A resolved image URL must never reach the client.
+            album_id = getattr(album_obj, "item_id", None)
+            track_id = getattr(track, "item_id", None)
+            if album_obj is not None and str(album_id).isdigit():
+                icon_path = f"music/{album_id}/cover"
             elif (
                 track is not None
                 and getattr(track, "media_type", None)
-                in (
-                    MediaType.RADIO,
-                    MediaType.PODCAST,
-                    MediaType.AUDIOBOOK,
-                )
-                and getattr(track, "item_id", None) is not None
+                in (MediaType.RADIO, MediaType.PODCAST, MediaType.AUDIOBOOK)
+                and str(track_id).isdigit()
             ):
                 _type_prefix = {
                     MediaType.RADIO: "radio",
                     MediaType.PODCAST: "podcast",
                     MediaType.AUDIOBOOK: "audiobook",
                 }[track.media_type]
-                icon_path = f"music/{_type_prefix}-{track.item_id}/cover"
+                icon_path = f"music/{_type_prefix}-{track_id}/cover"
             else:
-                # No album and not a radio/podcast/audiobook: there is no local route for
-                # a bare track id (_fetch_real_item_art treats an unprefixed numeric id as
-                # an album), and a resolved URL must never reach the client, so the icon
-                # is left blank.
-                icon_path = ""
+                art_uri = getattr(album_obj, "uri", None) or uri
+                icon_path = _uri_icon_path(art_uri) if art_uri else ""
             media_details = MediaDetails(
                 url=uri,
                 metadata={
@@ -2585,6 +2586,12 @@ STATIC_DIR = (Path(__file__).parent / "static").resolve()
 _STATIC_ICON_SUFFIX_RE = re.compile(
     r"^(?P<base>.+?)_(?P<w>\d+)x(?P<h>\d+)_(?P<mode>[a-zA-Z])(?P<ext>\.[a-zA-Z0-9]+)?$"
 )
+
+
+def _uri_icon_path(uri: str) -> str:
+    """Return the icon route for an item identified by its uri (see _fetch_real_item_art)."""
+    encoded = base64.urlsafe_b64encode(uri.encode()).decode().rstrip("=")
+    return f"music/uri-{encoded}/cover"
 
 
 def _resolve_static_icon_path(filename: str) -> Path | None:
@@ -2720,29 +2727,40 @@ async def _fetch_real_item_art(mass: MusicAssistant, icon_id: str, size: int) ->
     None is returned if anything fails (unknown id, item not found, no image, fetch error)
     and means "fall back to the placeholder"; this never raises.
 
-    icon_id is a bare item_id (an Album, e.g. "42") or a namespaced "<type>-<item_id>"
-    for artist, playlist, radio, podcast or audiobook (e.g. "artist-7"). They are
-    namespaced because each type has its own id space in MA, so an unqualified numeric
-    id would be ambiguous. get_library_item does int(item_id), which also rejects a
+    icon_id is a bare item_id (an Album, e.g. "42"), a namespaced "<type>-<item_id>" for
+    artist, playlist, radio, podcast or audiobook (e.g. "artist-7"), or "uri-<urlsafe
+    base64 of the item's uri>" for items without a library id, such as podcast episodes.
+    They are namespaced because each type has its own id space in MA, so an unqualified
+    numeric id would be ambiguous. get_library_item does int(item_id), which also rejects a
     non-numeric id such as a chrome-icon path that reached here via handle_unmatched.
     """
-    controller: MediaControllerBase[Any]
-    if icon_id.startswith("artist-"):
-        controller, real_id = mass.music.artists, icon_id[len("artist-") :]
-    elif icon_id.startswith("playlist-"):
-        controller, real_id = mass.music.playlists, icon_id[len("playlist-") :]
-    elif icon_id.startswith("radio-"):
-        controller, real_id = mass.music.radio, icon_id[len("radio-") :]
-    elif icon_id.startswith("podcast-"):
-        controller, real_id = mass.music.podcasts, icon_id[len("podcast-") :]
-    elif icon_id.startswith("audiobook-"):
-        controller, real_id = mass.music.audiobooks, icon_id[len("audiobook-") :]
+    item: Any
+    if icon_id.startswith("uri-"):
+        # An item identified by its uri (podcast episodes, items without a library id).
+        encoded = icon_id[len("uri-") :]
+        try:
+            uri = base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)).decode()
+            item = await mass.music.get_item_by_uri(uri)
+        except MusicAssistantError, ValueError:
+            return None
     else:
-        controller, real_id = mass.music.albums, icon_id
-    try:
-        item = await controller.get_library_item(real_id)
-    except MediaNotFoundError, ValueError:
-        return None
+        controller: MediaControllerBase[Any]
+        if icon_id.startswith("artist-"):
+            controller, real_id = mass.music.artists, icon_id[len("artist-") :]
+        elif icon_id.startswith("playlist-"):
+            controller, real_id = mass.music.playlists, icon_id[len("playlist-") :]
+        elif icon_id.startswith("radio-"):
+            controller, real_id = mass.music.radio, icon_id[len("radio-") :]
+        elif icon_id.startswith("podcast-"):
+            controller, real_id = mass.music.podcasts, icon_id[len("podcast-") :]
+        elif icon_id.startswith("audiobook-"):
+            controller, real_id = mass.music.audiobooks, icon_id[len("audiobook-") :]
+        else:
+            controller, real_id = mass.music.albums, icon_id
+        try:
+            item = await controller.get_library_item(real_id)
+        except MediaNotFoundError, ValueError:
+            return None
     # Rank the item's own images (_pick_best_image) instead of MA's "first match wins"
     # get_image_url_for_item, which put local filesystem images first and gave grainy
     # covers. Fall back to get_image_url_for_item's own chain (Track->album,
