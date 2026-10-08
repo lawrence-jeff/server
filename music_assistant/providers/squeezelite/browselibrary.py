@@ -7,8 +7,8 @@ Commands handled (anything else raises NotImplementedError, so aioslimproto's bu
 take over):
   - menu: the home menu - a Now Playing shortcut and a "My Music" node (Favorites, Artists,
     Albums, Tracks, Playlists, Audiobooks, Podcasts, Radio, Search). The order follows MA's
-    own root UI, not LMS's menu structure. The player's presets are listed first in
-    Favorites.
+    own root UI, not LMS's menu structure. The player's presets (aioslimproto's own menu
+    items) are listed first in My Music.
   - browselibrary: the listings behind each node, from the MediaControllerBase-derived
     controllers (self.mass.music.artists/albums/tracks/playlists/radio/podcasts/
     audiobooks), plus search (a category menu, or "Search All") and favorites
@@ -80,7 +80,6 @@ from music_assistant.helpers import datetime as mass_datetime
 if TYPE_CHECKING:
     from aioslimproto import SlimServer
     from aioslimproto.cli import SlimCLICommand
-    from aioslimproto.client import SlimClient
     from music_assistant_models.player_queue import PlayerQueue
 
     from music_assistant.controllers.music.media.base import MediaControllerBase
@@ -1347,15 +1346,14 @@ def _search_category_menu(search: str) -> dict[str, Any]:
     }
 
 
-def _favorites_category_menu(presets: list[dict[str, Any]]) -> dict[str, Any]:
+def _favorites_category_menu() -> dict[str, Any]:
     """
-    Return the favorites menu: the player's presets, then one entry per category.
+    Return the favorites menu: All Favorites, then one entry per type.
 
-    Presets come first (they are the player's own favorites), then All Favorites and one
-    entry per type, mirroring _search_category_menu with favorite_only threaded through
-    instead of search and the same dispatch modes as normal browsing. Category rows reuse
-    the My Music tile icons so they line up with the presets' artwork. No per-category
-    count is shown, though library_count(favorite_only=True) would support one.
+    Mirrors _search_category_menu with favorite_only threaded through instead of search and
+    the same dispatch modes as normal browsing. Category rows reuse the My Music tile
+    icons. No per-category count is shown, though library_count(favorite_only=True) would
+    support one. The player's presets are not listed here: they are items of My Music.
     """
     categories = [
         ("All Favorites", "favorites_all", "favorites"),
@@ -1368,21 +1366,18 @@ def _favorites_category_menu(presets: list[dict[str, Any]]) -> dict[str, Any]:
         ("Radio", "radio", "radiolocal"),
     ]
     item_loop = [
-        *presets,
-        *(
-            {
-                "text": label,
-                "type": "playlist",
-                "icon": f"html/images/{icon}.png",
-                "actions": {
-                    "go": {
-                        "cmd": ["browselibrary", "items"],
-                        "params": {"menu": 1, "mode": submode, "favorite_only": 1},
-                    }
-                },
-            }
-            for label, submode, icon in categories
-        ),
+        {
+            "text": label,
+            "type": "playlist",
+            "icon": f"html/images/{icon}.png",
+            "actions": {
+                "go": {
+                    "cmd": ["browselibrary", "items"],
+                    "params": {"menu": 1, "mode": submode, "favorite_only": 1},
+                }
+            },
+        }
+        for label, submode, icon in categories
     ]
     return {
         "count": len(item_loop),
@@ -1402,7 +1397,7 @@ MY_MUSIC_NODE = [
         "text": "Artists",
         "homeMenuText": "Browse Artists",
         "icon": "html/images/AllArtists.png",
-        "weight": 10,
+        "weight": 45,
         "actions": {
             "go": {"cmd": ["browselibrary", "items"], "params": {"menu": 1, "mode": "artists"}}
         },
@@ -1413,7 +1408,7 @@ MY_MUSIC_NODE = [
         "text": "Albums",
         "homeMenuText": "Browse Albums",
         "icon": "html/images/Albums.png",
-        "weight": 20,
+        "weight": 50,
         "actions": {
             "go": {"cmd": ["browselibrary", "items"], "params": {"menu": 1, "mode": "albums"}}
         },
@@ -1426,7 +1421,7 @@ MY_MUSIC_NODE = [
         "text": "Tracks",
         "homeMenuText": "Browse Tracks",
         "icon": "html/images/Albums.png",
-        "weight": 30,
+        "weight": 55,
         "actions": {
             "go": {"cmd": ["browselibrary", "items"], "params": {"menu": 1, "mode": "tracks"}}
         },
@@ -1438,7 +1433,7 @@ MY_MUSIC_NODE = [
         "text": "Playlists",
         "homeMenuText": "Playlists",
         "icon": "html/images/Playlists.png",
-        "weight": 40,
+        "weight": 60,
         "actions": {
             "go": {"cmd": ["browselibrary", "items"], "params": {"menu": 1, "mode": "playlists"}}
         },
@@ -1450,7 +1445,7 @@ MY_MUSIC_NODE = [
         "text": "Audiobooks",
         "homeMenuText": "Audiobooks",
         "icon": "html/images/AudioBooks.png",
-        "weight": 50,
+        "weight": 65,
         "actions": {
             "go": {"cmd": ["browselibrary", "items"], "params": {"menu": 1, "mode": "audiobooks"}}
         },
@@ -1462,7 +1457,7 @@ MY_MUSIC_NODE = [
         "text": "Podcasts",
         "homeMenuText": "Podcasts",
         "icon": "html/images/podcasts.png",
-        "weight": 60,
+        "weight": 70,
         "actions": {
             "go": {"cmd": ["browselibrary", "items"], "params": {"menu": 1, "mode": "podcasts"}}
         },
@@ -1475,7 +1470,7 @@ MY_MUSIC_NODE = [
         "text": "Radio",
         "homeMenuText": "Radio",
         "icon": "html/images/radiolocal.png",
-        "weight": 70,
+        "weight": 75,
         "actions": {
             "go": {"cmd": ["browselibrary", "items"], "params": {"menu": 1, "mode": "radio"}}
         },
@@ -1499,16 +1494,16 @@ MY_MUSIC_NODE = [
         },
     },
     {
-        # Weight 5 puts Favorites ahead of everything else; not checked against where
-        # real LMS places it. The icon is the plain unsized name like its siblings:
-        # _resolve_static_icon_path strips the requested size suffix and looks for
-        # favorites_225x225_m.png, then favorites.png, in static/.
+        # Weights run from 40 to 80: after the presets (aioslimproto's own items, weight 35)
+        # and before JiveLite's own Switch Library entry (about 100). The icon is the plain
+        # unsized name like its siblings: _resolve_static_icon_path strips the requested
+        # size suffix and looks for favorites_225x225_m.png, then favorites.png, in static/.
         "node": "myMusic",
         "id": "myMusicFavorites",
         "text": "Favorites",
         "homeMenuText": "Favorites",
         "icon": "html/images/favorites.png",
-        "weight": 5,
+        "weight": 40,
         "actions": {
             "go": {"cmd": ["browselibrary", "items"], "params": {"menu": 1, "mode": "favorites"}}
         },
@@ -1517,67 +1512,6 @@ MY_MUSIC_NODE = [
     # (TuneIn etc.), which map to separate MA subsystems. A real LMS home menu has ~50
     # items; this stays limited to what is implemented.
 ]
-
-
-def _build_preset_rows(player: SlimClient | None) -> list[dict[str, Any]]:
-    """
-    Return the rows for the player's presets, listed at the top of Favorites.
-
-    Tapping a row plays the preset the same way its hardware button does (the button
-    event is handled in player.py). The other actions serve the remote/keyboard keys.
-    """
-    rows = []
-    for index, preset in enumerate(getattr(player, "presets", []) or []):
-        icon_id = (
-            preset.icon.removeprefix("music/").removesuffix("/cover")
-            if preset.icon.startswith("music/")
-            else ""
-        )
-        uri_action = {"player": 0, "cmd": ["playlistcontrol"]}
-        rows.append(
-            {
-                "text": preset.text,
-                "type": "audio",
-                "style": "itemplay",
-                "icon": preset.icon,
-                **({"icon-id": icon_id} if icon_id else {}),
-                "nextWindow": "nowPlaying",
-                "actions": {
-                    "go": {
-                        "cmd": ["button", f"preset_{index + 1}.single"],
-                        "params": {},
-                        "player": 0,
-                        "nextWindow": "nowPlaying",
-                    },
-                    "play": {
-                        **uri_action,
-                        "params": {"uri": preset.uri, "cmd": "load"},
-                        "nextWindow": "nowPlaying",
-                    },
-                    "play-hold": {
-                        **uri_action,
-                        "params": {"uri": preset.uri, "cmd": "load"},
-                        "nextWindow": "nowPlaying",
-                    },
-                    "add": {
-                        **uri_action,
-                        "params": {"uri": preset.uri, "cmd": "add"},
-                        "nextWindow": "refresh",
-                    },
-                    "more": {
-                        **uri_action,
-                        "params": {"uri": preset.uri, "cmd": "add"},
-                        "nextWindow": "refresh",
-                    },
-                    "add-hold": {
-                        **uri_action,
-                        "params": {"uri": preset.uri, "cmd": "insert"},
-                        "nextWindow": "refresh",
-                    },
-                },
-            }
-        )
-    return rows
 
 
 # Home-menu shortcut to Now Playing. JiveLite's NowPlayingApplet adds an item with this same
@@ -1653,7 +1587,13 @@ class BrowseLibraryHandler:
             player = self._slimproto.get_player(slim_command.player_id)
             if player is None:
                 raise NotImplementedError  # unknown player - let the built-in handle/reject it
-            return get_menu()  # no real data involved - stays sync, just not awaited
+            menu = get_menu()
+            # The presets are aioslimproto's own menu items (node myMusic, weight 35, so
+            # they list ahead of ours); its menu handler is called, not changed.
+            presets = await self._slimproto.cli._handle_menu(slim_command.player_id)
+            menu["item_loop"] = [*menu["item_loop"], *presets["item_loop"]]
+            menu["count"] += len(presets["item_loop"])
+            return menu
 
         handlers = {
             "playlistcontrol": self._handle_playlistcontrol,
@@ -1705,9 +1645,7 @@ class BrowseLibraryHandler:
         if mode == "favorites":
             # The Favorites home item: a category menu like "search" above; see
             # _favorites_category_menu().
-            return _favorites_category_menu(
-                _build_preset_rows(self._slimproto.get_player(slim_command.player_id))
-            )
+            return _favorites_category_menu()
         if mode == "favorites_all":
             return await get_favorites_all(self.mass, kwargs, index, quantity)
         if mode == "artists":
