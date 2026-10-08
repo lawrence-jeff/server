@@ -2238,6 +2238,17 @@ class BrowseLibraryHandler:
         queue = self.mass.player_queues.get_active_queue(player_id)
         if queue is None:
             raise NotImplementedError
+        if not 0 <= playlist_index < int(queue.items):
+            # No such row, e.g. the track-info shortcut with an empty queue: there is
+            # nothing to play, move or delete, and an empty window would look broken.
+            return {
+                "count": 1,
+                "offset": 0,
+                "window": {"windowStyle": "text_list"},
+                "item_loop": [
+                    {"text": "Nothing in the queue", "type": "text", "style": "itemNoAction"}
+                ],
+            }
         current_index = queue.current_index or 0
         is_current_and_playing = (
             playlist_index == current_index and queue.state == PlaybackState.PLAYING
