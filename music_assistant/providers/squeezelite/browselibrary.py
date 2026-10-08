@@ -1505,8 +1505,26 @@ def _build_preset_items(player):
     return items
 
 
+# Home-menu shortcut to Now Playing. JiveLite's NowPlayingApplet adds an item with this same
+# id itself, but only for skins that set NOWPLAYING_MENU (the UE's does, piCorePlayer's
+# doesn't). Menu items are keyed by id, so a client that already has one replaces it
+# rather than showing a duplicate. jiveblankcommand is the server-side no-op; the
+# item-level nextWindow does the navigation (the client only honors it there for home
+# menu items; on the action alone it opens a blank browse window instead).
+NOW_PLAYING_ITEM = {
+    "node": "home",
+    "id": "appletNowPlaying",
+    "text": "Now Playing",
+    "weight": 1,
+    "nextWindow": "nowPlaying",
+    "actions": {
+        "go": {"cmd": ["jiveblankcommand"], "player": 0, "nextWindow": "nowPlaying"},
+    },
+}
+
+
 def get_menu(player, index=0, quantity=100):
-    item_loop = list(MY_MUSIC_NODE) + _build_preset_items(player)
+    item_loop = [NOW_PLAYING_ITEM, *MY_MUSIC_NODE, *_build_preset_items(player)]
     window, total, offset = _paginate(item_loop, index, quantity)
     return {"item_loop": window, "offset": offset, "count": total}
 
