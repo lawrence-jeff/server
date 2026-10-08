@@ -1,6 +1,7 @@
 """
-BrowseLibraryHandler - the JiveLite integration's command handler for browsing and
-queueing Music Assistant's library from a Squeezebox-style client.
+JiveLite command handler for browsing and queueing Music Assistant's library.
+
+Lets a Squeezebox-style client browse and queue from the library.
 
 Commands handled (anything else raises NotImplementedError, so aioslimproto's built-ins
 take over):
@@ -176,9 +177,10 @@ ARTIST_LIST_BASE_ACTIONS = {
 
 def albums_base_actions(kwargs):
     """
-    Sparse on purpose for the no-artist_id case - confirmed directly
-    against a real LMS response that role_id/menu_roles are genuinely
-    absent there, not something to "correct".
+    Return base.actions for an albums item_loop.
+
+    Sparse on purpose for the no-artist_id case: a real LMS response has no
+    role_id/menu_roles there, so they are not "corrected" in.
     """
     ctx = _context(kwargs)
     actions = {
@@ -226,9 +228,10 @@ def albums_base_actions(kwargs):
 
 def playlists_base_actions(kwargs):
     """
-    base.actions for a playlists item_loop, built by analogy to albums_base_actions.
-    Not verified against a real LMS capture; if real LMS sends something different,
-    this is the function to fix.
+    Return base.actions for a playlists item_loop.
+
+    Built by analogy to albums_base_actions. Not verified against a real LMS capture;
+    if real LMS sends something different, this is the function to fix.
     """
     ctx = _context(kwargs)
     actions = {
@@ -275,6 +278,7 @@ def playlists_base_actions(kwargs):
 
 
 def tracks_base_actions(kwargs, index=0, quantity=None):
+    """Return base.actions for a tracks item_loop."""
     ctx = _context(kwargs)
     common = {**ctx, "sort": "albumtrack"}
     # The "load whole album starting at play_index" go action (playallParams) needs an
@@ -420,14 +424,15 @@ async def get_artists(mass, index=0, quantity=None, search=None, favorite_only=F
 async def get_all_tracks(
     mass, kwargs, index=0, quantity=None, search=None, favorite_only=False, player_id=None
 ):
-    """
-    Real MA data: TracksController.library_items()/library_count() - the flat,
-    root-level track browse, matching MA's web UI taxonomy.
+    r"""
+    Return the flat, root-level track browse (MA's web UI taxonomy).
+
+    Real MA data: TracksController.library_items()/library_count().
 
     Rows use track_id (these are library tracks, unlike playlist tracks/podcast
     episodes) and the album's bare-numeric icon_id, as get_albums() does: the album is
     the canonical art source for a track (Track.image prefers it), and tracks with no
-    album fall through to the placeholder. Row text is "Title\\nArtist" (Track.artist_str),
+    album fall through to the placeholder. Row text is "Title\nArtist" (Track.artist_str),
     the documented two-line text convention Albums also uses.
 
     player_id is unused: a single tap always adds to the queue (see
@@ -487,14 +492,16 @@ async def get_all_tracks(
 async def get_albums(
     mass, artist_id, kwargs, index=0, quantity=None, search=None, favorite_only=False
 ):
-    """
+    r"""
+    Return albums, optionally filtered to one artist.
+
     Real MA data. With artist_id: ArtistsController.albums(artist_id, "library"), which
-    returns the full list, so it is paginated here. Without: AlbumsController.library_items()/
-    library_count(), which paginate server-side.
+    returns the full list, so it is paginated here. Without:
+    AlbumsController.library_items()/library_count(), which paginate server-side.
 
     The all-albums case also gets what the artist-filtered one doesn't, since a flat,
     mixed-artist list needs to show whose album is whose: two-line text "Album
-    Title\\nArtist Name" (album.artist_str), a "textkey" (first letter, for the device's
+    Title\nArtist Name" (album.artist_str), a "textkey" (first letter, for the device's
     alphabet scroll bar) and "presetParams" so albums can be favorited from here.
     """
     if artist_id is not None:
@@ -601,7 +608,7 @@ async def get_tracks(mass, album_id, kwargs, index=0, quantity=None, player_id=N
 
 async def get_track_play_control_menu(mass, album_id, kwargs, play_index):
     """
-    The "playControl" menu for a track inside a multi-track album.
+    Return the "playControl" menu for a track inside a multi-track album.
 
     Rows follow Music Assistant's wording: Play Now/Play Next/Add to the queue for the
     tapped track, then "Play All from here (keep queue)", which loads the whole album
@@ -680,8 +687,9 @@ async def get_track_play_control_menu(mass, album_id, kwargs, play_index):
 
 def get_track_play_control_menu_flat(common_params):
     """
-    Menu for a track with no natural multi-item collection to load as a whole (reached
-    via "playControl", e.g. a single-track album). Also used for tracks with no
+    Return the menu for a track with no natural multi-item collection.
+
+    Reached via "playControl", e.g. for a single-track album. Also used for tracks with no
     collection at all: root Tracks, playlist tracks and podcast episodes.
 
     Rows use Music Assistant's 5-option long-press wording (Play Now/Play Next/Add to the
@@ -723,9 +731,10 @@ def get_track_play_control_menu_flat(common_params):
 
 async def get_playlists(mass, kwargs, index=0, quantity=None, search=None, favorite_only=False):
     """
+    Return the flat "All Playlists" list.
+
     Real MA data: PlaylistController.library_items()/library_count(), the generic
-    MediaControllerBase pattern as in get_artists/get_albums. Always the flat "All
-    Playlists" list.
+    MediaControllerBase pattern as in get_artists/get_albums.
 
     icon_id is "playlist-<item_id>" (see _fetch_real_item_art).
     """
@@ -771,6 +780,8 @@ async def get_playlists(mass, kwargs, index=0, quantity=None, search=None, favor
 
 async def get_playlist_tracks(mass, playlist_id, kwargs, index=0, quantity=None, player_id=None):
     """
+    Return a playlist's tracks.
+
     Real MA data: PlaylistController.tracks(playlist_id, "library"), which differs from
     AlbumsController.tracks() in two ways:
 
@@ -924,6 +935,8 @@ async def get_audiobooks(mass, kwargs, index=0, quantity=None, search=None, favo
 
 async def get_podcasts(mass, kwargs, index=0, quantity=None, search=None, favorite_only=False):
     """
+    Return the flat podcasts list.
+
     Real MA data: PodcastsController.library_items()/library_count(). library_items() is
     overridden (adding favorite/search/genre/provider filtering) but behaves like the
     base class for the plain call used here.
@@ -971,6 +984,8 @@ async def get_podcasts(mass, kwargs, index=0, quantity=None, search=None, favori
 
 async def get_podcast_episodes(mass, podcast_id, kwargs, index=0, quantity=None, player_id=None):
     """
+    Return a podcast's episodes.
+
     Real MA data: PodcastsController.episodes(podcast_id, "library"). Like
     PlaylistController.tracks() it is an async generator (episodes are fetched from the
     provider, not stored), so it is consumed into a list before paginating, with the
@@ -1026,8 +1041,9 @@ async def get_podcast_episodes(mass, podcast_id, kwargs, index=0, quantity=None,
 
 def _standalone_actions(base_actions, item):
     """
-    Build a self-contained per-item actions dict from a shared base-level template by
-    baking the item's own data into each action's params.
+    Build a self-contained per-item actions dict from a base-level template.
+
+    Bakes the item's own data into each action's params.
 
     itemsParams only resolves in a response-level "base": duplicated onto an item's own
     "actions" it does not, and a selected search row fired playlistcontrol without its
@@ -1046,8 +1062,10 @@ def _standalone_actions(base_actions, item):
 
 async def get_search_all(mass, search, kwargs, index=0, quantity=None, player_id=None):
     """
-    Combined search across all seven types: queries each type's get_X() in parallel and
-    concatenates their item_loop rows, reusing each type's row-building.
+    Search all seven types at once.
+
+    Queries each type's get_X() in parallel and concatenates their item_loop rows,
+    reusing each type's row-building.
 
     Each type is capped at 15 rows (105 combined) regardless of the requested
     index/quantity, and pagination through the combined set happens locally with
@@ -1101,8 +1119,10 @@ async def get_search_all(mass, search, kwargs, index=0, quantity=None, player_id
 
 async def get_favorites_all(mass, kwargs, index=0, quantity=None):
     """
-    Combined view across all seven favorited types, in get_search_all()'s fixed order
-    (artists, albums, tracks, playlists, audiobooks, podcasts, radio).
+    Return the combined view across all seven favorited types.
+
+    The order follows get_search_all() (artists, albums, tracks, playlists, audiobooks,
+    podcasts, radio).
 
     Unlike search, this paginates over the whole combined set instead of capping per
     type, since favorites are a curated set that can be large. library_count(
@@ -1200,9 +1220,11 @@ async def get_favorites_all(mass, kwargs, index=0, quantity=None):
 
 def _search_category_menu(search):
     """
-    The category menu shown after typing a search term (Search All, then one entry per
-    type), each drilling into that type's browse function filtered by the search, as in
-    LMS. "Search All" is first since wanting everything is the common case.
+    Return the category menu shown after typing a search term.
+
+    Entries are Search All, then one per type, each drilling into that type's browse
+    function filtered by the search, as in LMS. "Search All" is first since wanting
+    everything is the common case.
 
     No per-category match count is shown: library_count() has no search= param, so
     counting would need an extra fetch per type. A category with no matches just shows
@@ -1241,10 +1263,11 @@ def _search_category_menu(search):
 
 def _favorites_category_menu():
     """
-    Mirrors _search_category_menu (All Favorites first, then one entry per type) with
-    favorite_only threaded through instead of search, using the same dispatch modes as
-    normal browsing. No per-category count is shown, though
-    library_count(favorite_only=True) would support one.
+    Return the favorites category menu, mirroring _search_category_menu.
+
+    All Favorites comes first, then one entry per type, with favorite_only threaded
+    through instead of search and the same dispatch modes as normal browsing. No
+    per-category count is shown, though library_count(favorite_only=True) would support one.
     """
     categories = [
         ("All Favorites", "favorites_all"),
@@ -1406,11 +1429,11 @@ MY_MUSIC_NODE = [
 
 def _build_preset_items(player):
     """
-    Replicates aioslimproto's own built-in preset-menu logic exactly
-    (see its _handle_menu), since taking over 'menu' ourselves to add the
-    My Music node means the built-in preset handling is bypassed entirely
-    unless we redo it ourselves too - not calling into aioslimproto's
-    private internals, just matching its own already-verified shape.
+    Return the home-menu items for the player's presets.
+
+    Replicates aioslimproto's built-in preset-menu logic (see its _handle_menu): taking
+    over 'menu' to add the My Music node bypasses the built-in preset handling, so it is
+    redone here by matching its shape, without calling its private internals.
     """
     items = []
     for index, preset in enumerate(getattr(player, "presets", []) or []):
@@ -1493,6 +1516,7 @@ NOW_PLAYING_ITEM = {
 
 
 def get_menu(player, index=0, quantity=100):
+    """Return the home menu: Now Playing, My Music and the player's presets."""
     item_loop = [NOW_PLAYING_ITEM, *MY_MUSIC_NODE, *_build_preset_items(player)]
     window, total, offset = _paginate(item_loop, index, quantity)
     return {"item_loop": window, "offset": offset, "count": total}
@@ -1500,9 +1524,11 @@ def get_menu(player, index=0, quantity=100):
 
 class BrowseLibraryHandler:
     """
-    cli_command_handler for SlimServer: handles 'browselibrary', 'menu' and the commands
-    dispatched below, raising NotImplementedError for everything else so it falls
-    through to aioslimproto's built-ins (status, serverstatus, etc.).
+    Handle the cli_command_handler commands for SlimServer.
+
+    Handles 'browselibrary', 'menu' and the commands dispatched below, raising
+    NotImplementedError for everything else so it falls through to aioslimproto's
+    built-ins (status, serverstatus, etc.).
 
     Takes the whole provider, not just mass: 'menu' needs provider.slimproto.get_player()
     for presets, and provider.slimproto doesn't exist yet when this handler is
@@ -1511,10 +1537,12 @@ class BrowseLibraryHandler:
     """
 
     def __init__(self, provider):
+        """Initialize the handler."""
         self.provider = provider
         self.mass = provider.mass
 
     async def __call__(self, slim_command):
+        """Dispatch a slim command to its handler."""
         # Async because the listings make awaited mass.music.* calls; aioslimproto's
         # dispatch handles an awaitable result.
         try:
@@ -1686,8 +1714,9 @@ class BrowseLibraryHandler:
 
     async def _handle_playlistcontrol(self, slim_command):
         """
-        Handle playlistcontrol, which JiveLite sends for play/add/insert on a browse item
-        (the "go"/"play"/"add"/"add-hold" actions in the base action templates above).
+        Handle playlistcontrol, which JiveLite sends for play/add/insert on a browse item.
+
+        Sent by the "go"/"play"/"add"/"add-hold" actions in the base action templates above.
 
         cmd maps onto a QueueOption (see queue_options): load -> PLAY, add -> ADD,
         insert -> NEXT, replace -> REPLACE, replace_next -> REPLACE_NEXT. The item is
@@ -1901,9 +1930,10 @@ class BrowseLibraryHandler:
 
     async def _push_queue_update(self, player_id):
         """
-        Push an immediate queue-view update to any subscribed screen. Used after every
-        queue-mutating action (add/insert, jump/delete/move/clear) so the screen doesn't
-        wait for aioslimproto's ~60s periodic replay.
+        Push an immediate queue-view update to any subscribed screen.
+
+        Used after every queue-mutating action (add/insert, jump/delete/move/clear) so the
+        screen doesn't wait for aioslimproto's ~60s periodic replay.
 
         It reuses aioslimproto's _on_player_event: that finds the CometD client for this
         player and, if the queue view has a stored playerstatus subscription (registered
@@ -1924,10 +1954,11 @@ class BrowseLibraryHandler:
 
     async def _handle_trackinfo(self, slim_command):
         """
-        Handle the "more" action's trackinfo/items command, what JiveLite sends on a
-        long-press of a track row (tracks_base_actions' "more" entry). Not verified
-        against a real LMS capture; real LMS's menu also has non-playback rows (credits,
-        more from this artist, genre) backed by metadata this project doesn't fetch.
+        Handle the "more" action's trackinfo/items command (long-press on a track row).
+
+        JiveLite sends it from tracks_base_actions' "more" entry. Not verified against a real
+        LMS capture; real LMS's menu also has non-playback rows (credits, more from this
+        artist, genre) backed by metadata this project doesn't fetch.
 
         The rows use Music Assistant's long-press wording and options: Play Now (keep
         queue)/Play Next (keep queue)/Add to the queue/Play Now (replace queue)/Play Next
@@ -1979,10 +2010,11 @@ class BrowseLibraryHandler:
 
     async def _handle_albuminfo(self, slim_command):
         """
-        Handle the "more" action's albuminfo/items command, what JiveLite sends on a
-        long-press of an album row (albums_base_actions' "more" entry). Not verified
-        against a real LMS capture; real LMS likely adds non-playback rows (credits, more
-        from this artist) that this project doesn't fetch.
+        Handle the "more" action's albuminfo/items command (long-press on an album row).
+
+        JiveLite sends it from albums_base_actions' "more" entry. Not verified against a real
+        LMS capture; real LMS likely adds non-playback rows (credits, more from this artist)
+        that this project doesn't fetch.
 
         The rows use Music Assistant's long-press wording and options rather than LMS's
         (see _handle_trackinfo); artists get the same menu from _handle_artistinfo.
@@ -2028,10 +2060,10 @@ class BrowseLibraryHandler:
 
     async def _handle_artistinfo(self, slim_command):
         """
-        Handles the "more" action's artistinfo/items command - what JiveLite
-        sends on a long-press of an artist row. Same five Music Assistant
-        long-press options as tracks and albums, applied to all of the
-        artist's library tracks via playlistcontrol with the row's artist_id.
+        Handle the "more" action's artistinfo/items command (long-press on an artist row).
+
+        Offers the same five Music Assistant long-press options as tracks and albums, applied
+        to all of the artist's library tracks via playlistcontrol with the row's artist_id.
         """
         artist_id = slim_command.kwargs.get("artist_id")
         if artist_id is None:
@@ -2068,10 +2100,11 @@ class BrowseLibraryHandler:
 
     async def _handle_contextmenu(self, slim_command):
         """
-        Handle the "more" action's contextmenu command, which a long-press on a QUEUE row
-        sends (library rows send trackinfo instead). aioslimproto's built-in _handle_status
-        already sets base.actions.more to cmd ["contextmenu"] with params {"context":
-        "playlist", ...} for the queue view, and the pressed row's playlist_index (added by
+        Handle the "more" action's contextmenu command (long-press on a queue row).
+
+        Library rows send trackinfo instead. aioslimproto's built-in _handle_status already
+        sets base.actions.more to cmd ["contextmenu"] with params {"context": "playlist", ...}
+        for the queue view, and the pressed row's playlist_index (added by
         _build_queue_item_loop) is merged into this request via itemsParams.
 
         Only context == "playlist" is handled; anything else raises NotImplementedError.
@@ -2157,9 +2190,10 @@ class BrowseLibraryHandler:
 
     async def _handle_playlist(self, slim_command):
         """
-        Handle the "playlist" jump/delete/move/moveend/clear subcommands, which the
-        contextmenu rows above and the "Clear Playlist" row in _handle_queue_status send.
-        aioslimproto's built-in only implements "index +1".
+        Handle the "playlist" jump/delete/move/moveend/clear subcommands.
+
+        Sent by the contextmenu rows above and the "Clear Playlist" row in
+        _handle_queue_status. aioslimproto's built-in only implements "index +1".
 
         Each maps to a PlayerQueuesController call:
           - jump: play_index(queue_id, index)
@@ -2234,7 +2268,7 @@ class BrowseLibraryHandler:
 
     async def _handle_queue_status(self, slim_command):
         """
-        Overrides aioslimproto's built-in _handle_status for every status call.
+        Override aioslimproto's built-in _handle_status for every status call.
 
         The built-in only reports player.current_media/next_media (two fixed slots), so
         however long MA's queue is, the response is always those two items (its
@@ -2337,8 +2371,9 @@ class BrowseLibraryHandler:
 
     async def _build_queue_item_loop(self, queue, offset, limit):
         """
-        Build the item_loop rows for a slice of the MA queue, shared by
-        _handle_queue_status and the queue-view pushes.
+        Build the item_loop rows for a slice of the MA queue.
+
+        Shared by _handle_queue_status and the queue-view pushes.
 
         Fields come straight from QueueItem (.name, .duration, .media_item), not
         player_media_from_queue_item(), which raises InvalidDataError("Queue session_id
@@ -2463,8 +2498,9 @@ _STATIC_ICON_SUFFIX_RE = re.compile(
 
 def _resolve_static_icon_path(filename):
     """
-    Resolve a requested chrome-icon filename to a real Path in static/, or None if
-    nothing matches (the caller falls back to the placeholder).
+    Resolve a requested chrome-icon filename to a real Path in static/.
+
+    Returns None if nothing matches (the caller falls back to the placeholder).
 
     The requested base name (e.g. "AlbumArtists" from "AlbumArtists_225x225_m.png") must
     match a real file's base name exactly: no aliasing, so each MY_MUSIC_NODE icon name
@@ -2511,9 +2547,9 @@ _DEFAULT_COVER_SIZE = 300
 
 def _requested_cover_size(path):
     """
-    Extract the requested pixel size from a JiveLite icon path suffix,
-    e.g. '.../cover_225x225_m' -> 225 (the larger of width/height, in case
-    they ever differ).
+    Extract the requested pixel size from a JiveLite icon path suffix.
+
+    E.g. '.../cover_225x225_m' -> 225 (the larger of width/height, in case they ever differ).
     """
     if m := _COVER_SIZE_RE.search(path):
         return max(int(m.group("w")), int(m.group("h")))
@@ -2522,9 +2558,10 @@ def _requested_cover_size(path):
 
 def _artist_no_art_response(request_path):
     """
-    LMS's behavior when an artist has no photo: fall back to the generic Artists chrome
-    icon (AllArtists_*.png, see _resolve_static_icon_path) instead of a placeholder. Uses
-    the requested size suffix, else 225 (the one size we have a file for). Returns a
+    Return the generic Artists icon for an artist with no photo, as LMS does.
+
+    Falls back to AllArtists_*.png (see _resolve_static_icon_path) instead of a placeholder.
+    Uses the requested size suffix, else 225 (the one size we have a file for). Returns a
     Response, or None if that file is missing, in which case the caller falls through to
     the solid-color placeholder.
     """
@@ -2560,8 +2597,9 @@ _AUDIO_EXTENSIONS = (
 
 def _pick_best_image(images, img_type):
     """
-    Pick the best candidate of img_type (e.g. ImageType.THUMB) from a MediaItem's images,
-    in priority order:
+    Pick the best image of img_type (e.g. ImageType.THUMB) from a MediaItem's images.
+
+    Candidates are ranked in priority order:
       1. any remotely_accessible image (TheAudioDB, fanart.tv, ...), generally curated
          and the highest quality in every album checked.
       2. a local standalone image file (e.g. 'Folder.jpg').
@@ -2586,9 +2624,10 @@ def _pick_best_image(images, img_type):
 
 async def _fetch_real_item_art(mass, icon_id, size):
     """
-    Resolve icon_id to a real MA library item and return its art bytes, or None if
-    anything fails (unknown id, item not found, no image, fetch error). Never raises:
-    None means "fall back to the placeholder".
+    Resolve icon_id to a real MA library item and return its art bytes, or None.
+
+    None is returned if anything fails (unknown id, item not found, no image, fetch error)
+    and means "fall back to the placeholder"; this never raises.
 
     icon_id is a bare item_id (an Album, e.g. "42") or a namespaced "<type>-<item_id>"
     for artist, playlist, radio, podcast or audiobook (e.g. "artist-7"). They are
@@ -2638,9 +2677,10 @@ async def _fetch_real_item_art(mass, icon_id, size):
 
 def _make_placeholder_png(rgb, size=64):
     """
-    Pure-stdlib solid-color PNG generator (no PIL dependency) - a
-    distinct color per icon type so placeholders are at least visually
-    distinguishable from each other on a real device's screen.
+    Generate a solid-color PNG with only the stdlib (no PIL dependency).
+
+    A distinct color per icon type makes placeholders visually distinguishable on a real
+    device's screen.
     """
     cache_key = (rgb, size)
     if cache_key in _PNG_CACHE:
@@ -2701,7 +2741,9 @@ def make_icon_routes(mass):
 
     async def handle_icon(request: web.Request) -> web.Response:
         """
-        Serves real cover art for '/music/<icon-id>/cover_<size>' (icon-id as in
+        Serve cover art and chrome icons.
+
+        Real cover art is served for '/music/<icon-id>/cover_<size>' (icon-id as in
         _fetch_real_item_art) and chrome icon files from static/ for
         '/html/images/<name>_<size>.png' (see _resolve_static_icon_path). Registered on
         aioslimproto's own webapp (see provider.py) because
@@ -2747,9 +2789,10 @@ def make_icon_routes(mass):
 
     async def handle_unmatched(request: web.Request) -> web.Response:
         """
-        Catch-all for any GET that doesn't match our icon routes
-        (/html/images/{filename}, /music/{icon_id}/{filename}), registered as the
-        lowest-priority route in provider.py.
+        Handle any GET that doesn't match our icon routes.
+
+        Anything other than /html/images/{filename} and /music/{icon_id}/{filename} lands here;
+        it is registered as the lowest-priority route in provider.py.
         """
         # Bare-icon_id fallback: a client sometimes requests the icon_id directly
         # ('/album1', no wrapper or size suffix). Tries the same real-art lookup as

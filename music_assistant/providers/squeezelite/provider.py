@@ -233,27 +233,19 @@ class SqueezelitePlayerProvider(PlayerProvider):
 
     def _handle_queue_items_updated(self, event: MassEvent) -> None:
         """
-        Handle a queue mutation from ANY source (MA app/web UI, voice,
-        another integration - not just this provider's own SlimProto
-        command handlers), pushing the same real queue-view update those
-        handlers already push for a mutation made from the device itself.
+        Push a queue-view update when the queue changes from any source.
 
-        Subscribed to QUEUE_UPDATED (see loaded_in_mass's own comment for
-        why), so event.data is the real PlayerQueue - the same object
-        player.py's own play_media()/repeat-and-shuffle-toggle code reads
-        .repeat_mode/.shuffle_enabled from. Refreshed into extra_data here
-        too, for the same reason play_media() does it: the client's own
-        shuffle/repeat iconbar indicator only updates from a playerstatus
-        push whose values actually changed, and nothing previously kept
-        extra_data current for a queue mutation that wasn't a play_media()
-        call or a device-initiated toggle (e.g. shuffle/repeat flipped from
-        the MA app) - see Player.lua's own notify_playerShuffleModeChange/
-        notify_playerRepeatModeChange.
+        Covers changes from the MA app/web UI, voice or another integration, not just this
+        provider's own SlimProto command handlers, using the same update those handlers push.
 
-        object_id is the real queue_id - confirmed the same value as
-        player_id for this provider throughout the rest of this project's
-        own code (every mass.player_queues call in browselibrary.py/
-        player.py already assumes this).
+        Subscribed to QUEUE_UPDATED (see loaded_in_mass), so event.data is the PlayerQueue.
+        Its repeat/shuffle mode is refreshed into extra_data here, as play_media() does:
+        the client's shuffle/repeat indicator only updates from a playerstatus push whose
+        values changed (see Player.lua's notify_playerShuffleModeChange/
+        notify_playerRepeatModeChange), and nothing else keeps extra_data current for a
+        change made from the MA app.
+
+        object_id is the queue_id, which is the same value as player_id for this provider.
         """
         if self.mass.closing or not self.slimproto or not event.object_id:
             return
