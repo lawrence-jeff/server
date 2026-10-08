@@ -69,6 +69,17 @@ CACHE_CATEGORY_PREV_STATE = (
     1  # category for caching previous player state (bumped to invalidate old format)
 )
 
+# icon_id prefix per media type, as the server's icon route expects (see
+# browselibrary._fetch_real_item_art); albums use the bare id.
+PRESET_ICON_PREFIX = {
+    MediaType.PLAYLIST: "playlist-",
+    MediaType.RADIO: "radio-",
+    MediaType.PODCAST: "podcast-",
+    MediaType.AUDIOBOOK: "audiobook-",
+    MediaType.ARTIST: "artist-",
+    MediaType.ALBUM: "",
+}
+
 PROTOCOL_ONLY_MODELS = (
     # Device models where slimproto is only a secondary protocol on a device with
     # its own (native) identity: WiiM/LinkPlay devices (ModelName=WiiM Player) and
@@ -824,13 +835,17 @@ class SqueezelitePlayer(Player):
             ):
                 try:
                     media_item = await self.mass.music.get_item_by_uri(cast("str", preset_conf))
+                    # A local identifier that the server's icon route resolves to art. The
+                    # client must never be handed a raw image URL (it asks the server for an
+                    # /imageproxy/ path that does not exist).
+                    prefix = PRESET_ICON_PREFIX.get(media_item.media_type)
                     preset_items.append(
                         SlimPreset(
                             uri=media_item.uri,
                             text=media_item.name,
                             icon=(
-                                self.mass.metadata.get_image_url(media_item.image)
-                                if media_item.image
+                                f"music/{prefix}{media_item.item_id}/cover"
+                                if prefix is not None
                                 else ""
                             ),
                         )

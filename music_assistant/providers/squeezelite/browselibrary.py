@@ -5,9 +5,10 @@ Lets a Squeezebox-style client browse and queue from the library.
 
 Commands handled (anything else raises NotImplementedError, so aioslimproto's built-ins
 take over):
-  - menu: the home menu - a Now Playing shortcut, a "My Music" node (Favorites, Artists,
-    Albums, Tracks, Playlists, Audiobooks, Podcasts, Radio, Search) and the player's
-    presets. The order follows MA's own root UI, not LMS's menu structure.
+  - menu: the home menu - a Now Playing shortcut and a "My Music" node (Favorites, Artists,
+    Albums, Tracks, Playlists, Audiobooks, Podcasts, Radio, Search). The order follows MA's
+    own root UI, not LMS's menu structure. The player's presets are listed first in
+    Favorites.
   - browselibrary: the listings behind each node, from the MediaControllerBase-derived
     controllers (self.mass.music.artists/albums/tracks/playlists/radio/podcasts/
     audiobooks), plus search (a category menu, or "Search All") and favorites
@@ -1345,41 +1346,47 @@ def _search_category_menu(search: str) -> dict[str, Any]:
     }
 
 
-def _favorites_category_menu() -> dict[str, Any]:
+def _favorites_category_menu(presets: list[dict[str, Any]]) -> dict[str, Any]:
     """
-    Return the favorites category menu, mirroring _search_category_menu.
+    Return the favorites menu: the player's presets, then one entry per category.
 
-    All Favorites comes first, then one entry per type, with favorite_only threaded
-    through instead of search and the same dispatch modes as normal browsing. No
-    per-category count is shown, though library_count(favorite_only=True) would support one.
+    Presets come first (they are the player's own favorites), then All Favorites and one
+    entry per type, mirroring _search_category_menu with favorite_only threaded through
+    instead of search and the same dispatch modes as normal browsing. Category rows reuse
+    the My Music tile icons so they line up with the presets' artwork. No per-category
+    count is shown, though library_count(favorite_only=True) would support one.
     """
     categories = [
-        ("All Favorites", "favorites_all"),
-        ("Artists", "artists"),
-        ("Albums", "albums"),
-        ("Tracks", "tracks"),
-        ("Playlists", "playlists"),
-        ("Audiobooks", "audiobooks"),
-        ("Podcasts", "podcasts"),
-        ("Radio", "radio"),
+        ("All Favorites", "favorites_all", "favorites"),
+        ("Artists", "artists", "AllArtists"),
+        ("Albums", "albums", "Albums"),
+        ("Tracks", "tracks", "Albums"),
+        ("Playlists", "playlists", "Playlists"),
+        ("Audiobooks", "audiobooks", "AudioBooks"),
+        ("Podcasts", "podcasts", "podcasts"),
+        ("Radio", "radio", "radiolocal"),
     ]
     item_loop = [
-        {
-            "text": label,
-            "type": "playlist",
-            "actions": {
-                "go": {
-                    "cmd": ["browselibrary", "items"],
-                    "params": {"menu": 1, "mode": submode, "favorite_only": 1},
-                }
-            },
-        }
-        for label, submode in categories
+        *presets,
+        *(
+            {
+                "text": label,
+                "type": "playlist",
+                "icon": f"html/images/{icon}.png",
+                "actions": {
+                    "go": {
+                        "cmd": ["browselibrary", "items"],
+                        "params": {"menu": 1, "mode": submode, "favorite_only": 1},
+                    }
+                },
+            }
+            for label, submode, icon in categories
+        ),
     ]
     return {
         "count": len(item_loop),
         "offset": 0,
-        "window": {"windowStyle": "text_list"},
+        "window": {"windowStyle": "icon_list"},
         "item_loop": item_loop,
     }
 
@@ -1511,74 +1518,65 @@ MY_MUSIC_NODE = [
 ]
 
 
-def _build_preset_items(player: SlimClient) -> list[dict[str, Any]]:
+def _build_preset_rows(player: SlimClient | None) -> list[dict[str, Any]]:
     """
-    Return the home-menu items for the player's presets.
+    Return the rows for the player's presets, listed at the top of Favorites.
 
-    Replicates aioslimproto's built-in preset-menu logic (see its _handle_menu): taking
-    over 'menu' to add the My Music node bypasses the built-in preset handling, so it is
-    redone here by matching its shape, without calling its private internals.
+    Tapping a row plays the preset the same way its hardware button does (the button
+    event is handled in player.py). The other actions serve the remote/keyboard keys.
     """
-    items = []
+    rows = []
     for index, preset in enumerate(getattr(player, "presets", []) or []):
-        preset_id = f"preset_{index + 1}"
-        items.append(
+        icon_id = (
+            preset.icon.removeprefix("music/").removesuffix("/cover")
+            if preset.icon.startswith("music/")
+            else ""
+        )
+        uri_action = {"player": 0, "cmd": ["playlistcontrol"]}
+        rows.append(
             {
-                "id": preset_id,
-                "icon": preset.icon,
                 "text": preset.text,
-                "homeMenuText": preset.text,
-                "weight": 35,
-                "node": "myMusic",
+                "type": "audio",
                 "style": "itemplay",
+                "icon": preset.icon,
+                **({"icon-id": icon_id} if icon_id else {}),
                 "nextWindow": "nowPlaying",
                 "actions": {
                     "go": {
-                        "cmd": ["button", f"{preset_id}.single"],
-                        "itemsParams": "commonParams",
+                        "cmd": ["button", f"preset_{index + 1}.single"],
                         "params": {},
                         "player": 0,
                         "nextWindow": "nowPlaying",
                     },
-                    "add": {
-                        "player": 0,
-                        "itemsParams": "commonParams",
-                        "params": {"uri": preset.uri, "cmd": "add"},
-                        "cmd": ["playlistcontrol"],
-                        "nextWindow": "refresh",
-                    },
-                    "more": {
-                        "player": 0,
-                        "itemsParams": "commonParams",
-                        "params": {"uri": preset.uri, "cmd": "add"},
-                        "cmd": ["playlistcontrol"],
-                        "nextWindow": "refresh",
-                    },
                     "play": {
-                        "cmd": ["playlistcontrol"],
-                        "itemsParams": "commonParams",
-                        "params": {"uri": preset.uri, "cmd": "play"},
-                        "player": 0,
+                        **uri_action,
+                        "params": {"uri": preset.uri, "cmd": "load"},
                         "nextWindow": "nowPlaying",
                     },
                     "play-hold": {
-                        "cmd": ["playlistcontrol"],
-                        "itemsParams": "commonParams",
+                        **uri_action,
                         "params": {"uri": preset.uri, "cmd": "load"},
-                        "player": 0,
                         "nextWindow": "nowPlaying",
                     },
+                    "add": {
+                        **uri_action,
+                        "params": {"uri": preset.uri, "cmd": "add"},
+                        "nextWindow": "refresh",
+                    },
+                    "more": {
+                        **uri_action,
+                        "params": {"uri": preset.uri, "cmd": "add"},
+                        "nextWindow": "refresh",
+                    },
                     "add-hold": {
-                        "itemsParams": "commonParams",
+                        **uri_action,
                         "params": {"uri": preset.uri, "cmd": "insert"},
-                        "player": 0,
-                        "cmd": ["playlistcontrol"],
                         "nextWindow": "refresh",
                     },
                 },
             }
         )
-    return items
+    return rows
 
 
 # Home-menu shortcut to Now Playing. JiveLite's NowPlayingApplet adds an item with this same
@@ -1599,9 +1597,9 @@ NOW_PLAYING_ITEM = {
 }
 
 
-def get_menu(player: SlimClient, index: int = 0, quantity: int = 100) -> dict[str, Any]:
-    """Return the home menu: Now Playing, My Music and the player's presets."""
-    item_loop = [NOW_PLAYING_ITEM, *MY_MUSIC_NODE, *_build_preset_items(player)]
+def get_menu(index: int = 0, quantity: int = 100) -> dict[str, Any]:
+    """Return the home menu: the Now Playing shortcut and the My Music node."""
+    item_loop = [NOW_PLAYING_ITEM, *MY_MUSIC_NODE]
     window, total, offset = _paginate(item_loop, index, quantity)
     return {"item_loop": window, "offset": offset, "count": total}
 
@@ -1654,7 +1652,7 @@ class BrowseLibraryHandler:
             player = self._slimproto.get_player(slim_command.player_id)
             if player is None:
                 raise NotImplementedError  # unknown player - let the built-in handle/reject it
-            return get_menu(player)  # no real data involved - stays sync, just not awaited
+            return get_menu()  # no real data involved - stays sync, just not awaited
 
         handlers = {
             "playlistcontrol": self._handle_playlistcontrol,
@@ -1705,7 +1703,9 @@ class BrowseLibraryHandler:
         if mode == "favorites":
             # The Favorites home item: a category menu like "search" above; see
             # _favorites_category_menu().
-            return _favorites_category_menu()
+            return _favorites_category_menu(
+                _build_preset_rows(self._slimproto.get_player(slim_command.player_id))
+            )
         if mode == "favorites_all":
             return await get_favorites_all(self.mass, kwargs, index, quantity)
         if mode == "artists":
