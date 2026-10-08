@@ -85,25 +85,9 @@ class SqueezelitePlayerProvider(PlayerProvider):
 
         # create the server here (also validates config and sets up the CLI) but defer
         # start() to loaded_in_mass, so we subscribe to events before accepting clients
-        # UPSTREAM NOTE: handle_icon/handle_unmatched used to be plain
-        # module-level functions in browselibrary.py, importable directly
-        # (as they still are, one line up, for BrowseLibraryHandler). That
-        # stopped working once those two functions needed to serve REAL
-        # album art rather than solid-color placeholders: real art requires
-        # calling into self.mass.music/self.mass.metadata to resolve a
-        # request's icon_id into an actual Album and fetch its cover bytes -
-        # and these two functions are registered directly as aiohttp route
-        # handlers via extra_routes below, which aiohttp always calls with
-        # just a `request` argument. There's no hook in aiohttp's own
-        # routing to hand a handler extra context at call time, so the only
-        # place left to give them access to `self.mass` is a closure created
-        # right here, at registration time, while `self` (and therefore
-        # self.mass) is still in scope. make_icon_routes(self.mass) returns
-        # exactly the same two callables handle_icon/handle_unmatched used
-        # to be (same signatures, same aiohttp handler contract) - just
-        # created fresh, bound to this provider's `mass`, instead of
-        # imported ready-made. See make_icon_routes' own docstring in
-        # browselibrary.py for the real-art implementation this unlocks.
+        # Icon/cover-art routes are built per provider (make_icon_routes) because
+        # resolving real album art needs self.mass, and aiohttp route handlers only
+        # receive the request. See make_icon_routes in browselibrary.py.
         icon_handler, unmatched_handler = make_icon_routes(self.mass)
         self.slimproto = SlimServer(
             cli_port=telnet_port or None,
@@ -137,35 +121,10 @@ class SqueezelitePlayerProvider(PlayerProvider):
         # subscribe before starting the socket server: aioslimproto does not buffer
         # events, so a client connecting before we subscribe would be missed entirely
         self.slimproto.subscribe(self._handle_slimproto_event)
-        # Real, confirmed gap: _push_queue_update() (browselibrary.py) only
-        # ever ran for queue mutations that arrived AS a SlimProto command
-        # (a tap on the device's own queue-view screen) - anything that
-        # changed the queue from elsewhere (the MA app/web UI, voice,
-        # another integration) never reached it at all, since
-        # BrowseLibraryHandler is a command handler, not a listener on
-        # MA's own queue state. A real device test (a client debug log
-        # showing zero playerstatus/menustatus activity across 13 queue
-        # deletions made from the MA app) confirmed this is a real,
-        # observable symptom - not just a theoretical gap - the connected
-        # SlimProto client's queue-view screen never refreshed because
-        # nothing ever told it to. Subscribed to QUEUE_UPDATED rather than
-        # QUEUE_ITEMS_UPDATED (confirmed via the controller's own
-        # signal_update(): QUEUE_UPDATED is unconditionally signalled on
-        # every call, while QUEUE_ITEMS_UPDATED only fires when
-        # items_changed=True - QUEUE_UPDATED is a strict superset) so this
-        # same fix also covers shuffle/repeat toggles made from the MA app,
-        # which only call signal_update() without items_changed and never
-        # reached the device otherwise (the client's own shuffle/repeat
-        # iconbar indicator only updates from a playerstatus push whose
-        # "playlist shuffle"/"playlist repeat" values actually changed -
-        # see Player.lua's own notify_playerShuffleModeChange/
-        # notify_playerRepeatModeChange). object_id is the real queue_id -
-        # the same value as player_id throughout this project's own code
-        # (see every other mass.player_queues call in browselibrary.py/
-        # player.py). Routing it through the exact same _push_queue_update()
-        # browselibrary.py's own command handlers already use (not a second,
-        # parallel implementation) keeps the playlist_timestamp-bumping fix
-        # in exactly one place.
+        # QUEUE_UPDATED (not QUEUE_ITEMS_UPDATED) because it is signalled on every
+        # change, including shuffle/repeat toggles, so queue edits made from the MA app,
+        # voice or other integrations also refresh the client. Shares
+        # _push_queue_update() with the command handlers in browselibrary.py.
         self.mass.subscribe(self._handle_queue_items_updated, EventType.QUEUE_UPDATED)
         try:
             await self.slimproto.start()
@@ -183,16 +142,9 @@ class SqueezelitePlayerProvider(PlayerProvider):
         self.mass.streams.register_dynamic_route(
             "/jsonrpc.js", self.slimproto.cli._handle_jsonrpc_client
         )
-        # Icon/cover-art routes (/html/images/{filename}, /music/{icon_id}/{filename})
-        # are registered via extra_routes in the SlimServer(...) constructor above,
-        # NOT here. This used to be a post-hoc self.slimproto.cli._webapp.router.add_get(...)
-        # right here - that was a real, confirmed bug: by this point start()
-        # has already called AppRunner.setup(), which freezes the app's
-        # router, so aiohttp silently... actually raises RuntimeError on any
-        # further add_route/add_get call. Icons never worked as a result.
-        # extra_routes is a real aioslimproto constructor parameter (added
-        # specifically for this) that registers routes at the correct point
-        # in start(), before the router freezes - see its own docstring.
+        # Icon/cover-art routes are registered via extra_routes in the SlimServer(...)
+        # constructor above, not here: the router is frozen once start() has run
+        # AppRunner.setup(), so a later add_get raises RuntimeError.
 
     async def unload(self, is_removed: bool = False) -> None:
         """Handle unload/close of the provider."""

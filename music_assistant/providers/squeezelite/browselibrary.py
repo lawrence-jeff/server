@@ -992,14 +992,8 @@ from pathlib import Path
 
 from aiohttp import web
 
-# MediaDetails/menu_item_from_media_details: reused directly from
-# aioslimproto rather than reinvented - menu_item_from_media_details()
-# (cli.py) is the same row-builder real LMS-shaped queue/menu rows
-# already use elsewhere (confirmed by reading its real source before
-# using it, not guessed at), and MediaDetails (models.py) is just the
-# .url/.metadata shape it expects as input - the same shape player.py's
-# own _handle_play_url_for_slimplayer already builds for
-# current_media/next_media.
+# Reuses aioslimproto's menu_item_from_media_details, the row builder the queue/menu
+# rows use; MediaDetails is its .url/.metadata input (as built in player.py).
 from aioslimproto.cli import menu_item_from_media_details
 from aioslimproto.models import EventType, MediaDetails, SlimEvent
 from music_assistant_models.enums import ImageType, MediaType, PlaybackState, QueueOption
@@ -1010,13 +1004,8 @@ from music_assistant.helpers import datetime as mass_datetime
 
 logger = logging.getLogger("music_assistant.squeezelite.browselibrary")
 
-# icon_id bare-path fallback (handle_unmatched below) - see that function's
-# own comment for the full "why" (JiveLite requesting a bare, unwrapped
-# icon_id path instead of the proper '/music/{icon_id}/cover_{size}'). Now
-# that mass is threaded through via make_icon_routes() below, this fallback
-# also attempts a real art lookup before falling back to the placeholder -
-# see _fetch_real_item_art and the "Icon / cover art serving" section
-# further down for the full real-art implementation.
+# icon_id bare-path fallback: see handle_unmatched and the "Icon / cover art serving"
+# section below.
 
 # Keys real LMS echoes through from the browse request into every base.action's
 # params at every subsequent drill-down level - verified against a real capture.
@@ -1167,15 +1156,9 @@ def albums_base_actions(kwargs):
 
 def playlists_base_actions(kwargs):
     """
-    base.actions for a playlists item_loop - built by analogy to
-    albums_base_actions above (same shape: "go" drills into "mode":
-    "tracks" with playlist_id in context; play/add/add-hold hit
-    playlistcontrol the same way), NOT verified against a real LMS
-    capture the way almost everything else in this file is - playlists
-    were never implemented in the standalone scaffold either, so there's
-    no prior real-capture data point to check this against. If real LMS
-    turns out to send something different here once tested, this is the
-    function to fix.
+    base.actions for a playlists item_loop, built by analogy to albums_base_actions.
+    Not verified against a real LMS capture; if real LMS sends something different,
+    this is the function to fix.
     """
     ctx = _context(kwargs)
     actions = {
@@ -1224,24 +1207,10 @@ def playlists_base_actions(kwargs):
 def tracks_base_actions(kwargs, index=0, quantity=None):
     ctx = _context(kwargs)
     common = {**ctx, "sort": "albumtrack"}
-    # v64 fix: the "load whole album, starting at play_index" behavior
-    # (playallParams below) only makes sense - and only works at all -
-    # when this listing actually has an album_id context. tracks_base_actions
-    # is shared by several other listings with no album (get_all_tracks:
-    # the flat root "My Music > Tracks" browse; get_playlist_tracks;
-    # get_podcast_episodes), whose rows carry "commonParams" with their
-    # own track_id/uri instead. v61 changed "go"/"play" to always use
-    # playallParams, which for those other listings merges in nothing
-    # (no playallParams-shaped identity to play_index alone) and reaches
-    # _handle_playlistcontrol with no album_id AND no track_id/uri -
-    # falling through to NotImplementedError. Confirmed via a real
-    # device test: track rows in those other listings stopped responding
-    # to a tap entirely ("doesn't do anything"), regardless of queue
-    # state - not a queue-state bug, a real regression in this function.
-    # Falls back here to the original, pre-v61 shape (commonParams,
-    # cmd:load, using whatever identity the row provides) whenever
-    # album_id isn't in ctx, and keeps the new album-load behavior only
-    # where it was actually confirmed (get_tracks, which always has one).
+    # The "load whole album starting at play_index" go action (playallParams) needs an
+    # album_id in context. The other track listings (flat Tracks, playlist tracks,
+    # podcast episodes) identify rows by track_id/uri in commonParams, and a bare
+    # play_index would reach _handle_playlistcontrol with no identity at all.
     has_album_context = "album_id" in ctx
     if has_album_context:
         go_action = {
@@ -1252,19 +1221,12 @@ def tracks_base_actions(kwargs, index=0, quantity=None):
             "params": {**common, "cmd": "load"},
         }
     else:
-        # cmd:"add" (was "load") - a single tap on a track with no album
-        # context (root Tracks, playlist tracks, podcast episodes) always
-        # just adds to the end of the queue, never interrupts/replaces
-        # what's playing, and never shows a menu. This replaces a
-        # goAction swap to a confirm-menu that was decided from the
-        # queue's state when the LISTING was fetched, not at tap time, so
-        # an open, unrefreshed screen could act on a stale decision and
-        # interrupt what an earlier tap had just started. "add" is the
-        # same whatever the queue holds, so there is nothing stale.
-        # _handle_playlistcontrol starts playback itself if the queue
-        # was idle. "nextWindow": "refresh" (as the presets' add action
-        # does) keeps the client on the list; without a nextWindow it
-        # opens a bare screen with just the song title.
+        # A single tap on a track with no album context (root Tracks, playlist tracks,
+        # podcast episodes) always adds to the queue: it never interrupts playback or
+        # shows a menu. (Choosing a menu from the queue state at listing-fetch time went
+        # stale on an open screen.) _handle_playlistcontrol starts playback if the queue
+        # was idle. "nextWindow": "refresh" (as the presets' add does) keeps the client
+        # on the list; without one it opens a bare screen with just the song title.
         go_action = {
             "player": 0,
             "cmd": ["playlistcontrol"],
@@ -1273,22 +1235,10 @@ def tracks_base_actions(kwargs, index=0, quantity=None):
             "params": {**ctx, "cmd": "add"},
         }
     actions = {
-        # itemsParams: "playallParams" (was "commonParams") - confirmed
-        # via a real client trace (net.comet log of a regular single tap
-        # on a track row inside an album's track listing, empty queue):
-        # the real outgoing request was "playlistcontrol album_id:6
-        # ... cmd:load play_index:0 ... sort:albumtrack ..." - no
-        # track_id at all. Real LMS's own default behavior for a plain
-        # tap here is "load the whole album, starting at this position",
-        # not "play just this one track" - album_id/sort:albumtrack are
-        # already in `common` above (album_id via _context/CONTEXT_KEYS),
-        # so playallParams only needs to contribute play_index, which is
-        # exactly what it already carries (see get_tracks below) - this
-        # was scaffolded for exactly this real behavior a while back but
-        # never wired up (see _handle_playlistcontrol's own matching
-        # update for the other half of this fix). Only applied when
-        # has_album_context (see this function's own v64 comment above) -
-        # falls back to the pre-v61 shape otherwise.
+        # playallParams: tapping a track inside an album loads the whole album starting
+        # at that position (real LMS sends "playlistcontrol album_id:N cmd:load
+        # play_index:M sort:albumtrack", no track_id). album_id and sort are already in
+        # `common`; playallParams adds play_index. Only used with an album context.
         "go": go_action,
         "play": go_action,
         "add": {
@@ -1303,57 +1253,16 @@ def tracks_base_actions(kwargs, index=0, quantity=None):
             "itemsParams": "commonParams",
             "params": {"menu": ctx.get("menu", 1), "cmd": "insert"},
         },
-        # Real LMS's own mechanism for "single tap on a track row when the
-        # queue already has something in it" - confirmed via a real proxy
-        # capture (lms.log text log + the pcap's reassembled long-poll
-        # stream, since the log's own preview truncates at 8000 bytes and
-        # this response landed well past that). The real client log
-        # showed the mechanism directly: _actionHandler(go) -> "item for
-        # action after transform: playControl" -> _actionHandler(playControl):
-        # the CLIENT itself swaps which action "go" invokes, based on a
-        # "goAction" field the ITEM (not this base.actions object) carries
-        # - see get_tracks' own matching update, which sets goAction
-        # (only when the queue is non-empty) and a matching
-        # playControlParams (xmlbrowserPlayControl: str(play_index)) on
-        # each row. This "playControl" action itself re-issues the exact
-        # same browselibrary items request that built this listing
-        # (mode:tracks, album_id, performance, useContextMenu,
-        # xmlBrowseInterimCM all confirmed present verbatim in the real
-        # request) with playControlParams merged in - _handle_browselibrary's
-        # own matching update below recognizes xmlbrowserPlayControl in
-        # kwargs and returns a real, confirmed 4-item menu (Add to End/
-        # Play Next/Play this Song/Play all songs) instead of the normal
-        # listing.
-        #
-        # "window":{"isContextMenu":1} - a real, confirmed field on this
-        # action, missing from an earlier version of this fix and root-
-        # caused as the actual bug from a real device test: the client's
-        # own "Context Menu" log line (and the window-push machinery that
-        # follows it) is decided from the ACTION DEFINITION itself at tap
-        # time, before any request is even sent - not from the response.
-        # Without this field the client still called _actionHandler(playControl)
-        # and sent the request, but never treated it as a menu to push,
-        # so nothing visibly happened - exactly the reported symptom.
-        # "_index"/"_quantity" - also confirmed present (verbatim "0"/"200"
-        # in the real capture) and missing from the earlier version -
-        # mirrors the same pagination window this listing itself was
-        # built with, threaded through from get_tracks' own index/quantity
-        # params below. Confirmed via a real pcap extraction of this
-        # exact action definition (base.actions.playControl), not guessed:
-        # {"player":0,"cmd":["browselibrary","items"],"window":{"isContextMenu":1},
-        #  "itemsParams":"playControlParams","params":{"_index":"0","_quantity":"200",
-        #  "menu":"1","useContextMenu":"1","mode":"tracks","performance":"","album_id":"6"}}
-        #
-        # v65: params built from a curated pull of the ORIGINAL kwargs
-        # (not just ctx) - ctx/CONTEXT_KEYS covers album_id but not
-        # playlist_id/podcast_id/search/favorite_only, none of which this
-        # function otherwise sees. Without them, a playControl re-query
-        # from a playlist/podcast/search-filtered-tracks listing would
-        # lose its own container id or filter and _handle_browselibrary's
-        # dispatch would resolve the wrong (or an empty) listing. "performance"
-        # only confirmed present (as "") for the album_id case in the real
-        # capture - carried through as-is when present in kwargs rather
-        # than assumed for contexts that were never captured.
+        # playControl: a row with goAction "playControl" (and playControlParams
+        # {xmlbrowserPlayControl: play_index}) makes the client swap its "go" for this
+        # action. It re-issues this listing's browselibrary items request with those
+        # params merged in, and _handle_browselibrary answers with the track menu
+        # instead of the listing. "window": {"isContextMenu": 1} is required: the
+        # client decides whether to push a menu window from the action definition, not
+        # the response. _index/_quantity mirror this listing's pagination. params are
+        # pulled from the original kwargs (not only ctx) so playlist/podcast/search
+        # listings keep their container id or filter; "performance" is passed through
+        # only when present.
         "playControl": {
             "player": 0,
             "cmd": ["browselibrary", "items"],
@@ -1390,29 +1299,13 @@ def tracks_base_actions(kwargs, index=0, quantity=None):
 
 async def get_artists(mass, index=0, quantity=None, search=None, favorite_only=False):
     """
-    Real MA data: mass.music.artists.library_items()/.library_count().
+    Real MA data: mass.music.artists.library_items()/library_count().
 
-    favorite_only (v45): threads straight into library_items(favorite=...)/
-    library_count(favorite_only=...) - both real, already-existing params
-    on the base controller (confirmed via the real music-assistant/server
-    source, controllers/music/media/base.py) - not a new filter invented
-    here, just wiring an existing one through. Used by the new Favorites
-    browse tree (see get_favorites_all()/MY_MUSIC_NODE below) exactly the
-    same way search= already threads through every one of these functions.
-
-    summary=False (full Artist objects, not the slimmer summary dataclass) -
-    verified field names (item_id, name) come from the full Artist/MediaItem
-    dataclass in music_assistant_models; the summary dataclass wasn't pulled
-    and checked, so this trades a bit of query weight for certainty rather
-    than guessing its shape.
-
-    Real per-artist photos: icon_id is "artist-<item_id>" (e.g.
-    "artist-7"), not the bare item_id albums use ("42") - albums and
-    artists each have their own independent id space in MA, so an
-    unqualified numeric icon_id would be ambiguous (could collide with an
-    unrelated album's id) once both types share the same
-    /music/{icon_id}/cover route. See _fetch_real_item_art below for the
-    matching lookup side of this.
+    favorite_only threads through to library_items(favorite=...)/
+    library_count(favorite_only=...) for the Favorites tree, as search= does. Full
+    Artist objects (summary=False). icon_id is "artist-<item_id>", not the bare id
+    albums use: they have separate id spaces sharing the /music/{icon_id}/cover route
+    (see _fetch_real_item_art).
     """
     limit = quantity if quantity is not None else 500
     items = await mass.music.artists.library_items(
@@ -1423,13 +1316,8 @@ async def get_artists(mass, index=0, quantity=None, search=None, favorite_only=F
         favorite=True if favorite_only else None,
     )
     if search:
-        # library_count() does NOT accept a search= param (checked the real
-        # base class signature - only favorite_only) - can't get an exact
-        # match count cheaply, so this reports what we actually fetched
-        # instead of the full library size. Real limitation: a match set
-        # bigger than `limit` undercounts here - accepted as reasonable for
-        # a search result set, which is normally small; not silently wrong,
-        # just imprecise past the fetch limit.
+        # library_count() has no search= param, so report what was fetched; a match
+        # set bigger than `limit` is undercounted.
         total = len(items)
     else:
         total = await mass.music.artists.library_count(favorite_only=favorite_only)
@@ -1463,51 +1351,18 @@ async def get_all_tracks(
     mass, kwargs, index=0, quantity=None, search=None, favorite_only=False, player_id=None
 ):
     """
-    Real MA data: TracksController.library_items()/.library_count() -
-    library_items() IS overridden here (same as Artists/Podcasts), adding
-    favorite/search/genre/provider/explicit-content filtering, but with
-    the same limit/offset/summary defaults and semantics for the plain,
-    unfiltered call we make here - checked directly, not assumed.
-    library_count() is NOT overridden - the plain inherited version, same
-    as always.
+    Real MA data: TracksController.library_items()/library_count() - the flat,
+    root-level track browse, matching MA's web UI taxonomy.
 
-    Flat, root-level track browse - matches Music Assistant's own web UI
-    taxonomy (Artists/Albums/Tracks/Playlists/...), added alongside the
-    Artists/Tracks menu restructure (collapsing "Album Artists"/"All
-    Artists" into one "Artists" tile, since get_artists() above already
-    doesn't distinguish the two - see its own docstring). Uses track_id
-    (a safe library-item lookup), same as get_tracks() above - these
-    genuinely are library tracks fetched via the standard controller, not
-    provider-native items the way playlist tracks/podcast episodes are.
+    Rows use track_id (these are library tracks, unlike playlist tracks/podcast
+    episodes) and the album's bare-numeric icon_id, as get_albums() does: the album is
+    the canonical art source for a track (Track.image prefers it), and tracks with no
+    album fall through to the placeholder. Row text is "Title\\nArtist" (Track.artist_str),
+    the documented two-line text convention Albums also uses.
 
-    icon_list (cover art) rather than a plain text list - a flat,
-    unfiltered list of every track title alone was genuinely hard to
-    navigate/scan. Reuses the album's own bare-numeric icon_id scheme
-    (the same one get_albums() uses) rather than inventing a new
-    "track-" prefix: Track.album: Album | ItemMapping | None is a real
-    field, and Track.image's own logic already prefers self.album.image
-    when present, confirming the album is the canonical art source for a
-    track, not the track itself - .item_id is present on both a full
-    Album and a lightweight ItemMapping, so this works either way with
-    zero new code needed in _fetch_real_item_art. Falls through to the
-    solid-color placeholder (same as everywhere else) when a track
-    genuinely has no album (singles/compilation entries without album
-    metadata) - not treated as an error.
-
-    Row text is "Title\\nArtist" (two lines) using Track.artist_str - a
-    real property, confirmed directly from source: same "/".join(x.name
-    for x in self.artists) pattern as Album.artist_str, already verified
-    and in use in get_albums() above. The \\n convention itself matches
-    real LMS's own documented protocol ("text may contain \\n, in which
-    case the item is displayed on multiple lines" - SlimBrowse Protocol
-    reference) - not a windowStyle change, just the same officially
-    documented two-line text convention Albums already uses. Falls back
-    to the bare title if a track genuinely has no artists attached.
-
-    player_id - unused here: a single tap always adds to the queue (see
-    tracks_base_actions), so no queue-state check is needed. Kept since
-    callers already pass it and the signature is shared with
-    get_tracks()/get_playlist_tracks()/get_podcast_episodes().
+    player_id is unused: a single tap always adds to the queue (see
+    tracks_base_actions). It is kept because callers pass it and the signature is
+    shared with get_tracks()/get_playlist_tracks()/get_podcast_episodes().
     """
     limit = quantity if quantity is not None else 500
     items = await mass.music.tracks.library_items(
@@ -1563,30 +1418,14 @@ async def get_albums(
     mass, artist_id, kwargs, index=0, quantity=None, search=None, favorite_only=False
 ):
     """
-    Real MA data.
+    Real MA data. With artist_id: ArtistsController.albums(artist_id, "library"), which
+    returns the full list, so it is paginated here. Without: AlbumsController.library_items()/
+    library_count(), which paginate server-side.
 
-    Two different MA APIs depending on whether we're filtering by artist:
-    - artist_id given: ArtistsController.albums(artist_id, "library") - a
-      relationship query verified to return the full (unpaginated) list of
-      an artist's library albums, so we paginate it ourselves below exactly
-      like Stage 1 paginated its in-memory list.
-    - no artist_id (all albums): AlbumsController.library_items()/
-      .library_count(), which DO paginate/count server-side.
-
-    The no-artist_id ("All Albums") case also gets three things the
-    artist-filtered case doesn't - ported from the standalone scaffold,
-    which verified all three against a real LMS capture of exactly this
-    view: a flat, mixed-artist list needs to show whose album is whose, so
-    it can't just reuse the filtered case's plain title-only text.
-      - two-line "text": "Album Title\\nArtist Name"
-      - "textkey" (first letter of the title) - powers the device's
-        alphabet jump-scroll bar, which the filtered case doesn't show
-      - a "presetParams" block, so albums are favoritable from this view
-    Unlike the scaffold (which had to look artist names up in a separate
-    id->name dict, since its hardcoded data model didn't attach artist
-    objects to each album), our real Album objects already carry their
-    artists directly - album.artist_str (MediaItem's own property,
-    "/".join of each artist's name) needs no extra lookup.
+    The all-albums case also gets what the artist-filtered one doesn't, since a flat,
+    mixed-artist list needs to show whose album is whose: two-line text "Album
+    Title\\nArtist Name" (album.artist_str), a "textkey" (first letter, for the device's
+    alphabet scroll bar) and "presetParams" so albums can be favorited from here.
     """
     if artist_id is not None:
         albums = await mass.music.artists.albums(artist_id, "library")
@@ -1642,50 +1481,18 @@ async def get_tracks(mass, album_id, kwargs, index=0, quantity=None, player_id=N
     """
     Real MA data: AlbumsController.tracks(album_id, "library").
 
-    in_library_only=False (v48; was True) - confirmed via the real
-    music-assistant/server source (controllers/music/media/albums.py) this
-    was the actual cause of a real report: some albums showed fine in
-    browse (real art/title, since the ALBUM has its own local library
-    row) but selecting them showed no tracks at all. in_library_only=True
-    returns ONLY tracks that separately have their own local library
-    row (get_library_album_tracks) - favoriting/adding an ALBUM does not
-    guarantee every individual TRACK also got its own local row, so an
-    album that only got that partial treatment returned an empty or
-    partial list under the old True. False keeps every in-library track
-    but ALSO reaches out live to the actual provider (Spotify, etc.) and
-    merges in whatever tracks aren't mirrored locally yet - the real
-    fallback this needed. Real tradeoff worth knowing: this means an
-    affected album's response now includes a live provider round-trip
-    instead of being purely local-DB, so it can be measurably slower for
-    exactly the albums this fixes - accepted, since no tracks at all is
-    worse than a slower response.
+    in_library_only=False: albums added to the library don't guarantee each track has its
+    own local row, and True returned empty or partial lists for them. False also queries
+    the provider live for tracks not mirrored locally, which can make those albums
+    slower to load. Tracks stay sorted by (disc_number, track_number) and unpaginated, so
+    this paginates the list itself.
 
-    Still sorted by (disc_number, track_number) either way (confirmed in
-    the same source), still unpaginated (same as .albums() above), so
-    this still paginates the returned list itself.
+    favorites_url is the track's MA-native .uri (e.g. "library://track/42"), unlike the
+    artist/album favorites_url, which still use LMS's "db:" convention.
 
-    favorites_url now uses the track's own `.uri` (e.g. "library://track/42"),
-    auto-generated by the MediaItem dataclass itself from (media_type,
-    provider, item_id) - a real, MA-native identifier, unlike the artist/
-    album favorites_url below which are still LMS's own "db:" convention
-    (see this module's docstring for why those are flagged, not fixed, here).
-
-    player_id - no longer used for a queue-emptiness check here. Earlier
-    (v62) this branched goAction on whether the queue was empty at the
-    time this listing was fetched (confirmed as real LMS's own behavior
-    via a proxy capture) - reverted (see the row-building loop below):
-    that's a snapshot taken once per listing fetch, not re-evaluated per
-    tap, so an already-open, unrefreshed screen kept stale goAction
-    values even after the queue changed underneath it (e.g. from an
-    earlier tap on the same screen). A real device test confirmed the
-    actual consequence: tapping a second track right after the first
-    started playing, still on the same screen, skipped the menu and
-    interrupted/replaced what was just started instead of asking Play
-    Now vs. Add to the queue. goAction is now unconditionally
-    "playControl", so this decision is always made live, per tap.
-    Kept as a parameter since callers already pass it and the signature
-    is shared with get_all_tracks()/get_playlist_tracks()/
-    get_podcast_episodes(), not because this function still needs it.
+    player_id is unused: rows are always "playControl" (tap-time menu), so no queue
+    check is needed. Kept because callers pass it and the signature is shared with the
+    other track listings.
     """
     items = (
         await mass.music.albums.tracks(album_id, "library", in_library_only=False)
@@ -1707,10 +1514,8 @@ async def get_tracks(mass, album_id, kwargs, index=0, quantity=None, player_id=N
                 "favorites_title": item.name,
                 "favorites_url": item.uri,
             },
-            # goAction unconditionally "playControl" - see get_all_tracks'
-            # matching comment for the real, confirmed staleness bug this
-            # fixes (a stale, already-rendered row's goAction never
-            # reflected queue changes made after it was fetched).
+            # always "playControl" so the menu is chosen at tap time, not from the
+            # queue state when this listing was fetched
             "goAction": "playControl",
             "playControlParams": {"xmlbrowserPlayControl": str(play_index)},
         }
@@ -1726,71 +1531,20 @@ async def get_tracks(mass, album_id, kwargs, index=0, quantity=None, player_id=N
 
 async def get_track_play_control_menu(mass, album_id, kwargs, play_index):
     """
-    The "playControl" menu for a track inside a multi-track album. Row
-    wording follows Music Assistant's (Play Now/Play Next/Add to the
-    queue, then "Play All from here (keep queue)" for the whole album, starting at
-    the tapped track); the shapes below are the real LMS capture they
-    were built from, with the original LMS wording.
+    The "playControl" menu for a track inside a multi-track album.
 
-    Real LMS's own "playControl" menu - what a track row's "goAction":
+    Rows follow Music Assistant's wording: Play Now/Play Next/Add to the queue for the
+    tapped track, then "Play All from here (keep queue)", which loads the whole album
+    starting at the tapped track. The row shapes come from a real LMS capture.
 
-    "playControl" (see get_tracks above) actually sends when tapped: the
-    same browselibrary items request that built the listing, with
-    xmlbrowserPlayControl (the tapped row's play_index) merged in via
-    playControlParams. Confirmed field-for-field, in this exact order,
-    against a real proxy capture (lms.log text log + the pcap's
-    reassembled long-poll stream - the response landed well past the
-    log's own 8000-byte preview truncation, so the pcap was needed to
-    see it at all):
+    "Play All from here" params match tracks_base_actions' "go" action (album_id,
+    sort:albumtrack, cmd:load, play_index, no track_id), handled by the album branch of
+    _handle_playlistcontrol. ctx is included so artist_id/role_id/menu_roles/menu_mode
+    carry through when the browse came via an artist. The rows carry no "type" field,
+    matching the capture.
 
-        {"count": 4, "offset": 0, "window": {"windowStyle": "text_list"},
-         "item_loop": [
-           {"style": "item_add", "text": "Add to End", "actions": {"go": {
-              "cmd": ["playlistcontrol"], "player": 0,
-              "nextWindow": "parentNoRefresh",
-              "params": {"menu": 1, "cmd": "add", "track_id": <id>}}}},
-           {"style": "item_insert", "text": "Play Next", "actions": {"go": {
-              "cmd": ["playlistcontrol"], "player": 0,
-              "nextWindow": "parentNoRefresh",
-              "params": {"track_id": <id>, "menu": 1, "cmd": "insert"}}}},
-           {"style": "item_play", "text": "Play this Song", "actions": {"go": {
-              "cmd": ["playlistcontrol"], "player": 0,
-              "nextWindow": "nowPlaying",
-              "params": {"menu": 1, "track_id": <id>, "cmd": "load"}}}},
-           {"style": "item_playall", "text": "Play all songs", "actions": {"go": {
-              "cmd": ["playlistcontrol"], "player": 0,
-              "nextWindow": "nowPlaying",
-              "params": {"menu": 1, "play_index": <play_index>, "cmd": "load",
-                         "sort": "albumtrack", "album_id": "<album_id>"}}}},
-         ]}
-
-    Real capture note: none of these 4 rows carry a "type" field at all
-    (unlike this file's other rows, which mostly set "type":"audio" or
-    "type":"text") - omitted here to match exactly.
-
-    "Play all songs"' own params are IDENTICAL in shape to tracks_base_actions'
-    "go"/"play" action (album_id/sort:albumtrack/cmd:load/play_index, no
-    track_id) - the same real branch _handle_playlistcontrol already
-    gained for the empty-queue case (v61) handles this one too, unchanged.
-    ctx (_context(kwargs)) is included the same way tracks_base_actions'
-    own "common" already does, so artist_id/role_id/menu_roles/menu_mode
-    carry through when this browse was reached via an artist rather than
-    directly from Albums - confirmed via two separate real captures using
-    different browse paths (with and without artist_id present).
-
-    track_id resolved from the same real, already-paginated track list
-    get_tracks() itself uses (mass.music.albums.tracks(album_id, ...)) -
-    not a second, separate fetch of anything new.
-
-    Single-track album (v65) - confirmed directly by the user testing
-    against a real LMS device: an album with only one track shows the
-    SAME 3-item menu (Add to End/Play Next/Play) as a track with no
-    natural collection at all (see get_track_play_control_menu_flat
-    below), not this 4-item one - "Play all songs" only appears when
-    there is more than one track to distinguish it from. Delegates to
-    that same shared 3-item builder in this case, passing this track's
-    own track_id as its identity - not a separate, duplicated menu
-    shape.
+    An album with one track delegates to get_track_play_control_menu_flat, since "Play
+    All" only makes sense with more than one track.
     """
     tracks = await mass.music.albums.tracks(album_id, "library", in_library_only=False)
     idx = int(play_index)
@@ -1856,31 +1610,16 @@ async def get_track_play_control_menu(mass, album_id, kwargs, play_index):
 
 def get_track_play_control_menu_flat(common_params):
     """
-    Menu for a track with no natural multi-item collection to load as a
-    whole (reached via "playControl", e.g. a single-track album).
+    Menu for a track with no natural multi-item collection to load as a whole (reached
+    via "playControl", e.g. a single-track album). Also used for tracks with no
+    collection at all: root Tracks, playlist tracks and podcast episodes.
 
-    Used for: a single-track album (delegated from
-    get_track_play_control_menu above), and any track row with no
-    collection at all - the root "My Music > Tracks" browse
-    (get_all_tracks), playlist tracks, podcast episodes - via their own
-    matching dispatch updates below.
+    Rows use Music Assistant's 5-option long-press wording (Play Now/Play Next/Add to the
+    queue, with keep-queue and replace-queue variants), matching _handle_trackinfo,
+    rather than the original 3-item LMS menu.
 
-    Originally a real, confirmed 3-item LMS menu (Add to End/Play Next/
-    Play) - field-for-field verified against a real device. Replaced
-    with Music Assistant's own 5-option long-press wording instead (Play
-    Now/Play Next/Add to the queue, each with a keep-queue and a replace-
-    queue variant), matching _handle_trackinfo's long-press menu and the
-    project's general move toward Music-Assistant-style wording over
-    real-LMS-style wording. A deliberate divergence from the captured
-    real behavior, not an oversight - if real-LMS-exact wording is ever
-    wanted back here, this is the function to revert.
-
-    common_params is whatever identity the row itself already carries -
-    {"track_id": ...} (root Tracks/podcast episodes/a single-track
-    album, all genuine library items) or {"uri": ...} (playlist tracks,
-    which may be provider-native rather than library items - see
-    get_playlist_tracks' own docstring) - resolved by the caller, not
-    fetched again here.
+    common_params is the row's own identity, resolved by the caller: {"track_id": ...}
+    (library tracks) or {"uri": ...} (playlist tracks, which may be provider-native).
     """
 
     def _row(style, text, next_window, cmd):
@@ -1914,17 +1653,11 @@ def get_track_play_control_menu_flat(common_params):
 
 async def get_playlists(mass, kwargs, index=0, quantity=None, search=None, favorite_only=False):
     """
-    Real MA data: PlaylistController.library_items()/.library_count() -
-    same generic MediaControllerBase pattern as get_artists/get_albums'
-    no-artist_id branch above, verified the same way (no override of
-    either method in playlists.py - uses the base class implementation
-    as-is). Playlists don't nest under anything else (unlike albums,
-    which can be filtered by artist), so this is always the flat "All
-    Playlists" list - no artist_id-style branching needed here.
+    Real MA data: PlaylistController.library_items()/library_count(), the generic
+    MediaControllerBase pattern as in get_artists/get_albums. Always the flat "All
+    Playlists" list.
 
-    Real per-playlist art: icon_id is "playlist-<item_id>", same
-    namespacing pattern as "artist-<item_id>" - see _fetch_real_item_art
-    below, which now handles all three prefixes.
+    icon_id is "playlist-<item_id>" (see _fetch_real_item_art).
     """
     limit = quantity if quantity is not None else 500
     items = await mass.music.playlists.library_items(
@@ -1956,9 +1689,8 @@ async def get_playlists(mass, kwargs, index=0, quantity=None, search=None, favor
         for item in items
     ]
     return {
-        # "icon_list" by analogy to the unfiltered Albums view (a flat,
-        # cover-art-driven list) - not verified against a real LMS capture
-        # of Playlists specifically, same caveat as playlists_base_actions.
+        # "icon_list" by analogy to the unfiltered Albums view; not checked against a
+        # real LMS capture of Playlists.
         "count": total,
         "offset": index,
         "window": {"windowStyle": "icon_list"},
@@ -1969,37 +1701,17 @@ async def get_playlists(mass, kwargs, index=0, quantity=None, search=None, favor
 
 async def get_playlist_tracks(mass, playlist_id, kwargs, index=0, quantity=None, player_id=None):
     """
-    Real MA data: PlaylistController.tracks(playlist_id, "library") -
-    genuinely different from AlbumsController.tracks() in two ways that
-    matter here, confirmed by reading the real source rather than assumed
-    from the naming similarity:
+    Real MA data: PlaylistController.tracks(playlist_id, "library"), which differs from
+    AlbumsController.tracks() in two ways:
 
-      1. It's an async generator, not a plain awaitable list - "playlist
-         tracks are not stored in the db, we always fetch them (cached)
-         from the provider" (that method's own docstring). We consume it
-         fully into a list before paginating, same end result as
-         get_tracks() above, just gathered differently. The 2000-item cap
-         below is defensive only - the method's own docstring says a
-         dynamic/endless playlist's provider returns a bounded sample and
-         terminates on its own (an empty page breaks the loop), so this
-         should never actually bite; it exists in case a future provider
-         doesn't honor that.
-      2. Yielded items (type PlaylistPlayableItem) are NOT guaranteed to
-         be MA library items the way an album's tracks are - they may be
-         provider-native objects (e.g. a Spotify-domain item_id) fetched
-         fresh from whichever provider backs the playlist. That means
-         commonParams here uses the track's own "uri" (a MediaItem
-         property every one of these still has, regardless of source),
-         not "track_id" - our own _handle_playlistcontrol prefers a "uri"
-         tag over a track_id lookup for exactly this reason. Contrast
-         with get_tracks() above, which safely uses track_id because
-         album tracks genuinely are library items.
+      1. It is an async generator (playlist tracks are fetched, cached, from the
+         provider), so it is consumed into a list before paginating. The 2000-item cap
+         is defensive only; providers return a bounded sample for dynamic playlists.
+      2. Items may be provider-native rather than MA library items, so commonParams
+         uses the track's "uri" (which _handle_playlistcontrol prefers) instead of
+         "track_id".
 
-    player_id (v65) - same queue-emptiness check get_tracks()/get_all_tracks()
-    already do: no natural "whole collection" load exists here either (a
-    real device test confirmed real LMS never offers a "Play all songs"
-    equivalent for playlists this way), so a non-empty queue always means
-    the 3-item get_track_play_control_menu_flat() menu, never a 4-item one.
+    player_id is unused: a single tap always adds to the queue (see tracks_base_actions).
     """
     items = []
     if playlist_id is not None:
@@ -2039,32 +1751,15 @@ async def get_radio_stations(
     mass, kwargs, index=0, quantity=None, search=None, favorite_only=False
 ):
     """
-    Real MA data: RadioController.library_items()/.library_count() - same
-    generic MediaControllerBase pattern as get_playlists above, verified the
-    same way (no override of either method in radio.py - uses the base
-    class implementation as-is).
+    Real MA data: RadioController.library_items()/library_count().
 
-    Unlike albums/playlists, a radio row plays directly rather than
-    drilling into a sub-list: RadioController.radio_tracks() exists, but
-    it's specifically for *dynamic* stations (radio.is_dynamic) -
-    algorithmically-generated stations that return a fresh batch of real
-    Track objects on demand. A plain internet radio stream isn't dynamic
-    at all - it's one continuous stream, nothing to browse into. So each
-    row here is shaped like a track row (tracks_base_actions, "go"/"play"
-    sending a "uri" tag), reusing the uri-based playback path already
-    built for playlist tracks above rather than adding anything new -
-    _handle_playlistcontrol already prefers "uri" over "track_id", and
-    Radio gets the same auto-generated .uri every MediaItem does.
+    A radio row plays directly rather than drilling into a sub-list: radio_tracks() only
+    exists for dynamic stations, and a plain stream has nothing to browse. Rows are
+    shaped like track rows (tracks_base_actions sending a "uri"), reusing the uri-based
+    playback path of playlist tracks.
 
-    Real per-station art: icon_id is "radio-<item_id>", same namespacing
-    pattern as "artist-<id>"/"playlist-<id>" - see _fetch_real_item_art.
-
-    windowStyle "icon_list" is a judgment call, not verified against a
-    real LMS capture (no prior data point for Radio anywhere in this
-    project, same caveat as playlists_base_actions) - station logos seem
-    like a natural fit for a cover-art-style grid, matching Albums/
-    Playlists rather than a plain text list, but flag if real LMS turns
-    out to want something different once tested.
+    icon_id is "radio-<item_id>" (see _fetch_real_item_art). The "icon_list" window style
+    is a judgment call, not checked against a real LMS capture.
     """
     limit = quantity if quantity is not None else 500
     items = await mass.music.radio.library_items(
@@ -2106,37 +1801,18 @@ async def get_radio_stations(
 
 async def get_audiobooks(mass, kwargs, index=0, quantity=None, search=None, favorite_only=False):
     """
-    Real MA data: AudiobooksController.library_items()/.library_count() -
-    same generic MediaControllerBase pattern as get_playlists/get_radio_stations
-    above.
+    Real MA data: AudiobooksController.library_items()/library_count().
 
-    Structurally matches Radio, not Podcasts: there is no chapters()/
-    episodes() method on AudiobooksController at all (verified - checked
-    for one the same way as PlaylistController.tracks()/
-    PodcastsController.episodes() before assuming it existed). An
-    audiobook is a single playable item; each row plays directly via its
-    own .uri, same uri-based path as Radio/playlist tracks/podcast
-    episodes.
+    Structurally like Radio, not Podcasts: AudiobooksController has no chapters()/
+    episodes(), so each row is a single playable item played via its own .uri.
 
-    Resume position (fully_played/resume_position_ms) IS real in MA's
-    model - its own base_query joins a per-session-user playlog table,
-    specifically scoped "so multi-user installs don't surface each
-    other's resume state" (that query's own docstring). Our calls here
-    have no MA user session attached at all (same as every other
-    mass.music.* call in this file - a direct in-process call, not an
-    authenticated API request), so these fields will very likely come
-    back empty for every item we see here - arguably correct for a
-    shared household Squeezebox device that isn't logged in as any
-    particular MA user, but untested whether MA's playback layer picks
-    up resume position separately at actual play time regardless.
+    Resume position (fully_played/resume_position_ms) is scoped to a per-session MA user,
+    and these in-process calls have no user session, so those fields are likely empty
+    here. Untested whether MA's playback layer applies resume position separately.
 
-    Real per-book art: icon_id is "audiobook-<item_id>", same namespacing
-    pattern as "radio-<id>" - see _fetch_real_item_art.
-
-    windowStyle "icon_list" and reusing tracks_base_actions wholesale are
-    both judgment calls here too, same caveat as Radio/Podcasts/
-    playlists_base_actions - no real LMS capture of Audiobooks browsing
-    anywhere in this project to check against.
+    icon_id is "audiobook-<item_id>" (see _fetch_real_item_art). The "icon_list" style
+    and reuse of tracks_base_actions are judgment calls, not checked against a real LMS
+    capture.
     """
     limit = quantity if quantity is not None else 500
     items = await mass.music.audiobooks.library_items(
@@ -2178,16 +1854,12 @@ async def get_audiobooks(mass, kwargs, index=0, quantity=None, search=None, favo
 
 async def get_podcasts(mass, kwargs, index=0, quantity=None, search=None, favorite_only=False):
     """
-    Real MA data: PodcastsController.library_items()/.library_count() -
-    library_items() IS overridden here (unlike albums/playlists/radio),
-    adding favorite/search/genre/provider filtering - but with the same
-    limit/offset/summary defaults and semantics for the plain, unfiltered
-    call we make here, so it behaves identically to the base-class version
-    everything else in this file relies on. library_count() is NOT
-    overridden - the plain inherited version, same as always.
+    Real MA data: PodcastsController.library_items()/library_count(). library_items() is
+    overridden (adding favorite/search/genre/provider filtering) but behaves like the
+    base class for the plain call used here.
 
-    Flat list, no filtering - same shape as get_playlists() above. Real
-    per-podcast art via icon_id "podcast-<id>" - see _fetch_real_item_art.
+    A flat list like get_playlists(). icon_id is "podcast-<id>" (see
+    _fetch_real_item_art).
     """
     limit = quantity if quantity is not None else 500
     items = await mass.music.podcasts.library_items(
@@ -2229,22 +1901,13 @@ async def get_podcasts(mass, kwargs, index=0, quantity=None, search=None, favori
 
 async def get_podcast_episodes(mass, podcast_id, kwargs, index=0, quantity=None, player_id=None):
     """
-    Real MA data: PodcastsController.episodes(podcast_id, "library") -
-    an async generator, same shape and same underlying reason as
-    PlaylistController.tracks() above: "podcast episodes are not stored in
-    the db/library so we always need to fetch them from the provider"
-    (that method's own docstring, verbatim the same claim as playlists) -
-    so, same as get_playlist_tracks above: consumed fully into a list
-    before paginating (same defensive 2000-item cap, same reasoning), and
-    playback uses the episode's own "uri" rather than "track_id", since
-    episodes aren't guaranteed to be MA library items any more than
-    playlist tracks were.
+    Real MA data: PodcastsController.episodes(podcast_id, "library"). Like
+    PlaylistController.tracks() it is an async generator (episodes are fetched from the
+    provider, not stored), so it is consumed into a list before paginating, with the
+    same defensive 2000-item cap, and playback uses the episode's "uri" rather than
+    "track_id" since episodes may not be MA library items.
 
-    player_id (v65) - same queue-emptiness check as get_playlist_tracks()
-    above, for the same reason (no natural "whole collection" load here
-    either) - a non-empty queue means the 3-item get_track_play_control_menu_flat()
-    menu, mirroring the other track-row listings this same mechanism now
-    covers.
+    player_id is unused: a single tap always adds to the queue (see tracks_base_actions).
     """
     items = []
     if podcast_id is not None:
@@ -2280,60 +1943,26 @@ async def get_podcast_episodes(mass, podcast_id, kwargs, index=0, quantity=None,
     }
 
 
-# Artists/Albums/Tracks/Playlists/Audiobooks/Podcasts/Radio each get
-# their own distinct icon name (AllArtists.png, Albums.png, Playlists.png,
-# AudioBooks.png, podcasts.png, radiolocal.png) rather than reusing the
-# generic "artists.png"/"albums.png" per-row icon names - each needs its
-# own real file in static/ (see _resolve_static_icon_path further down,
-# which matches these 1:1, no aliasing), even where two of them happen to
-# be identical images (Playlists.png is currently a copy of Albums.png,
-# and Tracks currently also points at Albums.png - see that tile's own
-# comment). Keeping the images in sync (or not) is static/'s problem
-# from here, never this list's again.
+# Each root tile has its own icon name (AllArtists.png, Albums.png, Playlists.png,
+# AudioBooks.png, podcasts.png, radiolocal.png), each needing a real file in static/
+# (_resolve_static_icon_path matches them 1:1, no aliasing), even where two are the
+# same image (Playlists.png and Tracks both currently use Albums.png).
 #
-# Ordering/weights here deliberately match Music Assistant's own root UI
-# taxonomy (Artists, Albums, Tracks, Playlists, Audiobooks, Podcasts,
-# Radio), not real LMS's menu structure - a deliberate choice, not an
-# oversight: this repository's actual content model is MA's, and trying
-# to keep bending it to fit LMS's own historical categories (which don't
-# even distinguish "Album Artists" from "All Artists" in our data - see
-# below) was adding confusion without adding fidelity to anything real.
-# Genres is the one MA-taxonomy item still missing - not a menu-entry
-# oversight, it needs its own real investigation first (MA doesn't model
-# genres as a first-class browsable controller the way it does everything
-# else here; more like a tag/filter on albums and tracks) - see this
-# project's own history for why it was dropped rather than guessed at.
+# Order and weights follow Music Assistant's root UI (Artists, Albums, Tracks,
+# Playlists, Audiobooks, Podcasts, Radio), not LMS's menu structure, since the content
+# model is MA's. Genres is missing: MA doesn't model genres as a browsable controller
+# (more a tag/filter on albums and tracks).
 
 
 def _standalone_actions(base_actions, item):
     """
-    Build a fully self-contained per-item actions dict from a shared
-    base-level template, by baking the item's own data directly into
-    each action's params instead of relying on itemsParams to resolve
-    it indirectly.
+    Build a self-contained per-item actions dict from a shared base-level template by
+    baking the item's own data into each action's params.
 
-    Real bug found via a direct docker log capture: after get_search_all
-    started attaching each row's own matching actions dict directly
-    (fixing "nothing happens" on select - see that function's own
-    docstring), selecting a track DID fire playlistcontrol - but the
-    outgoing request never included track_id, just the shared/static
-    params (cmd, sort, search, menu). itemsParams: "commonParams" (the
-    mechanism meant to inject the item's own field into the outgoing
-    command) never resolved. The SlimBrowse Protocol reference's own
-    wording is the likely reason: "In base level commands, this defines
-    the name of the field in the item <actions_fields> that must be used
-    to complete the command for a particular item" - itemsParams is
-    documented as a base-level mechanism specifically; duplicating the
-    same template onto each item's own "actions" (rather than the
-    response's "base") apparently doesn't get the same resolution.
-
-    Used generally, not just for commonParams - every action in this
-    file's four templates (ARTIST_LIST_BASE_ACTIONS/albums_base_actions/
-    playlists_base_actions/tracks_base_actions) uses itemsParams,
-    referencing one of commonParams, addallParams, or presetParams
-    depending on the action - this looks up whichever field each
-    individual action actually references on the item itself, rather
-    than assuming commonParams everywhere.
+    itemsParams only resolves in a response-level "base": duplicated onto an item's own
+    "actions" it does not, and a selected search row fired playlistcontrol without its
+    track_id. Each action's referenced field (commonParams, addallParams or
+    presetParams) is looked up on the item.
     """
     result = {}
     for key, action in base_actions.items():
@@ -2347,60 +1976,19 @@ def _standalone_actions(base_actions, item):
 
 async def get_search_all(mass, search, kwargs, index=0, quantity=None, player_id=None):
     """
-    Combined search across all seven types at once - queries each type's
-    own already-existing get_X() function in parallel (asyncio.gather),
-    then concatenates their item_loop rows into one unified list. Reuses
-    every bit of each type's own row-building (icon handling, commonParams
-    shape, presetParams, playback wiring) entirely - nothing duplicated
-    here, this just stitches together what each one already returns.
+    Combined search across all seven types: queries each type's get_X() in parallel and
+    concatenates their item_loop rows, reusing each type's row-building.
 
-    Per-type fetch is capped at a fixed, modest amount (15 each, 105 max
-    combined) regardless of what index/quantity the device actually
-    requested for THIS call - real pagination through the combined set
-    happens afterward, locally, via the same _paginate() helper used
-    throughout this file for provider-native async-generator results
-    (get_playlist_tracks/get_podcast_episodes). Re-querying each of the
-    seven types on every single page request (as the device scrolls)
-    would be wasteful and wouldn't map cleanly onto a single combined
-    index/quantity anyway, since the seven types have no shared ordering.
+    Each type is capped at 15 rows (105 combined) regardless of the requested
+    index/quantity, and pagination through the combined set happens locally with
+    _paginate(); re-querying seven types per page would not map onto one combined index.
+    "count" is the number gathered, not a true match total, since library_count() has no
+    search= param.
 
-    "count" reflects however many rows were actually gathered this call
-    (up to 105) - not a true total match count across all types, same
-    len()-based limitation as each individual type's own search results
-    already have (library_count() has no search= param - see get_artists'
-    docstring).
-
-    Each row gets its own per-item "actions" block attached explicitly
-    (see _standalone_actions() above) rather than relying on this
-    response's own "base" the way every other function in this file
-    does - there's no single base actions template that correctly
-    applies to all seven mixed types at once (an Artist row needs to
-    "go" into albums; a Track row needs to "play" directly). Each
-    action's own itemsParams-referenced data (track_id, uri, etc.) is
-    baked directly into that item's own params rather than left as an
-    itemsParams reference - confirmed via a real docker log capture that
-    itemsParams doesn't resolve the same way once duplicated onto a
-    per-item actions block instead of a genuine response-level "base"
-    (matches the SlimBrowse Protocol reference's own description of
-    itemsParams as a base-level mechanism specifically).
-
-    player_id (v66) - threaded into the get_all_tracks() call below so
-    its rows' "goAction"/"playControlParams" (see that function's own
-    v65 update) reflect the real queue state, same as every other
-    track-row listing. Previously missing here specifically: a track
-    selected via search always behaved as if the queue were empty,
-    regardless of its actual state - the general rule (nothing playing:
-    assume the pick; something already queued: always confirm) applies
-    to every selection, this one included, not just direct album/tracks
-    browsing. Confirmed to replay correctly through
-    tracks_base_actions' own "playControl" action without further
-    change: that action's re-query params already carry "search"
-    through (v65), so a tap re-queries mode:"tracks" search:<term>
-    xmlbrowserPlayControl:<index> - landing on the exact same
-    search-filtered, per_type_limit-capped list this function itself
-    built the row from (same get_all_tracks call, same search term,
-    same default favorite_only=False), not the combined seven-type list
-    this response returns.
+    Each row gets its own "actions" block (see _standalone_actions) instead of the
+    response's "base": no single template fits all seven mixed types (an Artist row
+    "go"es into albums, a Track row plays directly), and itemsParams only resolves in a
+    response-level base.
     """
     per_type_limit = 15
     results = await asyncio.gather(
@@ -2412,20 +2000,9 @@ async def get_search_all(mass, search, kwargs, index=0, quantity=None, player_id
         get_podcasts(mass, kwargs, 0, per_type_limit, search),
         get_radio_stations(mass, kwargs, 0, per_type_limit, search),
     )
-    # Each type's rows normally rely on "base": {"actions": ...} at the
-    # RESPONSE level (a different template per type - see each get_X()
-    # function's own return) - their "goAction": "play"/etc. shorthand
-    # only resolves because of that shared base. This combined response
-    # has no single base that could apply correctly to all seven mixed
-    # types at once (an Artist row needs a "go" into albums; a Track row
-    # needs to "play" directly - no one template fits both). Fix: attach
-    # each row's own correct actions block directly, per item - a real,
-    # documented per-item override (<item_fields>.actions in the
-    # SlimBrowse Protocol reference). Passed through _standalone_actions
-    # (see above) to bake each item's own data directly into its params,
-    # rather than reusing the template's itemsParams reference as-is -
-    # that stopped resolving once it was no longer at the response's
-    # actual "base" (confirmed via a real docker log capture).
+    # Attach each row's own actions block (see the docstring and _standalone_actions):
+    # no single base template fits all seven types, and itemsParams stops resolving
+    # once it is off the response-level "base".
     type_actions = [
         ARTIST_LIST_BASE_ACTIONS,
         albums_base_actions(kwargs),
@@ -2442,16 +2019,9 @@ async def get_search_all(mass, search, kwargs, index=0, quantity=None, player_id
             combined.append(item)
     window, total, offset = _paginate(combined, index, quantity)
     return {
-        # icon_list, not text_list - confirmed via a real device report:
-        # text_list rendered every row's two-line "text" (title\nartist,
-        # same convention get_all_tracks/get_albums already use) as two
-        # equal-size lines, looking visibly "off" next to the real Tracks
-        # view's title+smaller-subtitle treatment. icon_list already
-        # handles exactly this mix correctly elsewhere in this file -
-        # two-line rows (get_albums' unfiltered view) and single-line
-        # rows (get_playlists/get_radio_stations) both render right under
-        # it, and every row here already carries its own "icon" field
-        # from whichever type built it, so nothing else needs to change.
+        # icon_list, not text_list: text_list rendered the two-line "title\nartist"
+        # text as two equal-size lines, while icon_list shows a smaller subtitle, as
+        # the Tracks view does.
         "count": total,
         "offset": offset,
         "window": {"windowStyle": "icon_list"},
@@ -2461,40 +2031,19 @@ async def get_search_all(mass, search, kwargs, index=0, quantity=None, player_id
 
 async def get_favorites_all(mass, kwargs, index=0, quantity=None):
     """
-    Combined view across all seven favorited types at once - unlike
-    get_search_all() above, this does GENUINE pagination across the
-    combined set rather than a fixed per-type cap, since a favorites list
-    is a real, bounded, curated set someone built up over time (could
-    easily be far more than the 15-per-type/105-total cap search results
-    settle for) - capping it would quietly hide real favorites rather
-    than just under-representing a transient search.
+    Combined view across all seven favorited types, in get_search_all()'s fixed order
+    (artists, albums, tracks, playlists, audiobooks, podcasts, radio).
 
-    How: first gets each type's REAL count via that controller's own
-    library_count(favorite_only=True) - seven cheap COUNT(*)-only
-    queries, run in parallel, no item_loop rows fetched yet. Unlike
-    search (library_count() has no search= param - see get_artists'
-    docstring), favorite_only genuinely IS a real library_count() param
-    (confirmed via the real music-assistant/server source), so this
-    total is exact, not a len()-based approximation.
+    Unlike search, this paginates over the whole combined set instead of capping per
+    type, since favorites are a curated set that can be large. library_count(
+    favorite_only=True) gives an exact count per type (seven cheap count queries in
+    parallel), defining a virtual combined range. The requested [index, index+limit)
+    window is intersected with each type's slice, and only the overlapping types are
+    fetched (with local offset/limit), concurrently: usually one type, sometimes two at a
+    boundary.
 
-    Those seven counts define a virtual combined range (artists first,
-    then albums, tracks, playlists, audiobooks, podcasts, radio - same
-    fixed order get_search_all() already uses, kept identical so a type's
-    position in "All Favorites" doesn't move relative to where it'd
-    appear browsing that type directly). The requested [index, index+
-    limit) window is intersected against each type's own slice of that
-    virtual range; only types the window actually overlaps get a real
-    fetch (their own get_X(favorite_only=True) call, with the LOCAL
-    offset/limit inside that type's own slice) - a normal-sized page
-    almost always overlaps just one type, occasionally two at a boundary,
-    and every fetch that does happen runs concurrently via asyncio.gather.
-    A type with zero favorites costs nothing beyond its own count query -
-    it never appears in the overlap set at all.
-
-    Row shape reuses everything get_search_all() already established:
-    each type's own row-building is untouched, and the same _standalone_
-    actions()-per-row treatment applies here for the same reason (no
-    single base actions template fits all seven mixed types).
+    Rows reuse each type's row-building with the same per-row _standalone_actions
+    treatment as search.
     """
     limit = quantity if quantity is not None else 500
     end = index + limit
@@ -2571,8 +2120,7 @@ async def get_favorites_all(mass, kwargs, index=0, quantity=None):
             item["actions"] = _standalone_actions(actions, item)
             combined.append(item)
     return {
-        # icon_list, not text_list - same real fix and same reasoning as
-        # get_search_all() above (see its own comment on this same line).
+        # icon_list, as in get_search_all()
         "count": total,
         "offset": index,
         "window": {"windowStyle": "icon_list"},
@@ -2582,30 +2130,13 @@ async def get_favorites_all(mass, kwargs, index=0, quantity=None):
 
 def _search_category_menu(search):
     """
-    Real LMS's own search UX: typing a term returns a category menu
-    (Search All/Artists/Albums/Tracks/.../Radio), each drilling into that
-    type's own already-existing browse function, now filtered by search -
-    not a separate results path. See the SlimBrowse Protocol reference's
-    own documented example (input field + __TAGGEDINPUT__ + a "search"-
-    style command) for the client-side mechanism this responds to.
+    The category menu shown after typing a search term (Search All, then one entry per
+    type), each drilling into that type's browse function filtered by the search, as in
+    LMS. "Search All" is first since wanting everything is the common case.
 
-    "Search All" (see get_search_all() above) is listed first - added
-    after the fact, once real use showed the seven-way category choice
-    got in the way of the common case (wanting everything, not picking a
-    type first every time). Kept alongside the per-type options rather
-    than replacing them - narrowing to one type is still useful sometimes,
-    just no longer the only path.
-
-    Deliberately NOT showing a per-category match count (e.g. "Artists
-    (3)", which real LMS's own search does show) - MediaControllerBase.
-    library_count() has no search= parameter (checked directly, only
-    favorite_only), so a real count per category would mean an extra
-    fetch-and-len() per type just to render this menu, for every
-    keystroke-driven search. Simpler and cheaper: always list every
-    category; a category with no matches just shows an empty list on
-    drill-in, same as browsing to a genuinely empty part of the library
-    today - not treated as an error state anywhere else in this file
-    either.
+    No per-category match count is shown: library_count() has no search= param, so
+    counting would need an extra fetch per type. A category with no matches just shows
+    an empty list.
     """
     categories = [
         ("Search All", "search_all"),
@@ -2640,23 +2171,10 @@ def _search_category_menu(search):
 
 def _favorites_category_menu():
     """
-    Mirrors _search_category_menu() above exactly - same category-menu
-    shape (All Favorites first, then one entry per type), same reasoning
-    for why: a flat "everything" view is the common case, per-type still
-    useful sometimes. The one real difference from search: favorite_only
-    genuinely DOES support library_count() (confirmed via the real
-    music-assistant/server source - only search= is unsupported there),
-    so unlike _search_category_menu, a real per-category count is cheap
-    enough to show here (e.g. "Albums (12)") - kept out anyway, for now,
-    to keep this a straight, obviously-correct mirror of the existing
-    pattern rather than a divergent one; revisit if that count turns out
-    to matter in practice.
-
-    Each entry reuses the exact same mode values that already exist -
-    "favorites_all"/"artists"/"albums"/etc. - with favorite_only: 1
-    threaded through instead of search: this is the same dispatch branch
-    every other browse already goes through (see _dispatch below), not a
-    parallel favorites-specific path.
+    Mirrors _search_category_menu (All Favorites first, then one entry per type) with
+    favorite_only threaded through instead of search, using the same dispatch modes as
+    normal browsing. No per-category count is shown, though
+    library_count(favorite_only=True) would support one.
     """
     categories = [
         ("All Favorites", "favorites_all"),
@@ -2692,15 +2210,8 @@ def _favorites_category_menu():
 MY_MUSIC_NODE = [
     {"node": "home", "id": "myMusic", "text": "My Music", "isANode": 1, "weight": 11},
     {
-        # Was two separate tiles (Album Artists / All Artists), collapsing
-        # real LMS's role-based artist/album-artist distinction - removed
-        # since get_artists() above never modeled that distinction at all
-        # (no role_id filtering), so the two tiles always returned the
-        # identical list under different names. One honest tile instead.
-        # Icon reuses AllArtists.png rather than requiring a new file -
-        # semantically the closer match now that this shows every artist
-        # uniformly, and this project's existing 1:1-filename discipline
-        # holds: change this line if you'd rather it point at its own file.
+        # A single Artists tile: get_artists() doesn't distinguish album artists from
+        # all artists. Reuses AllArtists.png.
         "node": "myMusic",
         "id": "myMusicArtists",
         "text": "Artists",
@@ -2723,12 +2234,8 @@ MY_MUSIC_NODE = [
         },
     },
     {
-        # Real data now - see get_all_tracks() above. New alongside this
-        # menu restructure - previously tracks were only reachable by
-        # drilling into an album first, no flat root-level browse existed.
-        # Icon reuses Albums.png - no dedicated "tracks" file exists, and
-        # none was given for this one either. Same deal as the Audiobooks
-        # entry below: rename this line once a real one shows up.
+        # Flat root-level track browse (get_all_tracks). Reuses Albums.png; there is
+        # no dedicated tracks icon.
         "node": "myMusic",
         "id": "myMusicTracks",
         "text": "Tracks",
@@ -2740,7 +2247,7 @@ MY_MUSIC_NODE = [
         },
     },
     {
-        # Real data now - see get_playlists() above.
+        # See get_playlists().
         "node": "myMusic",
         "id": "myMusicPlaylists",
         "text": "Playlists",
@@ -2752,7 +2259,7 @@ MY_MUSIC_NODE = [
         },
     },
     {
-        # Real data now - see get_audiobooks() above.
+        # See get_audiobooks().
         "node": "myMusic",
         "id": "myMusicAudiobooks",
         "text": "Audiobooks",
@@ -2764,7 +2271,7 @@ MY_MUSIC_NODE = [
         },
     },
     {
-        # Real data now - see get_podcasts()/get_podcast_episodes() above.
+        # See get_podcasts()/get_podcast_episodes().
         "node": "myMusic",
         "id": "myMusicPodcasts",
         "text": "Podcasts",
@@ -2776,12 +2283,8 @@ MY_MUSIC_NODE = [
         },
     },
     {
-        # Real data now - see get_radio_stations() above. Distinct from
-        # real LMS's own "Radio" node, which is normally a TuneIn/plugin
-        # browse-and-discover experience - this is specifically your MA
-        # library's saved radio stations, playable directly (see that
-        # function's own docstring for why there's no sub-list to drill
-        # into first).
+        # Saved MA radio stations, playable directly (unlike LMS's TuneIn-style Radio
+        # node); see get_radio_stations().
         "node": "myMusic",
         "id": "myMusicRadio",
         "text": "Radio",
@@ -2793,17 +2296,10 @@ MY_MUSIC_NODE = [
         },
     },
     {
-        # Real search now - see _search_category_menu() above.
-        # "input": {"len": 3} is the structured <input_fields> form from
-        # the SlimBrowse Protocol reference's own schema - the doc's
-        # illustrative example shows a bare "input = 3" shorthand, but
-        # that's Perl's loose typing, not necessarily something the
-        # client's JSON parser accepts the same way; using the
-        # schema's own documented object form here instead.
-        # __TAGGEDINPUT__ is replaced client-side with whatever the user
-        # typed, sent back as search:<what they typed> - by the time this
-        # reaches _dispatch, kwargs["search"] is already the plain query
-        # string, nothing further to decode here.
+        # Real search: see _search_category_menu(). "input": {"len": 3} is the
+        # structured form from the SlimBrowse schema. The client replaces
+        # __TAGGEDINPUT__ with what was typed, so kwargs["search"] arrives as the
+        # plain query.
         "node": "myMusic",
         "id": "myMusicSearch",
         "text": "Search",
@@ -2818,25 +2314,10 @@ MY_MUSIC_NODE = [
         },
     },
     {
-        # v45: implemented for real - see _favorites_category_menu()/
-        # get_favorites_all() above. Was previously in the "Deliberately
-        # NOT included" list below on the grounds that it looked like its
-        # own real subsystem - turned out to just be a real, existing
-        # favorite=/favorite_only= filter every media controller's
-        # library_items()/library_count() already supports (confirmed
-        # against the real music-assistant/server source), the same
-        # shape as every other tile here. Weight 5 (ahead of everything
-        # else) - a deliberate placement choice, not verified against a
-        # real LMS capture of where Favorites sits in its own home menu;
-        # move this if a real capture turns out to disagree.
-        #
-        # icon (v47): plain unsized name, matching every sibling tile
-        # here (AllArtists.png, not AllArtists_225x225_m.png) -
-        # _resolve_static_icon_path (below) strips the device's own
-        # requested size suffix and looks for a real file named
-        # favorites_225x225_m.png first, falling back to favorites.png -
-        # needs one of those two real files placed in static/, same as
-        # every other chrome icon in this file.
+        # Weight 5 puts Favorites ahead of everything else; not checked against where
+        # real LMS places it. The icon is the plain unsized name like its siblings:
+        # _resolve_static_icon_path strips the requested size suffix and looks for
+        # favorites_225x225_m.png, then favorites.png, in static/.
         "node": "myMusic",
         "id": "myMusicFavorites",
         "text": "Favorites",
@@ -2847,13 +2328,9 @@ MY_MUSIC_NODE = [
             "go": {"cmd": ["browselibrary", "items"], "params": {"menu": 1, "mode": "favorites"}}
         },
     },
-    # Deliberately NOT included: Settings, Random Mix, and any
-    # plugin-contributed entries (TuneIn's own browse/discover
-    # experience, etc.) - these map to entirely separate MA subsystems
-    # (TuneIn integration, settings screens), each its own real piece of
-    # work, not something to add here without review. A real LMS home
-    # menu has ~50 items along these lines; this intentionally stays
-    # narrow to what's actually implemented behind it.
+    # Deliberately not included: Settings, Random Mix and plugin-contributed entries
+    # (TuneIn etc.), which map to separate MA subsystems. A real LMS home menu has ~50
+    # items; this stays limited to what is implemented.
 ]
 
 
@@ -2935,17 +2412,14 @@ def get_menu(player, index=0, quantity=100):
 
 class BrowseLibraryHandler:
     """
-    cli_command_handler for SlimServer - handles 'browselibrary' and
-    'menu', raising NotImplementedError for everything else so it falls
-    through to aioslimproto's built-ins untouched (status, serverstatus,
-    etc.).
+    cli_command_handler for SlimServer: handles 'browselibrary', 'menu' and the commands
+    dispatched below, raising NotImplementedError for everything else so it falls
+    through to aioslimproto's built-ins (status, serverstatus, etc.).
 
-    Takes the whole provider (not just mass) since 'menu' needs
-    provider.slimproto.get_player() for presets, alongside provider.mass
-    for real library data later - and provider.slimproto doesn't exist
-    yet at the moment this handler is constructed (it's one of
-    SlimServer's own constructor args), so it's accessed lazily through
-    the provider at call time, not stored directly here.
+    Takes the whole provider, not just mass: 'menu' needs provider.slimproto.get_player()
+    for presets, and provider.slimproto doesn't exist yet when this handler is
+    constructed (it is one of SlimServer's constructor args), so it is reached lazily at
+    call time.
     """
 
     def __init__(self, provider):
@@ -2953,24 +2427,8 @@ class BrowseLibraryHandler:
         self.mass = provider.mass
 
     async def __call__(self, slim_command):
-        # The project's own working copy logs every step here with
-        # print()-based [BL]-prefixed lines (print, not logger, so they
-        # show in `docker logs` regardless of MA's configured log level) -
-        # stripped for this branch; see lawrence-jeff/MA-SqueezeliteBrowse
-        # for the live version with that logging intact.
-        #
-        # __call__/_dispatch are async now that get_artists/get_albums/
-        # get_tracks make real (awaited) mass.music.* calls - aioslimproto's
-        # own dispatch (_dispatch_command in cli.py) already handles an
-        # awaitable command_handler result via inspect.isawaitable(), so no
-        # change was needed there. Keeping the try/except here (rather than
-        # letting it return an un-awaited coroutine for the caller to await
-        # unguarded) matters: it's what keeps a real MA-side exception
-        # (MediaNotFoundError, a DB error, etc.) caught and printed with full
-        # context right here, instead of surfacing bare at whatever distant
-        # point happens to await this - same reasoning as the existing
-        # "QUEUE FULL" and 30s-wait forced-print instrumentation elsewhere
-        # in this project: a real failure should be impossible to miss.
+        # Async because the listings make awaited mass.music.* calls; aioslimproto's
+        # dispatch handles an awaitable result.
         try:
             result = await self._dispatch(slim_command)
             return result
@@ -3005,15 +2463,9 @@ class BrowseLibraryHandler:
             return await self._handle_playlist(slim_command)
 
         if slim_command.command == "jiveblankcommand":
-            # Real LMS's own no-op command (Slim/Control/Queries.pm's
-            # _addJivePlaylistControls, confirmed via the real source) -
-            # what the queue view's "Clear Playlist" submenu's "Cancel"
-            # row sends. Not handled anywhere in aioslimproto (checked
-            # before adding this - no _handle_jiveblankcommand exists
-            # there either), so without this it would raise
-            # NotImplementedError and surface as a real error to the
-            # device for a plain "never mind" tap. A true no-op: nothing
-            # to do, nothing to confirm.
+            # LMS's own no-op (what the queue view's "Clear Playlist" Cancel row sends).
+            # aioslimproto has no handler, so without this a plain "never mind" tap
+            # would surface as an error.
             return None
 
         if slim_command.command == "status":
@@ -3032,31 +2484,22 @@ class BrowseLibraryHandler:
         quantity = int(args[2]) if len(args) > 2 else None
         mode = kwargs.get("mode")
         search = kwargs.get("search")
-        # v45: same idea as search= above, threaded through every existing
-        # per-type branch below rather than adding a parallel set of
-        # favorites-specific modes - "Favorites > Albums" and "My Music >
-        # Albums" both end up calling the exact same get_albums(), just
-        # with this one extra flag set. bool(...) since SlimBrowse params
-        # arrive as ints (favorite_only: 1), not real booleans.
+        # Threaded through every per-type branch below instead of separate favorites
+        # modes: "Favorites > Albums" and "My Music > Albums" both call get_albums(),
+        # with this flag set or not. bool() since SlimBrowse params arrive as ints.
         favorite_only = bool(kwargs.get("favorite_only"))
 
         if mode == "search":
-            # The "Search" home menu item itself (see MY_MUSIC_NODE) -
-            # returns a category menu (Search All/Artists/Albums/Tracks/
-            # .../Radio), each entry re-entering with that same search
-            # term plus its own mode - reusing every existing get_X()
-            # function's new search= support below rather than a
-            # separate results path.
+            # The Search home item: a category menu whose entries re-enter with the
+            # same search term and their own mode.
             return _search_category_menu(search or "")
         if mode == "search_all":
             return await get_search_all(
                 self.mass, search or "", kwargs, index, quantity, player_id=slim_command.player_id
             )
         if mode == "favorites":
-            # The "Favorites" home menu item (see MY_MUSIC_NODE) - same
-            # category-menu shape as "search" above, see
-            # _favorites_category_menu()'s own docstring for how the two
-            # compare.
+            # The Favorites home item: a category menu like "search" above; see
+            # _favorites_category_menu().
             return _favorites_category_menu()
         if mode == "favorites_all":
             return await get_favorites_all(self.mass, kwargs, index, quantity)
@@ -3069,29 +2512,13 @@ class BrowseLibraryHandler:
                 self.mass, artist_id, kwargs, index, quantity, search, favorite_only
             )
         if mode == "tracks":
-            # podcast_id / playlist_id / album_id checked first: if
-            # present, this is that container's episode/track listing.
-            #
-            # xmlbrowserPlayControl now checked for all four branches
-            # (v65) - previously only album_id's own branch checked it.
-            # The same real "playControl" mechanism applies to every
-            # track-row listing this file builds via tracks_base_actions
-            # (get_tracks/get_all_tracks/get_playlist_tracks/
-            # get_podcast_episodes all share it) - confirmed directly
-            # against a real LMS device for a track reached via search,
-            # structurally the same "no album_id" case as
-            # get_all_tracks/get_playlist_tracks/get_podcast_episodes.
-            # Real LMS's own menu there was the 3-item shape (Add to
-            # End/Play Next/Play, no "Play all songs") - get_track_play_control_menu_flat's
-            # own docstring has the full real-device confirmation.
-            #
-            # For podcast/playlist/root-tracks, resolved by re-fetching
-            # just the tapped row (quantity=1, index=play_control_index)
-            # through that same listing's own already-existing function -
-            # reuses its real fetch/pagination rather than duplicating
-            # it, and its row's own "commonParams" (track_id or uri,
-            # whichever that listing already builds) is exactly the
-            # identity get_track_play_control_menu_flat needs.
+            # podcast_id / playlist_id / album_id, if present, make this that container's
+            # listing. xmlbrowserPlayControl (the "playControl" re-query) is checked for
+            # every track listing since they share tracks_base_actions: an album gets the
+            # 4-item menu, the rest the flat menu. For podcast/playlist/root tracks the
+            # tapped row is re-fetched (quantity=1) through that listing's own function,
+            # whose row "commonParams" (track_id or uri) is the identity the flat menu
+            # needs.
             podcast_id = kwargs.get("podcast_id")
             playlist_id = kwargs.get("playlist_id")
             album_id = kwargs.get("album_id")
@@ -3139,9 +2566,7 @@ class BrowseLibraryHandler:
                     quantity,
                     player_id=slim_command.player_id,
                 )
-            # No context id at all: the root-level "Tracks" browse
-            # (get_all_tracks) - previously a dead end here (album_id=None
-            # just returned an empty list).
+            # No context id: the root-level Tracks browse (get_all_tracks).
             if play_control_index is not None:
                 idx = int(play_control_index)
                 page = await get_all_tracks(self.mass, kwargs, idx, 1, search, favorite_only)
@@ -3173,96 +2598,31 @@ class BrowseLibraryHandler:
 
     async def _handle_playlistcontrol(self, slim_command):
         """
-        Basic first pass at playlistcontrol - the command JiveLite sends when
-        the user picks play/add/insert on a browselibrary item (see the "go"/
-        "play"/"add"/"add-hold" actions in tracks_base_actions above).
+        Handle playlistcontrol, which JiveLite sends for play/add/insert on a browse item
+        (the "go"/"play"/"add"/"add-hold" actions in the base action templates above).
 
-        Handles cmd=load (play now), cmd=add (append to end of the queue),
-        and cmd=insert (play next) - see the queue_options mapping just
-        below for the cmd -> QueueOption pairing. Either via one of two tags:
-          - "uri" - used by playlist tracks (get_playlist_tracks above),
-            since those aren't guaranteed to be MA library items (see that
-            function's own docstring) - played directly via the uri, no
-            lookup needed. Checked first since it's the cheaper, more
-            general path when present.
-          - "track_id" - used by album tracks (get_tracks above), which
-            genuinely are library items - resolved via
-            mass.music.tracks.get_library_item(track_id) for its `.uri`.
-            Unchanged from before "uri" support was added - an album
-            track row never sends a "uri" tag, so this path behaves
-            identically to before for the (far more common) album case.
-            v67 tried passing the resolved track OBJECT itself here
-            instead (media=track, not track.uri), as a real, well-
-            evidenced candidate fix for a separate Now Playing title-
-            combining bug - a real device test disproved it (didn't fix
-            that bug, broke queue item removal) and it was reverted;
-            see that branch's own comment for the full account.
-        Either way, mapped onto mass.player_queues.play_media(queue_id=
-        player_id, media=<uri>, option=<mapped QueueOption>) - verified
-        against the real PlayerQueuesController source (music_assistant/
-        controllers/player_queues/controller.py): queue_id is documented
-        as literally the player_id, and media accepts a plain URI string
-        directly.
+        cmd maps onto a QueueOption (see queue_options): load -> PLAY, add -> ADD,
+        insert -> NEXT, replace -> REPLACE, replace_next -> REPLACE_NEXT. The item is
+        identified by one of:
+          - "uri": playlist tracks, radio, podcasts etc., which may not be MA library
+            items; played directly. Checked first.
+          - "track_id": a library track, resolved via get_library_item for its .uri.
+          - "album_id" (with no track_id/uri): the whole album, from "play_index" if
+            given (a tap on a track inside an album sends cmd:load with this).
+          - "artist_id" (with no album_id/track_id/uri): all of the artist's library
+            tracks.
+        Everything goes to mass.player_queues.play_media(queue_id=player_id, ...);
+        queue_id is the player_id.
 
-        As of v61 (this update), a third tag is also handled:
-          - "album_id" (with no "track_id"/"uri" present, cmd=="load"
-            only) - a regular tap on a track row inside an album's track
-            listing sends this, confirmed via a real client trace, not
-            the single-track "commonParams" this used to send (see
-            tracks_base_actions' matching update). Real LMS's own
-            behavior here is "load the whole album, starting at
-            play_index" - NOT achieved via play_media's own start_item/
-            sort_by params despite how well they read on paper: a real
-            device test confirmed passing start_item alone put the
-            selected track at the front of the queue instead of
-            preserving the earlier tracks ahead of it, and reading the
-            real source (controllers/player_queues/queue_loader.py's own
-            _handle_play_media) confirmed why - keep_preceding_items
-            (the parameter that actually decides this) is hardcoded
-            internally to queue.shuffle_enabled, not something a caller
-            can set. Real fix: mass.music.albums.tracks(album_id, ...)
-            (the same real call get_tracks() above already uses to
-            build the listing, confirmed already sorted by
-            (disc_number, track_number) - real LMS's own "sort:albumtrack")
-            loaded as one batch via play_media, then a separate,
-            explicit play_index() call to jump to the selected position
-            - two real, separate, confirmed public API calls, not one
-            call doing something its own signature cannot express.
-
-        As of v36, cmd=add/insert also triggers a real, immediate push
-        to any subscribed queue-view screen, instead of leaving it to
-        wait for aioslimproto's own ~60s periodic subscription replay -
-        see the inline comment right before the push call for the full
-        reasoning and the one unconfirmed assumption it rests on
-        (a subscription response-channel key match).
-
-        NOT yet handled, same "basic first pass" scope as the rest of this
-        integration - falls through to NotImplementedError (today's built-in
-        behavior: published as an unhandled event, a safe no-op, not a
-        regression) rather than silently acking a request we can't fulfill:
-          - any cmd other than load/add/insert
-          - artist_id/playlist_id-driven playlistcontrol (playing/queueing
-            a whole artist or playlist rather than one track) - only the
-            album_id case above is handled so far
+        add/insert also push an immediate queue-view update instead of waiting for
+        aioslimproto's ~60s periodic subscription replay. Anything else (an unknown cmd,
+        or playlist_id-driven control) raises NotImplementedError so it falls through to
+        aioslimproto's built-in handling.
         """
-        # cmd -> QueueOption mapping. Real member names confirmed directly
-        # against music_assistant_models.enums.QueueOption in the running
-        # container before writing this, not guessed: PLAY, REPLACE, NEXT,
-        # REPLACE_NEXT, ADD, UNKNOWN.
-        # "load" keeps its existing, already-verified-working PLAY
-        # semantics unchanged.
-        # "add" -> ADD (append to end of queue) is a direct name match.
-        # "insert" -> NEXT (play next, without interrupting whatever's
-        # currently playing) matches real LMS's own "insert" semantics by
-        # behavior, not as literal a name match as add -> ADD - worth a
-        # real-device confirmation: queue something, use "Play Next" on a
-        # second item while the first is still playing, and check it
-        # doesn't jump the gun and interrupt.
-        # "replace"/"replace_next" - added for the trackinfo/albuminfo
-        # long-press menus' own "Play Now (replace queue)"/"Play Next
-        # (replace queue)" rows, matching Music Assistant's own 5-option
-        # long-press menu (not a real LMS concept - these two cmd tokens
-        # are invented by this project, same as "insert" already was).
+        # cmd -> QueueOption. "insert" -> NEXT matches LMS's "insert" (play next without
+        # interrupting what is playing) by behavior rather than name; "replace" and
+        # "replace_next" are this project's own tokens for the MA-style "(replace queue)"
+        # menu rows, not LMS commands.
         queue_options = {
             "load": QueueOption.PLAY,
             "add": QueueOption.ADD,
@@ -3301,50 +2661,14 @@ class BrowseLibraryHandler:
             and kwargs.get("track_id") is None
             and kwargs.get("uri") is None
         ):
-            # Real LMS's own "load the whole album, starting at
-            # play_index" semantics for a regular tap on a track row
-            # inside an album's track listing - confirmed via a real
-            # client trace showing the actual outgoing request:
-            # "playlistcontrol album_id:X ... cmd:load play_index:N ...
-            # sort:albumtrack ..." with no track_id at all (see
-            # tracks_base_actions' own matching update).
-            #
-            # NOT implemented via play_media's own start_item/sort_by
-            # params, despite how well they read on paper - confirmed
-            # via real source (controllers/player_queues/queue_loader.py's
-            # own _handle_play_media) that keep_preceding_items (the
-            # parameter that actually decides whether tracks before
-            # start_item are kept, in order, vs dropped entirely) is
-            # hardcoded internally to queue.shuffle_enabled - play_media's
-            # own public API has no way to ask for "keep full album
-            # order, just start playback partway through" when shuffle
-            # is off, which is real LMS's own (and this server's)
-            # default. A real device test confirmed this the hard way:
-            # passing start_item alone put the selected track at the
-            # FRONT of the queue instead of preserving tracks 1-3 ahead
-            # of it.
-            #
-            # Real fix: load the full, real, ordered track list ourselves
-            # (mass.music.albums.tracks(...), the same real call
-            # get_tracks() above already uses to build the listing -
-            # confirmed already sorted by (disc_number, track_number),
-            # i.e. real LMS's own "sort:albumtrack" - no translation
-            # needed) as one batch via play_media, then a separate,
-            # explicit play_index() call to jump playback to the
-            # selected position - two real, separate, confirmed public
-            # API calls (both @api_command-decorated in controller.py),
-            # rather than one call asked to do something its own real
-            # signature cannot actually express.
-            #
-            # Originally guarded to cmd=="load" only - broadened to also
-            # cover add/insert (v68) so albums_base_actions' own "add"/
-            # "add-hold" actions, and this new albuminfo context menu's
-            # "Add to End of Queue"/"Play Next" rows, actually do
-            # something instead of falling through to the generic
-            # track_id/uri branch below and raising NotImplementedError
-            # (confirmed: that branch has no album_id handling at all -
-            # this was a real, separate, already-flagged gap, not new
-            # scope invented for this fix).
+            # The whole album, starting at play_index: what a tap on a track inside an
+            # album's track listing sends ("album_id:X cmd:load play_index:N
+            # sort:albumtrack", no track_id). Not done with play_media's start_item: it
+            # keeps the preceding items only when shuffle is on (keep_preceding_items is
+            # hardcoded to queue.shuffle_enabled), so the selected track would jump to the
+            # front of the queue. Instead the full ordered track list is queued with
+            # play_media and a separate play_index() jumps to the selected position. Also
+            # covers add/insert/replace, for the album rows' add actions and menus.
             album = await self.mass.music.albums.get_library_item(album_id)
             tracks = await self.mass.music.albums.tracks(album_id, "library", in_library_only=False)
             await self.mass.player_queues.play_media(
@@ -3353,30 +2677,15 @@ class BrowseLibraryHandler:
                 option=queue_option,
             )
             if queue_option in (QueueOption.PLAY, QueueOption.REPLACE):
-                # play_index is only ever sent by the pre-existing single-
-                # tap-track-in-album flow (tracks_base_actions' own
-                # playallParams, cmd="load"/PLAY only - never reached with
-                # REPLACE) - defaults to 0 for this albuminfo menu's own
-                # "Play Now"/"Play Now (replace queue)" rows, which don't
-                # send it at all, so the play_index() jump below is
-                # naturally skipped for those.
+                # play_index is only sent by a tap on a track inside an album (cmd:load);
+                # the album menu's Play Now rows omit it, so the jump is skipped.
                 play_index = kwargs.get("play_index")
                 idx = int(play_index) if play_index is not None else 0
                 if idx:
                     await self.mass.player_queues.play_index(queue_id=player_id, index=idx)
-                # Real, confirmed pair of showBriefly popups for a load -
-                # LMS fires these as two independent pushes, not one (see
-                # push_show_briefly's and push_play_icon's own docstrings
-                # in cli.py for the full, real-source-and-device-confirmed
-                # account of both): the "song"-type "Now Playing" + track
-                # title popup (30s duration, kind="song" here - NOT the
-                # default "mixed"), and the separate, icon-only "play"
-                # popup - "text" required there too now (see its own
-                # docstring: real client source crashes without it, even
-                # though it's never actually displayed for that popup).
-                # Grouped by queue_option (not cmd=="load" literally)
-                # since REPLACE starts playing immediately too, same as
-                # PLAY.
+                # A load fires two independent pushes in LMS (see push_show_briefly and
+                # push_play_icon in cli.py): the "song" popup (30s) and the icon-only
+                # "play" popup. REPLACE also starts playing immediately, so it gets both.
                 if 0 <= idx < len(tracks):
                     self.provider.slimproto.cli.push_show_briefly(
                         player_id,
@@ -3392,13 +2701,9 @@ class BrowseLibraryHandler:
                     )
             elif queue_option in (QueueOption.ADD, QueueOption.NEXT, QueueOption.REPLACE_NEXT):
                 await _start_if_idle()
-                # add/insert/replace_next: same showBriefly "Adding"/"to
-                # play next..." popup the track_id/uri path below sends
-                # for its own add/insert case - built from the album
-                # itself (there's no single track to name here), and the
-                # same real, immediate queue-view push (see
-                # _push_queue_update's own docstring for why that push is
-                # needed at all).
+                # Same "Adding"/"to play next..." popup and immediate queue-view push as
+                # the track_id/uri path below, named after the album since there is no
+                # single track.
                 await self._push_queue_update(player_id)
                 self.provider.slimproto.cli.push_show_briefly(
                     player_id,
@@ -3448,28 +2753,12 @@ class BrowseLibraryHandler:
             track_id = kwargs.get("track_id")
             if track_id is None:
                 raise NotImplementedError
-            # aioslimproto's parse_args coerces numeric-looking tag values
-            # to int (see _context's own comment above) - MediaControllerBase.
-            # get_library_item accepts int | str, but str() it for the
-            # print below regardless of which one we got.
+            # parse_args coerces numeric tag values to int; get_library_item accepts both.
             track = await self.mass.music.tracks.get_library_item(track_id)
-            # media=track.uri (a bare string) - v67 tried media=track
-            # (the resolved object) here instead, as a real, well-
-            # evidenced candidate fix for the Now Playing "Artist -
-            # Title" combining bug (traced to real MA source: title only
-            # gets corrected away from queue_item.name's own already-
-            # combined label when queue_item.media_item is truthy, and
-            # passing the resolved object seemed like the direct way to
-            # make that happen). A real device test disproved it on
-            # both counts: the combining bug was NOT fixed, AND it broke
-            # queue item removal (exact mechanism not yet confirmed -
-            # reverted on the strength of the real regression alone,
-            # not a theory about why). Back to matching every other
-            # play_media call in this file (playlist tracks/radio/
-            # podcasts/audiobooks/episodes, all of which pass a plain
-            # uri). The Now Playing title-combining root cause (MA's own
-            # queue_item.media_item populating logic) is still real and
-            # still open - just not fixable by this particular change.
+            # media is the plain uri like every other play_media call here. Passing the
+            # resolved track object didn't fix the Now Playing "Artist - Title" combining
+            # (MA only corrects the title when queue_item.media_item is set) and broke
+            # queue item removal; the combining issue is still open.
             media = track.uri
 
         await self.mass.player_queues.play_media(
@@ -3480,28 +2769,11 @@ class BrowseLibraryHandler:
         await _start_if_idle()
 
         if queue_option in (QueueOption.PLAY, QueueOption.REPLACE):
-            # Real, confirmed PAIR of showBriefly popups for a load -
-            # LMS fires these as two independent pushes, not one (see
-            # push_show_briefly's and push_play_icon's own docstrings in
-            # cli.py for the full account of both, including why the
-            # second has no visible text despite carrying a "text"
-            # field, and the real-device test that disproved this
-            # firing only when the player was previously stopped - it
-            # fires on every cmd:load, unconditionally).
-            #
-            # Grouped by queue_option (not cmd=="load" literally) since
-            # REPLACE ("Play Now (replace queue)", the trackinfo/
-            # albuminfo long-press menu's own Music-Assistant-matching
-            # wording) starts playing immediately too, same as PLAY -
-            # same popup either way.
-            #
-            # Only covers the track_id case here (a genuine library
-            # item, with a real title/album-art icon available directly) -
-            # the "uri" case just above (playlist tracks/radio/podcasts/
-            # audiobooks) has no readily available title/icon without a
-            # further lookup this function doesn't otherwise need, and is
-            # left uncovered for now; the album_id branch above has its
-            # own matching pair of calls for the whole-album-load case.
+            # A load fires two independent pushes in LMS (see push_show_briefly and
+            # push_play_icon in cli.py): the "song" popup and the icon-only "play" popup,
+            # on every load. REPLACE starts playing immediately too, so it gets the same.
+            # Only the track_id case is covered: a "uri" item has no readily available
+            # title/icon without another lookup (the album_id branch above has its own).
             if uri is None:
                 icon_id = str(track.album.item_id) if track.album is not None else None
                 self.provider.slimproto.cli.push_show_briefly(
@@ -3518,55 +2790,17 @@ class BrowseLibraryHandler:
                 )
 
         if queue_option in (QueueOption.ADD, QueueOption.NEXT, QueueOption.REPLACE_NEXT):
-            # Grouped by queue_option (not cmd in ("add","insert")
-            # literally) since REPLACE_NEXT ("Play Next (replace
-            # queue)") doesn't start playback immediately either - same
-            # "not interrupting what's currently playing" shape as NEXT,
-            # just replacing what's queued after the current item
-            # instead of inserting ahead of it.
+            # REPLACE_NEXT is grouped with ADD/NEXT: it doesn't interrupt playback either,
+            # it just replaces what is queued after the current item.
             #
-            # Real, event-driven push for the queue-view screen -
-            # cmd="load" doesn't need this: it already changes what's
-            # actually playing, which triggers aioslimproto's own real
-            # PLAYER_UPDATED event through the normal playback path (see
-            # player.py), and that already pushes any subscribed
-            # queue-view screen on its own. add/insert change the queue
-            # without changing playback, so nothing would otherwise
-            # trigger a push until aioslimproto's built-in periodic
-            # replay loop (_do_periodic, cli.py) got to it on its own
-            # fixed 60-second cycle - confirmed by reading that loop's
-            # real source before relying on it, not guessed.
+            # add/insert change the queue without changing playback, so nothing would
+            # trigger a queue-view push until aioslimproto's periodic replay (60s). A
+            # load doesn't need this: the playback change already pushes (see player.py).
             await self._push_queue_update(player_id)
 
-            # Real, confirmed "mixed"/style:"add" showBriefly popup -
-            # traced to real LMS source (Slim::Control::Commands::
-            # playlistcontrolCommand, Slim/Control/Commands.pm, the
-            # generic-tracks branch - not the folder_id/playlist_id
-            # shortcuts higher up in the same function):
-            #   if ($add) { $token = 'JIVE_POPUP_ADDING' }
-            #   elsif ($insert) { $token = 'JIVE_POPUP_TO_PLAY_NEXT' }
-            #   $client->showBriefly({ 'jive' => {
-            #       'type' => 'mixed', 'style' => 'add',
-            #       'text' => [ $string, $info[0] ],
-            #       'icon-id' => <real track artwork or fallback>,
-            #   }});
-            # cmd="load" deliberately gets no toast in real LMS either
-            # (it jumps straight to the Now Playing screen instead, via
-            # the separate "song"-type popup above) - matches the
-            # if-cmd-in-(add,insert) branch we're already inside.
-            #
-            # Real English strings (strings.txt): "Adding" (add) /
-            # "to play next..." (insert) - confirmed, not guessed.
-            #
-            # The push mechanism itself (push_show_briefly, cli.py) was
-            # the real, substantial missing piece noted in an earlier
-            # version of this comment - confirmed via real client source
-            # that the "displaystatus subscribe:showbriefly" subscription
-            # genuinely does register into aioslimproto's own
-            # slim_subscriptions (via the real /slim/subscribe channel,
-            # confirmed via a real proxy capture of an actual LMS server
-            # doing this exact thing) - the earlier doubt about this
-            # (based on an different, unrelated capture) didn't hold up.
+            # The "mixed"/add showBriefly popup LMS sends for add/insert ("Adding" /
+            # "to play next..." with the track title and artwork). A load gets the "song"
+            # popup above instead.
             title = track.name if uri is None else media
             icon_id = str(track.album.item_id) if uri is None and track.album is not None else None
             self.provider.slimproto.cli.push_show_briefly(
@@ -3579,68 +2813,21 @@ class BrowseLibraryHandler:
 
     async def _push_queue_update(self, player_id):
         """
-        Push a real, immediate queue-view update to any subscribed
-        screen - factored out of _handle_playlistcontrol (v36-v39) as of
-        v50, since the new playlist jump/delete/move/clear handlers below
-        need the exact same real push after every queue-mutating action,
-        not just add/insert.
+        Push an immediate queue-view update to any subscribed screen. Used after every
+        queue-mutating action (add/insert, jump/delete/move/clear) so the screen doesn't
+        wait for aioslimproto's ~60s periodic replay.
 
-        Only does the one push now (v74) - reuses aioslimproto's own
-        _on_player_event (cli.py) instead of reinventing subscription-push
-        logic: looks up the CometD client subscribed for this player_id,
-        and if it has a stored playerstatus subscription (which is what
-        the queue-view screen registers on open, since it sends
-        subscribe:600), immediately replays that stored request and
-        pushes the result - the same call the periodic loop makes, just
-        triggered here instead of by a timer.
+        It reuses aioslimproto's _on_player_event: that finds the CometD client for this
+        player and, if the queue view has a stored playerstatus subscription (registered
+        on open with subscribe:600), replays it and pushes the result. Only this one push
+        is sent: pushing a positional [player_id, item_loop, "replace", player_id] array
+        (the menustatus shape) on the playerstatus channel makes the client read every
+        field as nil, treat the player as disconnected and soft-power it off mid-track.
 
-        A second push used to be sent alongside this one, built by
-        copying cli.py's PLAYER_PRESETS_UPDATED push verbatim in shape -
-        a positional [player_id, item_loop, "replace", player_id] ARRAY,
-        not an object - onto this SAME playerstatus channel/id. That
-        shape is only valid on the menustatus channel (the one real,
-        confirmed place aioslimproto itself sends it, for exactly that
-        event); it was never valid for playerstatus, which the real
-        client (jive/slim/Player.lua's own _process_playerstatus ->
-        updatePlayerInfo) always expects to be a plain object with keys
-        like "connected"/"power"/"mode". A real device test and client
-        debug log confirmed the actual, severe consequence: receiving
-        that array on the playerstatus channel, the client indexes it by
-        string key and gets nil for every field - playerInfo.connected
-        logged as literally "nil", which updatePlayerInfo's own existing
-        false-transition handling (see Player.lua's own source) reads as
-        "the player just disconnected and powered off", immediately
-        turning soft power off (killing audio on a still-genuinely-
-        playing track) and cascading into a string of further real
-        crashes in NowPlaying/SlimBrowser as they each choke on now-nil
-        mode/shuffle/repeat/track fields they'd normally always have.
-        Removed outright rather than redirected to a real menustatus
-        subscription - this file's one playerstatus push already
-        includes a real item_loop (via menu='menu') when the subscribed
-        request asks for one, so there's nothing a second push was
-        uniquely providing that justifies the real risk of getting the
-        channel/shape pairing wrong again.
-
-        Bumps player.extra_data["playlist_timestamp"] first (v75) - a
-        real, confirmed gap found via a real LMS proxy capture of
-        picoreplayer/JiveLite: that field (aioslimproto's own client.py)
-        is only ever touched on playback events (play_url, STMd, STMu),
-        never by a pure queue mutation like this file's own delete/move/
-        clear (none of which call play_url or go anywhere near
-        aioslimproto's client state machine). The real client (Player.lua's
-        own _process_playerstatus, confirmed via its own debug log)
-        compares this exact field between successive playerstatus
-        pushes to decide whether to refetch its full list - unchanged
-        means "nothing happened," so a pure removal/move/clear with no
-        accompanying track change left the timestamp stale and the real
-        client never refetched, even though this push itself still
-        landed. add/insert could appear to work anyway, coincidentally,
-        whenever they also triggered enqueue_next_media()'s own
-        play_url() call - a real side effect, not something this file
-        was ever actually relying on by design. Bumping it here,
-        unconditionally, for every queue-mutating action this file
-        drives, is what actually makes the real client treat each one
-        as a genuine change worth refetching.
+        playlist_timestamp is bumped first because the client compares it between
+        playerstatus pushes to decide whether to refetch the list, and aioslimproto only
+        touches it on playback events. Without the bump, a pure removal/move/clear with no
+        track change left it stale and the client never refetched.
         """
         if player := self.provider.slimproto.get_player(player_id):
             player.extra_data["playlist_timestamp"] = int(time.time())
@@ -3649,39 +2836,19 @@ class BrowseLibraryHandler:
 
     async def _handle_trackinfo(self, slim_command):
         """
+        Handle the "more" action's trackinfo/items command, what JiveLite sends on a
+        long-press of a track row (tracks_base_actions' "more" entry). Not verified
+        against a real LMS capture; real LMS's menu also has non-playback rows (credits,
+        more from this artist, genre) backed by metadata this project doesn't fetch.
 
-        Handles the "more" action's trackinfo/items command - what JiveLite
-        actually sends on a long-press of a track row, per tracks_base_actions'
-        own "more" entry (cmd: ["trackinfo", "items"]). This was previously
-        entirely unhandled: _dispatch fell through to NotImplementedError for
-        any command other than menu/playlistcontrol/browselibrary, so a
-        long-press got no response at all - a blank screen, not an error
-        (confirmed via a real docker log capture: command='trackinfo'
-        args=['items', 0, 200] kwargs={..., 'track_id': 18, ...} ->
-        NotImplementedError every time).
+        The rows use Music Assistant's long-press wording and options: Play Now (keep
+        queue)/Play Next (keep queue)/Add to the queue/Play Now (replace queue)/Play Next
+        (replace queue), mapped onto playlistcontrol's PLAY/NEXT/ADD/REPLACE/REPLACE_NEXT
+        QueueOptions (see queue_options in _handle_playlistcontrol).
 
-        IMPORTANT - NOT verified against a real LMS trackinfo capture, same
-        caveat playlists_base_actions already flags for itself: real LMS's
-        actual trackinfo menu also has non-playback rows (credits, "more
-        from this artist", genre, etc.) backed by real metadata this
-        project doesn't fetch - this only builds the playback options.
-
-        As of this update, those playback options deliberately DON'T match
-        real LMS at all - they match Music Assistant's own long-press menu
-        instead (same 5 options, same wording, on tracks/albums/artists),
-        since that's the more useful
-        reference for anyone using this against Music Assistant: Play Now
-        (keep queue)/Play Next (keep queue)/Add to the queue/Play Now
-        (replace queue)/Play Next (replace queue), mapped onto
-        playlistcontrol's own PLAY/NEXT/ADD/REPLACE/REPLACE_NEXT
-        QueueOptions (see _handle_playlistcontrol's own queue_options dict).
-
-        kwargs already has the item's own track_id/uri flattened directly in
-        (see the log capture above) - aioslimproto resolves itemsParams
-        before calling this handler, the same as it does for browselibrary/
-        menu commands. No _standalone_actions()-style baking needed here the
-        way Search All rows needed it: this is one fixed 5-row menu built
-        fresh per request, not a template shared across many item_loop rows.
+        kwargs already holds the item's track_id/uri (aioslimproto resolves itemsParams
+        before calling this handler). It is one fixed menu built per request, so no
+        _standalone_actions-style baking is needed.
         """
         kwargs = slim_command.kwargs
         track_id = kwargs.get("track_id")
@@ -3700,11 +2867,8 @@ class BrowseLibraryHandler:
                         "params": {**base_params, "cmd": cmd},
                     },
                 },
-                # "load"/"replace" start playing immediately - jump to Now
-                # Playing, same as every other "play" action in this file.
-                # The other three don't interrupt anything currently
-                # playing, so there's nothing to jump to - close back out
-                # to the browse list instead.
+                # load/replace start playing, so go to Now Playing; the others close
+                # back to the browse list.
                 "nextWindow": "nowPlaying" if cmd in ("load", "replace") else "parent",
             }
 
@@ -3718,52 +2882,26 @@ class BrowseLibraryHandler:
         return {
             "count": len(item_loop),
             "offset": 0,
-            # windowStyle: "text_list", NOT isContextMenu:1 - confirmed
-            # via a real pcap capture of an actual context-menu RESPONSE
-            # (LMS 9.1.1): the real response's own top-level "window" is
-            # {"windowStyle": "text_list"}. isContextMenu:1 IS real, but
-            # belongs on the ACTION that navigates here (base.actions.
-            # more's own "window" field, confirmed in the same capture -
-            # see MY_MUSIC_NODE-area action defs elsewhere in this file
-            # for where that's legitimately used), not on the response
-            # data itself. Mixing the two up here is a real, confirmed
-            # bug - not verified working before now, since nothing had
-            # compared this against real captured data until the queue
-            # context-menu work surfaced it.
+            # windowStyle "text_list", not isContextMenu:1: that flag belongs on the
+            # action that navigates here (base.actions.more's "window"), not in the
+            # response (confirmed against a real LMS 9.1.1 capture).
             "window": {"windowStyle": "text_list"},
             "item_loop": item_loop,
         }
 
     async def _handle_albuminfo(self, slim_command):
         """
-        Handles the "more" action's albuminfo/items command - what
-        JiveLite sends on a long-press of an album row, per
-        albums_base_actions' own "more" entry (cmd: ["albuminfo",
-        "items"]). Same class of gap _handle_trackinfo's own docstring
-        already covers for tracks: _dispatch had no "albuminfo" branch at
-        all, so it fell straight through to NotImplementedError - a
-        long-press on an album got no response, a blank menu rather than
-        an error.
+        Handle the "more" action's albuminfo/items command, what JiveLite sends on a
+        long-press of an album row (albums_base_actions' "more" entry). Not verified
+        against a real LMS capture; real LMS likely adds non-playback rows (credits, more
+        from this artist) that this project doesn't fetch.
 
-        IMPORTANT - NOT verified against a real LMS albuminfo capture,
-        same caveat _handle_trackinfo flags for itself: real LMS's actual
-        albuminfo menu likely has non-playback rows too (album credits,
-        "more from this artist", etc.) backed by metadata this project
-        doesn't fetch - this only builds the playback options.
+        The rows use Music Assistant's long-press wording and options rather than LMS's
+        (see _handle_trackinfo); artists get the same menu from _handle_artistinfo.
 
-        As of this update, those playback options deliberately DON'T
-        match real LMS at all - they match Music Assistant's own long-
-        press menu instead (same wording _handle_trackinfo now uses - see
-        its own docstring for the full reasoning). Artists get the same
-        menu from _handle_artistinfo.
-
-        kwargs already has the row's own album_id flattened in
-        (commonParams, see get_albums above) - same mechanism
-        _handle_trackinfo relies on for track_id. Routed through
-        playlistcontrol exactly like a plain tap on the album row itself
-        (albums_base_actions' "play"/"add"/"add-hold"), so these rows and
-        a plain tap share the same album_id handling in
-        _handle_playlistcontrol (see its own queue_options dict).
+        kwargs already holds the row's album_id (aioslimproto resolves itemsParams). The
+        rows go through playlistcontrol like a plain tap on the album row, sharing the
+        album_id handling in _handle_playlistcontrol.
         """
         kwargs = slim_command.kwargs
         album_id = kwargs.get("album_id")
@@ -3795,10 +2933,7 @@ class BrowseLibraryHandler:
         return {
             "count": len(item_loop),
             "offset": 0,
-            # windowStyle: "text_list" - same real, confirmed shape
-            # _handle_trackinfo's own response uses (see its docstring
-            # for the pcap-confirmed reasoning); not re-verified
-            # separately for albuminfo specifically.
+            # windowStyle "text_list", as in _handle_trackinfo.
             "window": {"windowStyle": "text_list"},
             "item_loop": item_loop,
         }
@@ -3845,76 +2980,26 @@ class BrowseLibraryHandler:
 
     async def _handle_contextmenu(self, slim_command):
         """
-        Handles the "more" action's contextmenu command - what a
-        long-press on a QUEUE row sends, as distinct from trackinfo
-        (library rows). Confirmed via the real slimserver source
-        (Slim/Control/Queries.pm's own statusQuery(), useContextMenu
-        branch): base.actions.more.cmd is ['contextmenu'], not
-        ['trackinfo', 'items'], for the queue view specifically -
-        matched here by aioslimproto's own built-in _handle_status,
-        confirmed by reading its real source before writing this: it
-        already sets base.actions.more exactly this way (cmd:
-        ["contextmenu"], params: {"context": "playlist", ...}) for the
-        menu='menu' queue view, unchanged by _handle_queue_status above.
+        Handle the "more" action's contextmenu command, which a long-press on a QUEUE row
+        sends (library rows send trackinfo instead). aioslimproto's built-in _handle_status
+        already sets base.actions.more to cmd ["contextmenu"] with params {"context":
+        "playlist", ...} for the queue view, and the pressed row's playlist_index (added by
+        _build_queue_item_loop) is merged into this request via itemsParams.
 
-        Was previously entirely unhandled - not just by this file, by
-        aioslimproto too (no _handle_contextmenu exists there either,
-        confirmed before writing this) - so every long-press on a queue
-        row has been raising NotImplementedError this whole time,
-        regardless of anything else in this session's queue work.
+        Only context == "playlist" is handled; anything else raises NotImplementedError.
 
-        Only handles context == "playlist" (the queue-row case this was
-        built for) - anything else raises NotImplementedError, same
-        conservative scoping as every other "basic first pass" handler
-        in this file, since there's no other real contextmenu caller to
-        verify a shape against yet.
-
-        playlist_index comes from the row's own params - added to every
-        queue row in _build_queue_item_loop above specifically for this
-        (itemsParams: "params" on base.actions.more means the pressed
-        row's own params get merged into this request - confirmed via
-        aioslimproto's real base.actions.more source, not guessed).
-
-        Row shape and real commands below are pcap-verified against a
-        genuine LMS 9.1.1 capture of this exact menu (long-pressing a
-        queue row, picking "Remove from playlist") - not reconstructed
-        from TrackInfo.pm as the first version of this was. Real,
-        confirmed pattern: EVERY relevant action key on a row
-        (play/go/add/add-hold) maps to the exact same command - so
-        whichever gesture JiveLite resolves a tap or hold to, the same
-        thing happens. Real full menu also includes "Save to Favorites"
-        and several generic drill-down entries (Album Artist, Album,
-        Genre, ...) - deliberately left out here per direct instruction
-        (only Remove/Play Next/Play wanted), not because they're hard.
-          - "Remove from playlist" -> playlist delete <index>.
-            Pcap-confirmed text, command, and the all-four-keys pattern
-            exactly. Real LMS never skips this one - MA's own
-            delete_item() already guards the one real edge case
-            (deleting an item already loaded in the playback buffer) by
-            silently no-op'ing with its own log warning, so there's
-            nothing extra to check here either.
-          - "Play Next" -> playlist move <index>. NOT present in the
-            captured pcap (the specific track/position tested didn't
-            show it - confirmed by its real absence from that capture),
-            so the exact command args are inferred from the same
-            all-four-keys pattern the other two rows prove, using the
-            same playlist/move handling _handle_playlist already
-            implements (pos_shift=0 - "move to front of upcoming
-            items"). Only shown for rows after the immediately-next
-            track: earlier rows (already played, current, or next) have
-            nothing to usefully move to.
-          - "Play" -> playlist jump <index>. Pcap-confirmed text,
-            command, and pattern exactly, including addAction/style.
-            Skipped (matching real LMS's own check) only if this row IS
-            the current track AND it's actively playing right now -
-            resuming a paused current track is still a meaningful
-            action, so only PlaybackState.PLAYING (not PAUSED) skips
-            this.
-
-        Text and order deliberately diverge from the real LMS pcap above
-        as of this change - "Play Now"/"Play Next"/"Move to End"/"Delete item", in
-        that order, to match the MA app's own UI instead. Commands are
-        unchanged.
+        Rows follow the MA app (Play Now, Play Next, Move to End, Delete item); the row
+        shape comes from a real LMS 9.1.1 capture. Real LMS also offers "Save to
+        Favorites" and drill-down entries (Album Artist, Album, Genre, ...), which are
+        deliberately left out.
+          - Play Now -> playlist jump <index>. Hidden only if this row is the current
+            track and actively playing; resuming a paused current track still makes sense.
+          - Play Next -> playlist move <index> (not in the capture; inferred from the same
+            pattern, using _handle_playlist's move, i.e. pos_shift=0). Only shown for
+            rows after the immediately-next track: earlier rows have nothing to usefully
+            move to.
+          - Move to End -> playlist moveend <index>.
+          - Delete item -> playlist delete <index>.
         """
         kwargs = slim_command.kwargs
         player_id = slim_command.player_id
@@ -3935,10 +3020,9 @@ class BrowseLibraryHandler:
         )
 
         def _row(text, cmd, style=None):
-            # Real, pcap-confirmed shape: the SAME action def repeated
-            # under all four keys - not just "go". addAction:"go" is
-            # itself part of the real captured shape (present on every
-            # real row here), not something this project invented.
+            # The same action under all four keys, so whichever gesture JiveLite resolves
+            # a tap or hold to does the same thing; addAction:"go" is part of the captured
+            # LMS shape.
             action = {"cmd": cmd, "player": 0, "nextWindow": "parent"}
             row = {
                 "text": text,
@@ -3960,14 +3044,10 @@ class BrowseLibraryHandler:
         # before the current track, and the next track is already next.
         if playlist_index > current_index + 1:
             item_loop.append(_row("Play Next", ["playlist", "move", str(playlist_index)]))
-        # Real, confirmed via MA's own delete_item(): it silently no-ops (just a log
-        # warning, no error) for any index at or before committed_index() - the player
-        # already owns that item (currently playing, or handed over for the gapless
-        # transition) and nothing below that boundary can be reordered. A real device
-        # test found this blocks "Remove from playlist" on every row before the
-        # current track, not just the current one, which the MA app's own UI confirms
-        # is deliberate (the same rows are greyed out there too) - so this matches
-        # delete_item's exact guard, rather than offering an action proven to no-op.
+        # MA's delete_item() silently no-ops for any index at or before committed_index()
+        # (the player already owns it, playing or buffered for the gapless handover), and
+        # the MA app greys those rows out too. So Move to End and Delete item are only
+        # offered after that boundary.
         boundary_index = committed_index(queue) if queue.index_in_buffer is not None else None
         can_edit = boundary_index is None or playlist_index > boundary_index
         if can_edit and playlist_index < int(queue.items) - 1:
@@ -3978,19 +3058,10 @@ class BrowseLibraryHandler:
         result = {
             "count": len(item_loop),
             "offset": 0,
-            # windowStyle: "text_list", NOT isContextMenu:1 - confirmed
-            # via a real pcap capture of this exact real response (LMS
-            # 9.1.1, long-pressing a queue row): {"count":11,"window":
-            # {"windowStyle":"text_list"},"item_loop":[...]}. Confirmed
-            # via a real device report this was the actual bug even
-            # after every other part of this feature started working
-            # correctly (the contextmenu request reached this handler,
-            # got real non-empty content back - nothing appeared on
-            # screen anyway). isContextMenu:1 IS real, confirmed in the
-            # same capture, but belongs on the ACTION that navigates
-            # here (base.actions.more's own "window" field - already
-            # correct, untouched, see aioslimproto's real built-in
-            # _handle_status), not on the response data itself.
+            # windowStyle "text_list", not isContextMenu:1: that flag belongs on the
+            # action that navigates here (base.actions.more's "window"), not in the
+            # response (confirmed against a real LMS 9.1.1 capture); putting it here left
+            # the menu blank.
             "window": {"windowStyle": "text_list"},
             "item_loop": item_loop,
         }
@@ -3998,49 +3069,22 @@ class BrowseLibraryHandler:
 
     async def _handle_playlist(self, slim_command):
         """
-        Handles the real "playlist" command's jump/delete/move/clear
-        subcommands - what the contextmenu rows above (and the "Clear
-        Playlist" row in _handle_queue_status below) actually send when
-        selected. aioslimproto's own built-in _handle_playlist (cli.py)
-        only implements "index +1" and raises NotImplementedError for
-        everything else (confirmed by reading its real source before
-        writing this) - none of these four are handled anywhere without
-        this override.
+        Handle the "playlist" jump/delete/move/moveend/clear subcommands, which the
+        contextmenu rows above and the "Clear Playlist" row in _handle_queue_status send.
+        aioslimproto's built-in only implements "index +1".
 
-        Each real MA method confirmed against the actual
-        PlayerQueuesController source before use, same discipline as
-        every other MA API call in this file:
-          - jump: play_index(queue_id, index) - real signature confirmed
-            (index: int | str, seek_position=0, fade_in=False - only
-            index passed here).
-          - delete: delete_item(queue_id, item_id_or_index) - takes a
-            raw index directly (confirmed in its own real docstring:
-            "Delete item (by id or index)"), no lookup needed.
-          - move: move_item(queue_id, queue_item_id, pos_shift=0) - unlike
-            delete_item, this one wants a real queue_item_id, not a bare
-            index, so the target row's queue_item_id is looked up first
-            via items(limit=1, offset=index). pos_shift=0 is a real,
-            specifically-documented case (move_item's own real
-            docstring): "move item to the front of the upcoming items" -
-            exactly what "Play Next" means, and it already handles the
-            real buffer-boundary logic (currently-playing/already-
-            buffered items) internally, so no target index is computed
-            here - see the real contextmenu action this responds to
-            (_handle_contextmenu above), which sends just the index, no
-            second argument, for the same reason.
-          - clear: clear(queue_id) - already used elsewhere in this file
-            (see MY_MUSIC_NODE-adjacent code); skip_stop left at its
-            real default (False), matching real LMS's own "playlist
-            clear" (which does stop playback - confirmed via Slim/Player/
-            Playlist.pm's own real source).
+        Each maps to a PlayerQueuesController call:
+          - jump: play_index(queue_id, index)
+          - delete: delete_item(queue_id, index), which takes a raw index
+          - move: move_item(queue_id, queue_item_id, pos_shift=0), which wants a
+            queue_item_id (looked up via items(limit=1, offset=index)); pos_shift=0 is
+            "move to the front of the upcoming items", i.e. "Play Next"
+          - moveend: move_item_end(queue_id, queue_item_id)
+          - clear: clear(queue_id); skip_stop stays False, like LMS's "playlist clear",
+            which stops playback
 
-        Every branch pushes a real, immediate queue-view update
-        afterward via _push_queue_update() (see its own docstring) - the
-        same real mechanism playlistcontrol add/insert already use, so
-        the queue-view screen reflects a remove/move/clear/jump without
-        waiting for the next periodic replay.
-
-        NOT yet verified against a real device test.
+        Every branch ends with _push_queue_update() so the queue view reflects the change
+        without waiting for the periodic replay.
         """
         args = slim_command.args
         player_id = slim_command.player_id
@@ -4050,38 +3094,18 @@ class BrowseLibraryHandler:
             raise NotImplementedError
 
         if subcommand in ("jump", "index"):
-            # Real LMS treats these as the same underlying jump-and-play
-            # action, just reached from different real contexts:
-            # "jump" from an explicit menu action (confirmed via the
-            # real pcap capture behind _handle_contextmenu above -
-            # "Play" sends playlist jump <idx>), "index" from JiveLite's
-            # own implicit single-tap-to-play on a style:itemplay queue
-            # row - confirmed via a real device log showing
-            # ['playlist', 'index', 2] after v53 stripped all per-row
-            # actions to match the real confirmed shape (real queue rows
-            # carry none at all - see _build_queue_item_loop above).
-            # Neither aioslimproto's own built-in (only "index +1", a
-            # relative skip-forward, not an absolute jump) nor this
-            # handler covered plain "index <N>" before - a real,
-            # previously-unnoticed regression: single-tap-to-play on a
-            # queue row was silently broken from the moment row actions
-            # were removed, since nothing was left to fall back to.
+            # "jump" comes from an explicit menu action (the contextmenu "Play Now" row),
+            # "index" from JiveLite's implicit single tap on a queue row
+            # (['playlist', 'index', N]). Both jump to and play that position;
+            # aioslimproto's built-in only handles "index +1" (a relative skip).
             index = int(args[1])
             await self._maybe_await(self.mass.player_queues.play_index(queue.queue_id, index))
         elif subcommand == "delete":
             index = int(args[1])
             await self._maybe_await(self.mass.player_queues.delete_item(queue.queue_id, index))
         elif subcommand == "move":
-            # pos_shift=0 is a real, specifically-documented case (not a
-            # guess): "move item to the front of the upcoming items"
-            # (PlayerQueuesController.move_item's own real docstring) -
-            # exactly what "Play Next" means, and it already handles the
-            # real buffer-boundary logic (currently-playing/already-
-            # buffered items) internally. Deliberately NOT computing a
-            # target index ourselves and passing a nonzero pos_shift -
-            # that would duplicate (and could drift from) that same
-            # boundary handling, and move_item silently no-ops if the
-            # computed target ever landed outside the valid range.
+            # pos_shift=0 is MA's "move item to the front of the upcoming items" and it
+            # handles the buffer boundary itself, so no target index is computed here.
             index = int(args[1])
             items = self.mass.player_queues.items(queue.queue_id, limit=1, offset=index)
             if not items:
@@ -4113,127 +3137,39 @@ class BrowseLibraryHandler:
         """
         Await value only if it's actually awaitable.
 
-        Added after a real, confirmed bug: a live traceback showed
-        "await self.mass.player_queues.delete_item(...)" raising
-        "TypeError: 'NoneType' object can't be awaited" - the real
-        current upstream source (controllers/player_queues/
-        controller.py) confirms delete_item is a plain "def", not
-        "async def", returning None directly (including, but not only,
-        on its early-return "already loaded in buffer" guard branch -
-        that branch is just where this test happened to land first).
-        The same reference source shows move_item and clear as equally
-        plain "def" - but clear() was independently confirmed working
-        via a real device test before this fix existed, which a plain
-        sync function wrapped in "await" could not do (awaiting a bare
-        None unconditionally raises the same TypeError, every time, no
-        exceptions) - a real contradiction, meaning the exact deployed
-        MA version may not exactly match the reference source just
-        checked. Rather than guess which of the two is right per
-        method, this handles both correctly regardless: play_index,
-        delete_item, move_item, and clear are all routed through this
-        helper now, not just the one confirmed broken.
+        Depending on the deployed MA version, play_index, delete_item, move_item and
+        clear are either plain functions returning None or coroutines, and awaiting a
+        bare None raises TypeError. Every queue call here goes through this helper.
         """
         if inspect.isawaitable(value):
             await value
 
     async def _handle_queue_status(self, slim_command):
         """
-        Overrides aioslimproto's built-in _handle_status - as of v33, for
-        EVERY status call, not just the dedicated queue-view screen.
-        Real docker log captures distinguish the two request shapes:
-        menu='menu' (args=['-', 10] kwargs={'menu': 'menu',
-        'useContextMenu': 1, 'subscribe': 600}) is the dedicated
-        queue/Now-Playing-screen request; plain polling status
-        (args=['-', 1] kwargs={'tags': ..., 'alarmData': 1}, no 'menu'
-        key, fires every few seconds) is the routine heartbeat. Both are
-        handled here, but see the cheap-vs-expensive split noted below -
-        the polling variant only gets a lightweight two-field patch, not
-        the full per-item queue rebuild.
+        Overrides aioslimproto's built-in _handle_status for every status call.
 
-        Root cause this fixes (confirmed by reading _handle_status's own
-        source before writing this, not guessed at): the built-in only
-        ever reports player.current_media/next_media - two fixed slots,
-        not a real queue - so no matter how many tracks MA's queue
-        actually holds, or what offset/limit the device asks for (both
-        accepted as parameters, neither actually used to slice anything),
-        the response is always exactly those same two items. That's the
-        real explanation for "queue only ever shows 2, sliding forward as
-        each track finishes" - the queue itself was always growing
-        correctly; the status response just never looked past current +
-        next.
+        The built-in only reports player.current_media/next_media (two fixed slots), so
+        however long MA's queue is, the response is always those two items (its
+        offset/limit are accepted but unused). Two request shapes are handled:
+          - menu='menu' (args=['-', N], kwargs menu/useContextMenu/subscribe): the queue
+            and Now Playing screens. Gets the full per-item queue rebuild.
+          - plain polling status (args=['-', 1], tags/alarmData, no 'menu', every few
+            seconds): only a cheap patch of playlist_tracks/playlist_cur_index, which
+            drive the "Playing X of Y" header (the built-in hardcodes a 2-item count).
 
-        Sources the real queue via mass.player_queues.get_active_queue()
-        (rather than assuming queue_id == player_id - a synced/grouped
-        player's own queue may not be its own, confirmed this method
-        exists for exactly that reason) and mass.player_queues.items(),
-        a real method with genuine limit/offset params (unlike the
-        built-in's unused ones). Each row is built via aioslimproto's own
-        menu_item_from_media_details(..., include_actions=True) - reused,
-        not reinvented, so play/add/add-hold row actions here match real
-        LMS-shaped rows exactly. Each real QueueItem's OWN fields (.name,
-        .duration, .media_item) feed that row-builder directly, as of
-        v35 - see v35's own note below for why mass.player_queues.
-        player_media_from_queue_item() (used in v29-v34) was dropped
-        entirely rather than kept as a data source.
+        The built-in is called first (self.provider.slimproto.cli._handle_status, with
+        the dispatcher's args/kwargs split) and only item_loop/count/offset are
+        overwritten, so everything else it computes stays: player_name, mode, power,
+        alarm data, base.actions.more, preset_loop/preset_data. Returning a from-scratch
+        dict left the Now Playing screen unrendered.
 
-        BASIC FIRST PASS, same scope caveat as _handle_playlistcontrol - one
-        specific thing not yet verified against a real device test:
-          - offset='-' is treated as "start at the current queue item"
-            (queue.current_index, falling back to 0) - the natural
-            reading for a just-opened queue screen, but not checked
-            against a real LMS capture of the same request, and there's
-            no prior scaffold data point for this the way most of this
-            file has. If scrolling further in the real queue view doesn't
-            advance correctly, this is the assumption to revisit first.
+        The queue comes from mass.player_queues.get_active_queue() (a synced player's
+        queue may not be its own) and .items(limit, offset), both synchronous. Each row
+        is built by _build_queue_item_loop.
 
-        get_active_queue()/.items() are NOT awaited (confirmed via a real
-        v30 traceback: TypeError: 'PlayerQueue' object can't be awaited).
-        HISTORICAL, no longer applicable as of v35: .player_media_from_
-        queue_item() WAS awaited (v31's fix, confirmed via a real
-        traceback of its own) - that method is no longer called here at
-        all, see v35's note, so its async-ness is moot now. Left in the
-        history for the general lesson: same-controller/similar-shape
-        does not predict async-ness, and now, separately, does not
-        predict fitness for a read-only listing either - worth
-        remembering both next time a new controller method gets used
-        here for the first time.
-
-        v29-v31 all built the RETURNED RESULT entirely from scratch - a
-        bare {"count", "offset", "item_loop"} dict - which stopped
-        crashing as of v31 but still left the Now Playing screen broken
-        (confirmed via a real device test: song plays fine, screen
-        doesn't render). Root cause: the built-in's real _handle_status
-        computes a lot more than item_loop - player_name, mode, power,
-        alarm_state/alarm_snooze_seconds/alarm_timeout_seconds,
-        base.actions.more (for this screen's own "more" button), and
-        preset_loop/preset_data - all silently dropped by returning a
-        from-scratch dict instead. Fixed by calling the real built-in
-        first (self.provider.slimproto.cli._handle_status - the same
-        real CLI instance provider.py already reaches into directly for
-        _handle_jsonrpc_client, confirmed that reference exists before
-        using it) with the exact same args/kwargs split aioslimproto's
-        own dispatcher already uses (confirmed by matching this file's
-        own real log captures: args=['-', 10] positionally as
-        offset/limit, kwargs holding menu/useContextMenu/subscribe) - so
-        everything the built-in gets right stays right - and only
-        overwriting item_loop/count/offset with the real queue-derived
-        values afterward, rather than reconstructing the whole response.
-
-        v33 broadened this from menu='menu' only to EVERY status call -
-        the plain, frequent polling status (args=['-', 1], no menu key)
-        also has its own version of the same 2-item-cap bug:
-        "playlist_tracks": len(playlist_items) and a hardcoded
-        "playlist_cur_index": 0 in the built-in's source, which is what
-        actually drives the Now Playing screen's own "Playing X of Y"
-        header - confirmed via a real device report that this always
-        read "1 of 2" no matter how large the real queue was, even
-        though the dedicated queue-view screen (the menu='menu' variant)
-        was by then showing the real count correctly. Since this variant
-        fires far more often than the menu one, it only gets the cheap
-        patch (playlist_tracks/playlist_cur_index from
-        get_active_queue() - already a sync, lightweight call) - NOT the
-        expensive per-item queue fetch/conversion the menu variant does,
-        which is skipped entirely here.
+        Not verified against a real LMS capture: offset='-' is treated as "start at the
+        current queue item" (queue.current_index, else 0). If scrolling the queue view
+        doesn't advance correctly, revisit this first.
         """
         kwargs = slim_command.kwargs
         args = slim_command.args
@@ -4246,52 +3182,20 @@ class BrowseLibraryHandler:
 
         queue = self.mass.player_queues.get_active_queue(player_id)
         if queue is None:
-            # no active queue - the built-in's own (2-item-capped, but at
-            # least fully-formed) result stands untouched. Printed as of
-            # v37 (previously silent) - a real device test reported the
-            # queue reading 0 right after a reboot, and even after an
-            # add; this print exists to confirm or rule out whether
-            # get_active_queue() is the one returning None at that
-            # moment, for either the plain polling status or the
-            # menu='menu' queue-view call.
+            # No active queue: the built-in's own result stands untouched.
             return result
 
-        # Cheap fields, patched on EVERY status call (not just menu='menu')
-        # - this is what fixes the Now Playing screen's own "Playing X of
-        # Y" header, not just the dedicated queue-view screen.
-        #
-        # Previously gated on "if 'playlist_tracks' in result" (only
-        # patching when the built-in already included it, i.e. only when
-        # player.powered) - confirmed via a real device test this was the
-        # actual root cause of the client's "Current Playlist" screen
-        # showing a single "Nothing" row on a clean boot with an existing
-        # server-side queue: player.powered=False is the normal, expected
-        # state for a connected-but-not-playing player (confirmed via a
-        # direct [DIAG] log of player.powered itself at every call,
-        # consistently False throughout a boot-to-idle capture with no
-        # playback at any point) - not a bug, and nothing to do with
-        # whether a real, non-empty queue exists. A queue can be real and
-        # non-empty whether or not the player is currently playing; real
-        # LMS's own playlist_tracks reflects the queue itself, not power
-        # state. Gating this patch on player.powered meant the one field
-        # the client actually reads for getPlaylistSize() (confirmed via
-        # real client source, jive/slim/Player.lua) stayed permanently
-        # absent for any player that hadn't yet played something in this
-        # connection - exactly the "takes you straight to the empty
-        # playlist screen" symptom. Always patching here, whenever a real
-        # queue exists (confirmed already, by the "if queue is None"
-        # check above this point), regardless of power/play state.
+        # Patched on every status call, not only menu='menu': the built-in hardcodes
+        # playlist_tracks/playlist_cur_index (a 2-item cap), which drive the Now Playing
+        # "Playing X of Y" header and the client's playlist size. Not gated on
+        # player.powered: a queue can exist while the player is off, and gating on power
+        # left the client showing an empty "Nothing" playlist after a clean boot.
         result["playlist_tracks"] = queue.items
         result["playlist_cur_index"] = queue.current_index or 0
 
         if kwargs.get("menu") != "menu":
-            # Plain polling status (the frequent "-", 1 heartbeat) -
-            # previously silent (only the menu='menu' path printed
-            # anything); added as of v37 so the routine heartbeat - the
-            # thing actually driving the compact Now Playing header, as
-            # opposed to the dedicated queue-view screen - is visible
-            # too, since a real device test couldn't otherwise tell
-            # which of the two paths a reported "0" was coming from.
+            # Plain polling status (the frequent "-", 1 heartbeat): the cheap patch
+            # above is enough.
             return result
 
         raw_offset = args[0] if len(args) > 0 else "-"
@@ -4300,50 +3204,21 @@ class BrowseLibraryHandler:
 
         item_loop = await self._build_queue_item_loop(queue, offset, limit)
 
-        # "Clear Playlist" - a real extra row real LMS appends after the
-        # LAST real track (confirmed via Slim/Control/Queries.pm's own
-        # _addJivePlaylistControls()/statusQuery(): "add clear and save
-        # playlist items at the bottom" when $idx+1 == $songCount, and
-        # "count" += 2 for the non-empty case - here just +1, since real
-        # LMS's own matching "Save Playlist" row isn't built here.
-        # real LMS's own real shape: an outer "Clear Playlist" row whose
-        # OWN item_loop holds two real, INLINE (no extra round-trip)
-        # rows - "Cancel" (go, cmd: ['jiveblankcommand'], real LMS's own
-        # client-side no-op - see _dispatch above) and "Clear Playlist"
-        # again as the real confirm (do, cmd: ['playlist', 'clear']).
-        # icon uses this project's own established local-path convention
-        # ("icon": "html/images/X.png", resolved server-side by
-        # _resolve_static_icon_path below) rather than real LMS's own
-        # "icon-id" key for this specific row - proven correct here for
-        # exactly this kind of static chrome asset (MY_MUSIC_NODE tiles),
-        # unlike real LMS's own convention which this project doesn't
-        # otherwise follow. Needs a real playlistclear_225x225_m.png (or
-        # playlistclear.png fallback) placed in static/ - not included
-        # here, same as every other chrome icon in this file.
+        # "Clear queue": an extra row appended after the last real track, as in LMS's
+        # _addJivePlaylistControls (without its "Save Playlist" sibling). It holds two
+        # inline rows (no round-trip): "Cancel" (jiveblankcommand, a client-side no-op,
+        # see _dispatch) and "Clear queue" as the confirm (playlist clear). The icon is a
+        # local path resolved by _resolve_static_icon_path, so playlistclear.png (or the
+        # sized variant) must exist in static/.
         reaches_tail = offset + len(item_loop) >= queue.items
         if reaches_tail and queue.items > 0:
             item_loop = [
                 *item_loop,
                 {
-                    # No "type" key here - confirmed via a direct
-                    # re-check of the real source (_addJivePlaylistControls,
-                    # Slim/Control/Queries.pm): it sets text/icon-id/
-                    # offset/count/item_loop on this row and nothing
-                    # else. Earlier version of this added "type":
-                    # "playlist" without that being in the real source -
-                    # an unverified guess, and confirmed via a real
-                    # device test to be the actual bug: pressing this row
-                    # went straight to a blank screen with ZERO trace of
-                    # any request ever reaching the server (no
-                    # [BL] print at all, while ordinary heartbeat traffic
-                    # kept flowing normally through the same moment) -
-                    # meaning the failure was purely client-side
-                    # rendering, before JiveLite ever got far enough to
-                    # send anything. Removed to match the real shape
-                    # exactly rather than guess again.
-                    # "Clear queue" (not "Clear Playlist") - deliberate
-                    # text change to match the MA app's own wording.
-                    # Command/shape otherwise unchanged from real LMS.
+                    # No "type" key: LMS's _addJivePlaylistControls sets only
+                    # text/icon-id/offset/count/item_loop. Adding "type": "playlist" made
+                    # the row open a blank screen with no request ever sent.
+                    # "Clear queue" (not LMS's "Clear Playlist") matches the MA app.
                     "text": "Clear queue",
                     "icon": "html/images/playlistclear.png",
                     "count": 2,
@@ -4363,49 +3238,24 @@ class BrowseLibraryHandler:
                 },
             ]
 
-        # Patch just the truncated fields - everything else the built-in
-        # already computed (player_name, mode, power, alarm data,
-        # base.actions.more, preset_loop/preset_data, ...) stays exactly
-        # as the real built-in returned it.
+        # Patch only the truncated fields; everything else the built-in computed
+        # (player_name, mode, power, alarms, base.actions.more, presets) stays as returned.
         result["item_loop"] = item_loop
         result["count"] = queue.items + (1 if queue.items > 0 else 0)
         result["offset"] = offset
-        # v52 added base["addAction"] = "more" here, reasoning from
-        # SlimBrowserApplet.lua's _actionHandler source (real, but only
-        # part of the picture). A real pcap capture of this exact real
-        # base.actions.more object (LMS 9.1.1) shows no "addAction" key
-        # at all - removed to match. The real, pcap-confirmed fix turned
-        # out to be simpler: real queue rows carry NO "actions" field of
-        # their own at all (see _build_queue_item_loop above) - with
-        # nothing at the row level left to shadow this base action,
-        # there's nothing for an addAction flag to route around either.
+        # base.actions.more matches the LMS capture (no "addAction"), and queue rows carry
+        # no per-row "actions", so nothing at the row level shadows it.
         return result
 
     async def _build_queue_item_loop(self, queue, offset, limit):
         """
-        Build a real item_loop (SlimMenuItem rows) for a slice of a
-        real MA queue - factored out of _handle_queue_status as of v38
-        so the new post-add/insert "replace" list push (see
-        _handle_playlistcontrol) can build the exact same real rows
-        without duplicating this logic a second time.
+        Build the item_loop rows for a slice of the MA queue, shared by
+        _handle_queue_status and the queue-view pushes.
 
-        Real fields read directly from QueueItem - NOT
-        player_media_from_queue_item(). Confirmed via a real traceback
-        that this was the actual cause of newly-added tracks "not
-        showing" for minutes at a time: it raises
-        InvalidDataError("Queue session_id is None") for any item that
-        isn't already part of an active streaming session - which is
-        only ever current_media/next_media at most, the same 2-item
-        universe the original built-in was stuck in. Every request
-        touching a queue item beyond that was failing outright (caught
-        by __call__, logged, re-raised), not returning stale data - so
-        nothing "caught up" on its own until playback advanced far
-        enough for MA to assign that item a session as part of its
-        normal preload behavior. QueueItem itself already carries
-        everything a listing row needs without requiring a session:
-        .name (title), .duration, .media_item (the real underlying
-        Track/etc.) - confirmed via real signature introspection before
-        using any of these, not guessed.
+        Fields come straight from QueueItem (.name, .duration, .media_item), not
+        player_media_from_queue_item(), which raises InvalidDataError("Queue session_id
+        is None") for any item outside an active streaming session and left newly-added
+        tracks missing from the list.
         """
         queue_items = self.mass.player_queues.items(queue.queue_id, limit=limit, offset=offset)
 
@@ -4416,34 +3266,10 @@ class BrowseLibraryHandler:
             album_obj = getattr(track, "album", None) if track else None
             album = getattr(album_obj, "name", "") or ""
             uri = (getattr(track, "uri", None) or "") if track else ""
-            # v40/v41 both tried to eagerly resolve a real image_url
-            # here (via _pick_best_image + get_image_url/
-            # get_image_url_for_item) and hand that directly to the
-            # device. Root cause, confirmed via a real capture: when
-            # the best-ranked image is remotely-hosted (which
-            # _pick_best_image deliberately prefers - TheAudioDB,
-            # fanart.tv, etc.), the resulting value ends up as a raw
-            # external URL, and the device/aioslimproto wraps that in a
-            # local "/imageproxy/<url>/image_WxH_m" request expecting
-            # THIS server to fetch and proxy it - a route this server
-            # has never implemented, confirmed via a real [ICON]
-            # UNMATCHED capture of exactly that request shape,
-            # coinciding with a track (New Truck) whose album art is
-            # otherwise proven to serve correctly via the real
-            # /music/{id}/cover route in the very same capture.
-            #
-            # Real fix: don't resolve a URL here at all - just point at
-            # that same already-working local route, exactly the same
-            # f"music/{id}/cover" format every other real icon in this
-            # file already uses (get_albums/get_playlists/get_radio_
-            # stations/etc., all confirmed serving real art correctly).
-            # handle_icon (below) already does the real resolution -
-            # _pick_best_image, remote-image proxying included - lazily
-            # and server-side when the device actually requests it, the
-            # same as it already does for every other icon in this
-            # file; there's no reason queue rows needed a second,
-            # eager, URL-based resolution path of their own, and that
-            # second path is exactly what broke.
+            # Icons are local "music/{id}/cover" identifiers resolved server-side by
+            # handle_icon, never a resolved image URL: a remotely-hosted image reached
+            # the device as an "/imageproxy/<url>/..." request this server doesn't serve,
+            # leaving some queue rows without art.
             if album_obj is not None and getattr(album_obj, "item_id", None) is not None:
                 icon_path = f"music/{album_obj.item_id}/cover"
             elif (
@@ -4463,46 +3289,18 @@ class BrowseLibraryHandler:
                 }[track.media_type]
                 icon_path = f"music/{_type_prefix}-{track.item_id}/cover"
             else:
-                # No album to key off, and not one of the three
-                # namespaced media types handled just above - a
-                # genuine edge case (e.g. a queue item with no
-                # library album or recognized media type at all).
-                # Confirmed via a real report that this file must
-                # NEVER hand a resolved URL (raw or proxy-shaped) to
-                # the client directly, in any code path - the client
-                # should only ever see local music/{id}/cover-style
-                # identifiers and let this server resolve them
-                # server-side on request, the same as every other
-                # real icon here. There's no local route this project
-                # has for a bare track id (_fetch_real_item_art's own
-                # icon_id scheme treats any unprefixed numeric id as
-                # an ALBUM, not a track - see its own docstring), so
-                # there's nothing local to point at here; leaving the
-                # icon blank (client shows no image/a placeholder) is
-                # the correct, safe fallback - not calling
-                # get_image_url_for_item() and leaking whatever it
-                # returns, which is exactly the mistake that broke
-                # queue rows in the first place.
+                # No album and not a radio/podcast/audiobook: there is no local route for
+                # a bare track id (_fetch_real_item_art treats an unprefixed numeric id as
+                # an album), and a resolved URL must never reach the client, so the icon
+                # is left blank.
                 icon_path = ""
             media_details = MediaDetails(
                 url=uri,
                 metadata={
-                    # Real bare numeric ID (e.g. 26566), NOT the full
-                    # "library://track/N" uri - confirmed via a direct,
-                    # side-by-side comparison of a real LMS client trace
-                    # against our own for the exact same interaction
-                    # (long-press a queue row): real LMS's own outgoing
-                    # contextmenu request carries track_id:26566 (bare
-                    # numeric); ours carried track_id:library://track/25
-                    # (full uri) - the one concrete difference between a
-                    # request that correctly reached _browseSink()/
-                    # "Pushed" on real LMS, and one that instead hit
-                    # "Hiding NP child window"/"Popped" on this server,
-                    # every other time this was tested. track.item_id is
-                    # the real bare numeric field (confirmed via real
-                    # signature introspection, same as everything else
-                    # this loop reads off track) - falling back to uri
-                    # only if a queue item genuinely has no item_id.
+                    # The bare numeric item_id (e.g. 26566), not the "library://track/N"
+                    # uri: LMS's own contextmenu request carries a bare track_id, and the
+                    # uri form made a long-press open the Now Playing window instead of the
+                    # menu. Falls back to the uri only if there is no item_id.
                     "item_id": getattr(track, "item_id", None) or uri,
                     "title": queue_item.name,
                     "album": album,
@@ -4512,61 +3310,23 @@ class BrowseLibraryHandler:
                 },
             )
             row = menu_item_from_media_details(media_details, include_actions=False)
-            # Two-line "text" (same documented SlimBrowse \n convention
-            # already used by get_tracks()/get_albums() above) - the
-            # built-in menu_item_from_media_details() sets "text" to the
-            # bare title only, which is why the queue view showed one
-            # line instead of real LMS's two. Falls back to the bare
-            # title when a queue item genuinely has no artist, same as
-            # the other two call sites.
+            # Two-line text ("title\nartist", the SlimBrowse \n convention); the built-in
+            # sets only the bare title. Falls back to the title when there is no artist.
             if artist:
                 row["text"] = f"{queue_item.name}\n{artist}"
-            # Real, pcap-confirmed row shape (a real LMS 9.1.1 queue-view
-            # capture, not inferred): a queue row carries NO "actions"
-            # field at all - not go, not add, not more, nothing - just
-            # style/text/track/album/artist/params/icon. Single-tap-to-
-            # play still works against real LMS with zero actions on the
-            # row, confirming JiveLite's own tap handling for
-            # style:itemplay rows doesn't need an explicit "go" action at
-            # all here - it must derive play-this-index behavior from
-            # context (params.playlist_index) rather than a literal
-            # action lookup. v51's row["actions"].pop("more", None) was
-            # a real, reasonable attempt at the time but the wrong fix -
-            # the actual conflict was "add" (what a touchscreen hold
-            # resolves to, per real JiveLite source - Menu.lua's real
-            # EVENT_MOUSE_HOLD unconditionally does Framework:pushAction
-            # ("add")), not "more", and the real, confirmed fix is
-            # simpler than picking which action(s) to remove: match
-            # real LMS exactly and don't build a per-row actions dict at
-            # all. include_actions=False skips building it in the first
-            # place, rather than building then stripping.
+            # Matches the LMS 9.1.1 capture: a queue row carries no "actions" at all
+            # (style/text/track/album/artist/params/icon only). A touchscreen hold
+            # resolves to the "add" action, so a per-row actions dict broke the long-press
+            # menu; JiveLite derives tap-to-play from params.playlist_index instead.
+            # include_actions=False skips building the dict.
             row["style"] = "itemplay"
             row.pop("type", None)
-            # menu_item_from_media_details() (aioslimproto's own
-            # function) sets details["nextWindow"] = "nowPlaying"
-            # UNCONDITIONALLY at its very end - outside its own
-            # include_actions check, confirmed by reading its real
-            # source directly (cli.py) - so it survived even after v53
-            # switched to include_actions=False. Real LMS's own queue
-            # rows never carry a row-level nextWindow at all (confirmed
-            # via multiple real captures). Popped here because a direct,
-            # line-by-line comparison of a failing vs a working client
-            # trace for the identical long-press interaction showed the
-            # working (real LMS) trace logging "Context Menu" /
-            # "_newWindowSpec()" / "_newDestination():" right after
-            # "_actionHandler(more): json action", while the failing
-            # (this server's) trace skipped straight from that same line
-            # to "_performJSONAction(from:nil, qty:nil)" - the entire
-            # Context Menu branch never ran. That skip is consistent
-            # with the client falling back to a row's own nextWindow
-            # value regardless of which action actually fired,
-            # explaining the observed "Hiding NP child window" ->
-            # _goNowPlaying() behavior exactly.
+            # menu_item_from_media_details sets nextWindow="nowPlaying" unconditionally,
+            # even with include_actions=False. LMS queue rows have no row-level
+            # nextWindow, and keeping it made the client jump to Now Playing instead of
+            # opening the long-press context menu.
             row.pop("nextWindow", None)
-            # params: real capture shows ONLY track_id + playlist_index -
-            # no item_id/uri. Matched exactly here too, not just because
-            # it's unused elsewhere, but because it's what's actually
-            # proven to work.
+            # The capture has only track_id + playlist_index.
             row["params"] = {
                 "track_id": row["params"].get("track_id"),
                 "playlist_index": offset + i,
@@ -4578,87 +3338,36 @@ class BrowseLibraryHandler:
 # ---------------------------------------------------------------------------
 # Icon / cover art serving
 #
-# ARCHITECTURAL RULE, decided in a prior session, re-confirmed after v40/v41
-# accidentally violated it: the client is NEVER handed a real or proxy image
-# URL directly - not MA's own remote URLs, not MA's own /imageproxy/ paths,
-# nothing resolved-looking at all. Every "icon"/image_url this project ever
-# gives the client is a local identifier in this server's own namespace
-# (f"music/{id}/cover", "artist-{id}", chrome icon filenames, etc.) that
-# THIS code resolves server-side, on request, via _fetch_real_item_art
-# below. This is deliberate, not incidental: keeping this server in the
-# middle of every real image fetch is what allows it to make its own
-# adjustments later - e.g. serving a smaller/differently-encoded icon to a
-# known low-power device - flexibility that's lost the moment a client is
-# handed a URL it can resolve on its own without this code ever seeing the
-# request again. v40/v41 broke this for queue-view rows specifically (eager
-# URL resolution baked directly into item_loop's image_url field), which
-# is what actually caused the "some queue rows have no art" bug those two
-# versions were chasing - not a resolution-quality problem at all, a
-# never-expose-a-resolved-URL rule that got violated without anyone
-# involved at the time realizing it was already a settled decision. v42/v43
-# fixed it back to local identifiers only; if a future change is tempted to
-# resolve+embed a URL again for convenience, this is why not to.
+# RULE: the client is never handed a real or proxy image URL. Every "icon"/image_url it
+# gets is a local identifier in this server's namespace (f"music/{id}/cover",
+# "artist-{id}", chrome icon filenames) that this code resolves server-side on request
+# via _fetch_real_item_art. That keeps this server in the middle of every image fetch
+# (e.g. to serve a smaller icon to a low-power device). Embedding a resolved URL in
+# queue rows once left some rows without art.
 #
-# Real MA album art, for the one icon route that already carries a real
-# item_id (get_albums' "icon": f"music/{album.item_id}/cover" - see above).
-# Falls back to the same solid-color placeholder as before on any failure
-# (album not found, no image, image fetch error) - a missing/broken piece of
-# art should degrade to a placeholder square, never a broken image or a 404.
+# Real album/artist art goes through mass.metadata (ImageProxyMixin,
+# controllers/metadata/images.py): get_image_url_for_item(media_item) resolves an item
+# (with MA's own fallback chain, e.g. track -> album) to a fetchable URL, and
+# get_thumbnail(path, provider="builtin", size=..., image_format="jpeg",
+# flatten_transparency=True) fetches, resizes and caches the bytes, as MA does for
+# playback art (JPEG for compatibility, transparency flattened onto white). Any failure
+# falls back to a solid-color placeholder: missing art should never be a broken image
+# or a 404.
 #
-# Verified against the real music_assistant.controllers.metadata source
-# (ImageProxyMixin in controllers/metadata/images.py), not guessed:
-#   - mass.metadata.get_image_url_for_item(media_item) resolves a MediaItem
-#     (Album, Track, Artist, ...) to a fetchable URL - handling local-file
-#     vs. remote vs. provider-specific resolution, and MA's own built-in
-#     "no image on this item? try its artist/album instead" fallback chain,
-#     entirely internally.
-#   - mass.metadata.get_thumbnail(path, provider="builtin", size=..., ...)
-#     then fetches/resizes/caches actual bytes from that URL. provider=
-#     "builtin" is the exact pattern MA's own get_image_data_for_item uses
-#     for this same two-step call - the resolution step above has already
-#     turned a provider-specific reference into something directly
-#     fetchable, so the second step no longer needs the original provider.
-#   - image_format="jpeg", flatten_transparency=True mirrors the comment in
-#     images.py's own _serve_thumbnail: "players are sent a JPEG for maximum
-#     compatibility... since JPEG has no alpha channel we composite
-#     transparency onto white" - the same treatment real playback art
-#     already gets, which is exactly the JiveLite-facing scenario here too.
-#
-# Chrome icons (/html/images/*.png - the three distinct per-tile names on
-# MY_MUSIC_NODE: AlbumArtists/AllArtists/Albums) are served from real files
-# in static/ (see STATIC_DIR below) - these are actual icons downloaded
-# from a real LMS server (same asset LMS itself serves, saved to disk once
-# rather than fetched from a live LMS on every request), not generated.
-# The solid-color placeholder is now only a last-resort fallback if a
-# specific file genuinely isn't found in static/ (chrome icon) or nothing
-# resolves via _fetch_real_item_art (album/artist cover art), same
-# fail-safe role it plays everywhere else in this project - never a broken
-# image or a 404 for something we could reasonably render instead.
-#
-# Real per-item art now covers both albums and artists (see get_albums()/
-# get_artists() above and _fetch_real_item_art below for the icon_id
-# namespacing that keeps the two from colliding) - reached either via the
-# proper wrapped path or, as before, the bare-icon_id fallback in
-# handle_unmatched below.
+# Chrome icons (/html/images/*.png, the per-tile names on MY_MUSIC_NODE) are real files
+# in static/ (STATIC_DIR), downloaded once from a real LMS server. The placeholder is
+# the last-resort fallback when one is missing.
 # ---------------------------------------------------------------------------
 
 _PNG_CACHE = {}
 
-# Real chrome icon files, downloaded from a live LMS server the same way
-# the standalone scaffold's download_static_assets.py did - not generated,
-# and not re-fetched at runtime. Lives next to this file so it travels with
-# the package regardless of where it's installed (Path(__file__).parent
-# resolves correctly either way) - same STATIC_DIR pattern the scaffold
-# used. reinject.sh needs to copy this whole directory alongside the four
-# .py files it already copies; see that script's own comment at the
-# docker cp line for this.
+# Chrome icon files, downloaded once from a real LMS server (not generated or fetched
+# at runtime). They live next to this file so they travel with the package; reinject.sh
+# copies the whole directory.
 STATIC_DIR = (Path(__file__).parent / "static").resolve()
 
-# Ported from the standalone scaffold's icon_handler (same regex, same
-# role): real JiveLite requests a size suffix on every chrome icon path
-# (e.g. 'AlbumArtists_225x225_m.png') - this splits that back into the
-# base name, the suffix, and the extension so _resolve_static_icon_path
-# can look for a real on-disk file matching just the base name.
+# Real JiveLite requests a size suffix on every chrome icon path (e.g.
+# 'AlbumArtists_225x225_m.png'); this splits it into base name, suffix and extension.
 _STATIC_ICON_SUFFIX_RE = re.compile(
     r"^(?P<base>.+?)_(?P<w>\d+)x(?P<h>\d+)_(?P<mode>[a-zA-Z])(?P<ext>\.[a-zA-Z0-9]+)?$"
 )
@@ -4666,23 +3375,14 @@ _STATIC_ICON_SUFFIX_RE = re.compile(
 
 def _resolve_static_icon_path(filename):
     """
-    Resolve a requested chrome-icon filename to a real Path in
-    static/, or None if nothing on disk matches (caller falls back to the
-    placeholder). 1:1 by design - the requested base name (e.g.
-    "AlbumArtists" out of "AlbumArtists_225x225_m.png") has to match a real
-    file's base name exactly; no aliasing or indirection. Each of
-    MY_MUSIC_NODE's per-menu-item icon names above (AlbumArtists.png,
-    AllArtists.png, Albums.png) needs its own real file in static/ - even
-    where two of them look the same today, they're independent images,
-    kept in sync (or not) by whoever maintains static/, not by this code.
+    Resolve a requested chrome-icon filename to a real Path in static/, or None if
+    nothing matches (the caller falls back to the placeholder).
 
-    Tries the exact size-suffixed filename first (e.g.
-    'AlbumArtists_225x225_m.png'), then falls back to the plain
-    suffix-stripped name (e.g. 'AlbumArtists.png'), in case only an
-    unsized master image exists for a given asset - same two-candidate
-    fallback order the scaffold used, for the same reason (a real device
-    always sends a specific requested size, but we may only have one
-    fixed image to offer regardless of which size was asked for).
+    The requested base name (e.g. "AlbumArtists" from "AlbumArtists_225x225_m.png") must
+    match a real file's base name exactly: no aliasing, so each MY_MUSIC_NODE icon name
+    needs its own file in static/, even where two are the same image. Tries the exact
+    size-suffixed filename first, then the plain suffix-stripped name, since a device
+    always asks for a specific size but only one master image may exist.
     """
     m = _STATIC_ICON_SUFFIX_RE.match(filename)
     if m:
@@ -4710,18 +3410,14 @@ def _resolve_static_icon_path(filename):
     return None
 
 
-# Matches the size suffix real JiveLite puts on every image path (e.g.
-# '.../cover_225x225_m') - see this section's own history for why we only
-# used to need this for logging, and now need it to ask MA for a
-# sensibly-sized thumbnail instead of the full-resolution source image.
+# The size suffix JiveLite puts on every image path (e.g. '.../cover_225x225_m'), used
+# to request a suitably sized thumbnail from MA.
 _COVER_SIZE_RE = re.compile(r"_(?P<w>\d+)x(?P<h>\d+)_[a-zA-Z]$")
 
-# Used only when a request carries no size suffix - real JiveLite always
-# sends one for cover art (see _COVER_SIZE_RE above), so this mainly matters
-# for the bare-icon_id fallback path in handle_unmatched, which never
-# carries one. Not tied to MA's own imageproxy's allowed-sizes allowlist
-# (an HTTP-route-only input validation, not enforced on the get_thumbnail()
-# call we use directly) - just a reasonable default for an embedded display.
+# Used when a request has no size suffix, mainly the bare-icon_id fallback in
+# handle_unmatched. Not tied to MA's imageproxy size allowlist (HTTP-route validation
+# only, not applied to the get_thumbnail() call used here); just a reasonable default
+# for an embedded display.
 _DEFAULT_COVER_SIZE = 300
 
 
@@ -4738,21 +3434,11 @@ def _requested_cover_size(path):
 
 def _artist_no_art_response(request_path):
     """
-    Real LMS's own behavior when an artist has no photo: fall back to
-    the generic Artists chrome icon (AllArtists_*.png - see
-    _resolve_static_icon_path above) rather than a blank/placeholder
-    image. Reuses whichever size suffix the client actually requested
-    (falling back to 225, since that's the one size we actually have a
-    real AllArtists file for - see static/'s own contents). Returns a
-    Response, or None if that file isn't available either, in which case
-    the caller falls through to the solid-color placeholder exactly as
-    before - this is strictly an extra rung on the fallback ladder, not a
-    replacement for it.
-
-    Was "AlbumArtists" here - switched to "AllArtists" alongside the
-    Artists/Tracks menu restructure (see MY_MUSIC_NODE's own notes),
-    which fully retired the "Album Artists" concept; this project no
-    longer needs an AlbumArtists.png file to exist at all.
+    LMS's behavior when an artist has no photo: fall back to the generic Artists chrome
+    icon (AllArtists_*.png, see _resolve_static_icon_path) instead of a placeholder. Uses
+    the requested size suffix, else 225 (the one size we have a file for). Returns a
+    Response, or None if that file is missing, in which case the caller falls through to
+    the solid-color placeholder.
     """
     m = _COVER_SIZE_RE.search(request_path)
     suffix = f"_{m.group('w')}x{m.group('h')}_m" if m else "_225x225_m"
@@ -4767,11 +3453,8 @@ def _artist_no_art_response(request_path):
     )
 
 
-# Extensions we treat as "this local image is actually embedded inside an
-# audio file's own tags, not a real standalone cover file" - used by
-# _pick_best_image below to rank those last. Not exhaustive of every format
-# MA's providers might report, but covers the common ones; worth extending
-# if a real capture ever shows something else showing up here.
+# Extensions marking a local image as embedded in an audio file's tags rather than a
+# standalone cover file; _pick_best_image ranks those last. Not exhaustive.
 _AUDIO_EXTENSIONS = (
     ".mp3",
     ".flac",
@@ -4789,24 +3472,17 @@ _AUDIO_EXTENSIONS = (
 
 def _pick_best_image(images, img_type):
     """
-    Pick the best candidate of img_type (e.g. ImageType.THUMB) from a
-    MediaItem's own images list, in this priority order:
-      1. any remotely_accessible image (internet-hosted - TheAudioDB,
-         fanart.tv, etc.) - generally something someone deliberately
-         curated/uploaded, and consistently the highest-quality option in
-         every real album checked so far (see this function's history).
-      2. a local standalone image file (e.g. 'Folder.jpg') - a real cover
-         file someone placed in the album folder.
-      3. a local image embedded inside an audio file itself (path ends in
-         a known audio extension, see _AUDIO_EXTENSIONS) - last resort,
-         since embedded-in-track art is commonly lower resolution/quality
-         than a dedicated cover file, and is genuinely the source of the
-         "grainy" covers this was built to fix.
-    Deliberately NOT based on any real width/height/quality data - the
-    MediaItemImage model doesn't carry any (verified: type, path, provider,
-    remotely_accessible, proxy_id are its only fields) - this is a priority
-    order over metadata we do have, not a real quality comparison.
-    Returns None if nothing of that type exists at all.
+    Pick the best candidate of img_type (e.g. ImageType.THUMB) from a MediaItem's images,
+    in priority order:
+      1. any remotely_accessible image (TheAudioDB, fanart.tv, ...), generally curated
+         and the highest quality in every album checked.
+      2. a local standalone image file (e.g. 'Folder.jpg').
+      3. a local image embedded in an audio file (path ends in _AUDIO_EXTENSIONS), last
+         since embedded art is commonly lower resolution and was the source of "grainy"
+         covers.
+    This is a priority order over the metadata we have, not a quality comparison:
+    MediaItemImage carries no width/height (only type, path, provider,
+    remotely_accessible, proxy_id). Returns None if nothing of that type exists.
     """
     candidates = [img for img in images if img.type == img_type]
     if not candidates:
@@ -4822,31 +3498,15 @@ def _pick_best_image(images, img_type):
 
 async def _fetch_real_item_art(mass, icon_id, size):
     """
-    Try to resolve icon_id as a real MA library item and return real
-    art bytes, or None if anything along the way doesn't pan out (unknown
-    id, item not found, no image available, fetch error). Never raises -
-    every failure mode here just means "the caller should fall back to
-    the placeholder", not a broken response.
+    Resolve icon_id to a real MA library item and return its art bytes, or None if
+    anything fails (unknown id, item not found, no image, fetch error). Never raises:
+    None means "fall back to the placeholder".
 
-    icon_id is one of six shapes (see get_albums()/get_artists()/
-    get_playlists()/get_radio_stations()/get_podcasts()/get_audiobooks()
-    above, which are what actually generate these):
-      - a bare item_id (e.g. "42") - an Album, MediaControllerBase.
-        get_library_item does int(item_id) internally, which is also
-        what rejects a non-numeric icon_id here (e.g. a chrome-icon-shaped
-        bare path that reached here via handle_unmatched's fallback).
-      - "artist-<item_id>" (e.g. "artist-7") - an Artist.
-      - "playlist-<item_id>" (e.g. "playlist-3") - a Playlist.
-      - "radio-<item_id>" (e.g. "radio-9") - a Radio station.
-      - "podcast-<item_id>" (e.g. "podcast-2") - a Podcast.
-      - "audiobook-<item_id>" (e.g. "audiobook-5") - an Audiobook.
-      Artists, playlists, radio stations, podcasts, and audiobooks are
-      namespaced rather than also bare, since albums, artists, playlists,
-      radio stations, podcasts, and audiobooks each have their own
-      independent id space in MA - an unqualified numeric icon_id would
-      be ambiguous between them once all six share this same lookup
-      (could silently resolve to an unrelated item that happens to have
-      the same numeric id).
+    icon_id is a bare item_id (an Album, e.g. "42") or a namespaced "<type>-<item_id>"
+    for artist, playlist, radio, podcast or audiobook (e.g. "artist-7"). They are
+    namespaced because each type has its own id space in MA, so an unqualified numeric
+    id would be ambiguous. get_library_item does int(item_id), which also rejects a
+    non-numeric id such as a chrome-icon path that reached here via handle_unmatched.
     """
     if icon_id.startswith("artist-"):
         controller, real_id = mass.music.artists, icon_id[len("artist-") :]
@@ -4864,14 +3524,10 @@ async def _fetch_real_item_art(mass, icon_id, size):
         item = await controller.get_library_item(real_id)
     except MediaNotFoundError, ValueError:
         return None
-    # Prefer a real quality ranking over MA's own "first match in the list
-    # wins" default (get_image_url_for_item) - confirmed via a real capture
-    # that local filesystem images consistently sort first for every album
-    # checked, which is exactly the source of the graininess this exists to
-    # fix. Falls back to get_image_url_for_item's own chain (Track->album,
-    # Album->artist) only when this item has no images of its own at all -
-    # that fallback logic is more involved than picking among an existing
-    # list, and reusing it here avoids re-implementing it.
+    # Rank the item's own images (_pick_best_image) instead of MA's "first match wins"
+    # get_image_url_for_item, which put local filesystem images first and gave grainy
+    # covers. Fall back to get_image_url_for_item's own chain (Track->album,
+    # Album->artist) only when the item has no images of its own.
     images = getattr(getattr(item, "metadata", None), "images", None) or []
     chosen = _pick_best_image(images, ImageType.THUMB)
     if chosen is not None:
@@ -4950,27 +3606,19 @@ def make_icon_routes(mass):
     """
     Build the handle_icon/handle_unmatched closures bound to `mass`.
 
-    A factory rather than plain module-level functions (which is what these
-    used to be) because real cover art needs mass.music/mass.metadata
-    access, and these are registered directly as aiohttp route handlers via
-    provider.py's extra_routes - aiohttp calls them with just a `request`,
-    so there's no other place to thread mass through except a closure
-    captured at registration time. See provider.py's own comment at the
-    extra_routes= call site for why it's built this way there too.
+    A factory because real cover art needs mass.music/mass.metadata, and these are
+    registered as aiohttp route handlers (via provider.py's extra_routes), which only
+    receive the request; the closure is how mass reaches them.
     """
 
     async def handle_icon(request: web.Request) -> web.Response:
         """
-        Serves real cover art for '/music/<icon-id>/cover_<size>'
-        (icon-id is a real Album.item_id - see get_albums() above) and
-        real chrome icon files from static/ for generic UI icons
-        ('/html/images/<name>_<size>.png' - see _resolve_static_icon_path
-        above). Registered directly on aioslimproto's own internal webapp
-        (see provider.py) since mass.streams.register_dynamic_route only
-        supports exact-string paths, not the variable path segments
-        (icon-id, size) these need - aiohttp's own router, which
-        aioslimproto's webapp is a real instance of, supports this
-        natively via {name} route patterns.
+        Serves real cover art for '/music/<icon-id>/cover_<size>' (icon-id as in
+        _fetch_real_item_art) and chrome icon files from static/ for
+        '/html/images/<name>_<size>.png' (see _resolve_static_icon_path). Registered on
+        aioslimproto's own webapp (see provider.py) because
+        mass.streams.register_dynamic_route only supports exact-string paths, not the
+        {name} patterns these need.
         """
         path = request.path
         print(f"[ICON] handle_icon CALLED for path={path!r}", flush=True)
@@ -5035,13 +3683,10 @@ def make_icon_routes(mass):
 
     async def handle_unmatched(request: web.Request) -> web.Response:
         """
-        Catch-all for any GET request that doesn't match one of our
-        specific icon routes (/html/images/{filename}, /music/{icon_id}/{filename}).
-        Registered as the lowest-priority route in provider.py, so it only
-        fires for genuinely unmatched paths - forced print so we can see
-        exactly what a real device requests that we're not currently handling,
-        rather than a silent 404 with zero visibility (access logging is
-        explicitly disabled on this webapp - see provider.py).
+        Catch-all for any GET that doesn't match our icon routes
+        (/html/images/{filename}, /music/{icon_id}/{filename}), registered as the
+        lowest-priority route in provider.py. The print makes unhandled device requests
+        visible, since access logging is disabled on this webapp.
         """
         print(
             f"[ICON] UNMATCHED request: method={request.method} path={request.path!r} "
@@ -5049,18 +3694,11 @@ def make_icon_routes(mass):
             flush=True,
         )
 
-        # bare-icon_id fallback - this is the real cause of the missing-album-art
-        # bug (confirmed via docker logs: '/album1'..'/album5' with Stage 1's
-        # test data, exactly our icon_id values, no wrapper, no size suffix).
-        # Not a root-cause fix - see the scaffold's icon_handler docstring for
-        # what was already tried and ruled out.
-        #
-        # Now tries the same real-art lookup handle_icon's cover branch uses
-        # (see _fetch_real_item_art above) before falling back to the
-        # placeholder - a bare path that isn't a real Album.item_id or
-        # "artist-<item_id>" (e.g. a stray chrome-icon-shaped request) just
-        # returns None from that helper and falls through to the
-        # placeholder exactly as before.
+        # Bare-icon_id fallback: a client sometimes requests the icon_id directly
+        # ('/album1', no wrapper or size suffix). Tries the same real-art lookup as
+        # handle_icon's cover branch, then falls back to the placeholder; a bare path
+        # that isn't a real album/"artist-<id>" id (e.g. a chrome-icon-shaped request)
+        # just gets the placeholder.
         bare = request.path.lstrip("/")
         if "/" not in bare and bare:
             size = _requested_cover_size(request.path)
