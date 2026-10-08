@@ -25,7 +25,6 @@ from music_assistant_models.enums import (
     RepeatMode,
 )
 from music_assistant_models.errors import InvalidCommand, MusicAssistantError
-from music_assistant_models.media_items import AudioFormat
 
 from music_assistant.constants import (
     CONF_ENTRY_HTTP_PROFILE_FORCED_2,
@@ -61,6 +60,7 @@ from .multi_client_stream import MultiClientStream
 
 if TYPE_CHECKING:
     from aioslimproto.client import SlimClient
+    from music_assistant_models.media_items import AudioFormat
 
     from .provider import SqueezelitePlayerProvider
 

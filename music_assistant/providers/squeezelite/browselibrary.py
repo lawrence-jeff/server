@@ -58,8 +58,10 @@ import struct
 import time
 import urllib.parse
 import zlib
+from collections.abc import Awaitable, Callable
 from datetime import timedelta
 from pathlib import Path
+from typing import TYPE_CHECKING, Any, cast
 
 from aiohttp import web
 
@@ -72,6 +74,17 @@ from music_assistant_models.errors import MediaNotFoundError
 
 from music_assistant.controllers.player_queues.helpers import committed_index
 from music_assistant.helpers import datetime as mass_datetime
+
+if TYPE_CHECKING:
+    from aioslimproto import SlimServer
+    from aioslimproto.cli import SlimCLICommand
+    from aioslimproto.client import SlimClient
+    from music_assistant_models.player_queue import PlayerQueue
+
+    from music_assistant.controllers.music.media.base import MediaControllerBase
+    from music_assistant.mass import MusicAssistant
+
+    from .provider import SqueezelitePlayerProvider
 
 logger = logging.getLogger("music_assistant.squeezelite.browselibrary")
 
@@ -93,14 +106,16 @@ CONTEXT_KEYS = (
 )
 
 
-def _context(kwargs):
+def _context(kwargs: dict[str, Any]) -> dict[str, str]:
     # aioslimproto's own parse_args coerces numeric-looking tag values to
     # int/float (e.g. "artist_id:3" -> 3, not "3") - normalize back to str
     # for consistency with everything else here, which treats ids as strings.
     return {k: str(kwargs[k]) for k in CONTEXT_KEYS if k in kwargs}
 
 
-def _paginate(items, index, quantity):
+def _paginate(
+    items: list[Any], index: int | None, quantity: int | None
+) -> tuple[list[Any], int, int]:
     index = index or 0
     total = len(items)
     window = items[index : index + quantity] if quantity is not None else items[index:]
@@ -175,7 +190,7 @@ ARTIST_LIST_BASE_ACTIONS = {
 }
 
 
-def albums_base_actions(kwargs):
+def albums_base_actions(kwargs: dict[str, Any]) -> dict[str, Any]:
     """
     Return base.actions for an albums item_loop.
 
@@ -226,7 +241,7 @@ def albums_base_actions(kwargs):
     return actions
 
 
-def playlists_base_actions(kwargs):
+def playlists_base_actions(kwargs: dict[str, Any]) -> dict[str, Any]:
     """
     Return base.actions for a playlists item_loop.
 
@@ -277,7 +292,9 @@ def playlists_base_actions(kwargs):
     return actions
 
 
-def tracks_base_actions(kwargs, index=0, quantity=None):
+def tracks_base_actions(
+    kwargs: dict[str, Any], index: int | None = 0, quantity: int | None = None
+) -> dict[str, Any]:
     """Return base.actions for a tracks item_loop."""
     ctx = _context(kwargs)
     common = {**ctx, "sort": "albumtrack"}
@@ -308,6 +325,20 @@ def tracks_base_actions(kwargs, index=0, quantity=None):
             "nextWindow": "refresh",
             "params": {**ctx, "cmd": "add"},
         }
+    # _index/_quantity mirror this listing's pagination. The rest is pulled from the
+    # original kwargs (not only ctx) so playlist/podcast/search listings keep their
+    # container id or filter; "performance" is passed through only when present.
+    play_control_params: dict[str, Any] = {
+        **ctx,
+        "mode": "tracks",
+        "_index": str(index or 0),
+        **({"_quantity": str(quantity)} if quantity is not None else {}),
+        **{
+            k: (str(kwargs[k]) if k in ("playlist_id", "podcast_id") else kwargs[k])
+            for k in ("performance", "playlist_id", "podcast_id", "search", "favorite_only")
+            if k in kwargs
+        },
+    }
     actions = {
         # playallParams: tapping a track inside an album loads the whole album starting
         # at that position (real LMS sends "playlistcontrol album_id:N cmd:load
@@ -333,26 +364,13 @@ def tracks_base_actions(kwargs, index=0, quantity=None):
         # params merged in, and _handle_browselibrary answers with the track menu
         # instead of the listing. "window": {"isContextMenu": 1} is required: the
         # client decides whether to push a menu window from the action definition, not
-        # the response. _index/_quantity mirror this listing's pagination. params are
-        # pulled from the original kwargs (not only ctx) so playlist/podcast/search
-        # listings keep their container id or filter; "performance" is passed through
-        # only when present.
+        # the response.
         "playControl": {
             "player": 0,
             "cmd": ["browselibrary", "items"],
             "itemsParams": "playControlParams",
             "window": {"isContextMenu": 1},
-            "params": {
-                **ctx,
-                "mode": "tracks",
-                "_index": str(index or 0),
-                **({"_quantity": str(quantity)} if quantity is not None else {}),
-                **{
-                    k: (str(kwargs[k]) if k in ("playlist_id", "podcast_id") else kwargs[k])
-                    for k in ("performance", "playlist_id", "podcast_id", "search", "favorite_only")
-                    if k in kwargs
-                },
-            },
+            "params": play_control_params,
         },
         "more": {
             "player": 0,
@@ -371,7 +389,13 @@ def tracks_base_actions(kwargs, index=0, quantity=None):
     return actions
 
 
-async def get_artists(mass, index=0, quantity=None, search=None, favorite_only=False):
+async def get_artists(
+    mass: MusicAssistant,
+    index: int = 0,
+    quantity: int | None = None,
+    search: str | None = None,
+    favorite_only: bool = False,
+) -> dict[str, Any]:
     """
     Real MA data: mass.music.artists.library_items()/library_count().
 
@@ -422,8 +446,13 @@ async def get_artists(mass, index=0, quantity=None, search=None, favorite_only=F
 
 
 async def get_all_tracks(
-    mass, kwargs, index=0, quantity=None, search=None, favorite_only=False, player_id=None
-):
+    mass: MusicAssistant,
+    kwargs: dict[str, Any],
+    index: int = 0,
+    quantity: int | None = None,
+    search: str | None = None,
+    favorite_only: bool = False,
+) -> dict[str, Any]:
     r"""
     Return the flat, root-level track browse (MA's web UI taxonomy).
 
@@ -434,10 +463,6 @@ async def get_all_tracks(
     the canonical art source for a track (Track.image prefers it), and tracks with no
     album fall through to the placeholder. Row text is "Title\nArtist" (Track.artist_str),
     the documented two-line text convention Albums also uses.
-
-    player_id is unused: a single tap always adds to the queue (see
-    tracks_base_actions). It is kept because callers pass it and the signature is
-    shared with get_tracks()/get_playlist_tracks()/get_podcast_episodes().
     """
     limit = quantity if quantity is not None else 500
     items = await mass.music.tracks.library_items(
@@ -490,8 +515,14 @@ async def get_all_tracks(
 
 
 async def get_albums(
-    mass, artist_id, kwargs, index=0, quantity=None, search=None, favorite_only=False
-):
+    mass: MusicAssistant,
+    artist_id: str | None,
+    kwargs: dict[str, Any],
+    index: int = 0,
+    quantity: int | None = None,
+    search: str | None = None,
+    favorite_only: bool = False,
+) -> dict[str, Any]:
     r"""
     Return albums, optionally filtered to one artist.
 
@@ -554,7 +585,13 @@ async def get_albums(
     }
 
 
-async def get_tracks(mass, album_id, kwargs, index=0, quantity=None, player_id=None):
+async def get_tracks(
+    mass: MusicAssistant,
+    album_id: str | None,
+    kwargs: dict[str, Any],
+    index: int = 0,
+    quantity: int | None = None,
+) -> dict[str, Any]:
     """
     Real MA data: AlbumsController.tracks(album_id, "library").
 
@@ -566,10 +603,6 @@ async def get_tracks(mass, album_id, kwargs, index=0, quantity=None, player_id=N
 
     favorites_url is the track's MA-native .uri (e.g. "library://track/42"), unlike the
     artist/album favorites_url, which still use LMS's "db:" convention.
-
-    player_id is unused: rows are always "playControl" (tap-time menu), so no queue
-    check is needed. Kept because callers pass it and the signature is shared with the
-    other track listings.
     """
     items = (
         await mass.music.albums.tracks(album_id, "library", in_library_only=False)
@@ -606,7 +639,9 @@ async def get_tracks(mass, album_id, kwargs, index=0, quantity=None, player_id=N
     }
 
 
-async def get_track_play_control_menu(mass, album_id, kwargs, play_index):
+async def get_track_play_control_menu(
+    mass: MusicAssistant, album_id: str, kwargs: dict[str, Any], play_index: int | str
+) -> dict[str, Any]:
     """
     Return the "playControl" menu for a track inside a multi-track album.
 
@@ -630,7 +665,7 @@ async def get_track_play_control_menu(mass, album_id, kwargs, play_index):
         return get_track_play_control_menu_flat({"track_id": track_id})
     ctx = _context(kwargs)
 
-    def _row(style, text, next_window, params):
+    def _row(style: str, text: str, next_window: str, params: dict[str, Any]) -> dict[str, Any]:
         return {
             "style": style,
             "text": text,
@@ -685,7 +720,7 @@ async def get_track_play_control_menu(mass, album_id, kwargs, play_index):
     }
 
 
-def get_track_play_control_menu_flat(common_params):
+def get_track_play_control_menu_flat(common_params: dict[str, Any]) -> dict[str, Any]:
     """
     Return the menu for a track with no natural multi-item collection.
 
@@ -700,7 +735,7 @@ def get_track_play_control_menu_flat(common_params):
     (library tracks) or {"uri": ...} (playlist tracks, which may be provider-native).
     """
 
-    def _row(style, text, next_window, cmd):
+    def _row(style: str, text: str, next_window: str, cmd: str) -> dict[str, Any]:
         return {
             "style": style,
             "text": text,
@@ -729,7 +764,14 @@ def get_track_play_control_menu_flat(common_params):
     }
 
 
-async def get_playlists(mass, kwargs, index=0, quantity=None, search=None, favorite_only=False):
+async def get_playlists(
+    mass: MusicAssistant,
+    kwargs: dict[str, Any],
+    index: int = 0,
+    quantity: int | None = None,
+    search: str | None = None,
+    favorite_only: bool = False,
+) -> dict[str, Any]:
     """
     Return the flat "All Playlists" list.
 
@@ -778,7 +820,13 @@ async def get_playlists(mass, kwargs, index=0, quantity=None, search=None, favor
     }
 
 
-async def get_playlist_tracks(mass, playlist_id, kwargs, index=0, quantity=None, player_id=None):
+async def get_playlist_tracks(
+    mass: MusicAssistant,
+    playlist_id: str | None,
+    kwargs: dict[str, Any],
+    index: int = 0,
+    quantity: int | None = None,
+) -> dict[str, Any]:
     """
     Return a playlist's tracks.
 
@@ -791,8 +839,6 @@ async def get_playlist_tracks(mass, playlist_id, kwargs, index=0, quantity=None,
       2. Items may be provider-native rather than MA library items, so commonParams
          uses the track's "uri" (which _handle_playlistcontrol prefers) instead of
          "track_id".
-
-    player_id is unused: a single tap always adds to the queue (see tracks_base_actions).
     """
     items = []
     if playlist_id is not None:
@@ -829,8 +875,13 @@ async def get_playlist_tracks(mass, playlist_id, kwargs, index=0, quantity=None,
 
 
 async def get_radio_stations(
-    mass, kwargs, index=0, quantity=None, search=None, favorite_only=False
-):
+    mass: MusicAssistant,
+    kwargs: dict[str, Any],
+    index: int = 0,
+    quantity: int | None = None,
+    search: str | None = None,
+    favorite_only: bool = False,
+) -> dict[str, Any]:
     """
     Real MA data: RadioController.library_items()/library_count().
 
@@ -880,7 +931,14 @@ async def get_radio_stations(
     }
 
 
-async def get_audiobooks(mass, kwargs, index=0, quantity=None, search=None, favorite_only=False):
+async def get_audiobooks(
+    mass: MusicAssistant,
+    kwargs: dict[str, Any],
+    index: int = 0,
+    quantity: int | None = None,
+    search: str | None = None,
+    favorite_only: bool = False,
+) -> dict[str, Any]:
     """
     Real MA data: AudiobooksController.library_items()/library_count().
 
@@ -933,7 +991,14 @@ async def get_audiobooks(mass, kwargs, index=0, quantity=None, search=None, favo
     }
 
 
-async def get_podcasts(mass, kwargs, index=0, quantity=None, search=None, favorite_only=False):
+async def get_podcasts(
+    mass: MusicAssistant,
+    kwargs: dict[str, Any],
+    index: int = 0,
+    quantity: int | None = None,
+    search: str | None = None,
+    favorite_only: bool = False,
+) -> dict[str, Any]:
     """
     Return the flat podcasts list.
 
@@ -982,7 +1047,13 @@ async def get_podcasts(mass, kwargs, index=0, quantity=None, search=None, favori
     }
 
 
-async def get_podcast_episodes(mass, podcast_id, kwargs, index=0, quantity=None, player_id=None):
+async def get_podcast_episodes(
+    mass: MusicAssistant,
+    podcast_id: str | None,
+    kwargs: dict[str, Any],
+    index: int = 0,
+    quantity: int | None = None,
+) -> dict[str, Any]:
     """
     Return a podcast's episodes.
 
@@ -991,8 +1062,6 @@ async def get_podcast_episodes(mass, podcast_id, kwargs, index=0, quantity=None,
     provider, not stored), so it is consumed into a list before paginating, with the
     same defensive 2000-item cap, and playback uses the episode's "uri" rather than
     "track_id" since episodes may not be MA library items.
-
-    player_id is unused: a single tap always adds to the queue (see tracks_base_actions).
     """
     items = []
     if podcast_id is not None:
@@ -1039,7 +1108,7 @@ async def get_podcast_episodes(mass, podcast_id, kwargs, index=0, quantity=None,
 # (more a tag/filter on albums and tracks).
 
 
-def _standalone_actions(base_actions, item):
+def _standalone_actions(base_actions: dict[str, Any], item: dict[str, Any]) -> dict[str, Any]:
     """
     Build a self-contained per-item actions dict from a base-level template.
 
@@ -1060,7 +1129,13 @@ def _standalone_actions(base_actions, item):
     return result
 
 
-async def get_search_all(mass, search, kwargs, index=0, quantity=None, player_id=None):
+async def get_search_all(
+    mass: MusicAssistant,
+    search: str,
+    kwargs: dict[str, Any],
+    index: int = 0,
+    quantity: int | None = None,
+) -> dict[str, Any]:
     """
     Search all seven types at once.
 
@@ -1082,7 +1157,7 @@ async def get_search_all(mass, search, kwargs, index=0, quantity=None, player_id
     results = await asyncio.gather(
         get_artists(mass, 0, per_type_limit, search),
         get_albums(mass, None, kwargs, 0, per_type_limit, search),
-        get_all_tracks(mass, kwargs, 0, per_type_limit, search, player_id=player_id),
+        get_all_tracks(mass, kwargs, 0, per_type_limit, search),
         get_playlists(mass, kwargs, 0, per_type_limit, search),
         get_audiobooks(mass, kwargs, 0, per_type_limit, search),
         get_podcasts(mass, kwargs, 0, per_type_limit, search),
@@ -1117,7 +1192,9 @@ async def get_search_all(mass, search, kwargs, index=0, quantity=None, player_id
     }
 
 
-async def get_favorites_all(mass, kwargs, index=0, quantity=None):
+async def get_favorites_all(
+    mass: MusicAssistant, kwargs: dict[str, Any], index: int = 0, quantity: int | None = None
+) -> dict[str, Any]:
     """
     Return the combined view across all seven favorited types.
 
@@ -1140,7 +1217,14 @@ async def get_favorites_all(mass, kwargs, index=0, quantity=None):
     # Fixed order + per-type (count, fetch, actions) - kept in one place so
     # the ordering used for counting/slicing and the ordering used for
     # fetching/rendering can never drift apart.
-    type_plan = [
+    type_plan: list[
+        tuple[
+            str,
+            Awaitable[int],
+            Callable[[int, int], Awaitable[dict[str, Any]]],
+            dict[str, Any],
+        ]
+    ] = [
         (
             "artists",
             mass.music.artists.library_count(favorite_only=True),
@@ -1218,7 +1302,7 @@ async def get_favorites_all(mass, kwargs, index=0, quantity=None):
     }
 
 
-def _search_category_menu(search):
+def _search_category_menu(search: str) -> dict[str, Any]:
     """
     Return the category menu shown after typing a search term.
 
@@ -1261,7 +1345,7 @@ def _search_category_menu(search):
     }
 
 
-def _favorites_category_menu():
+def _favorites_category_menu() -> dict[str, Any]:
     """
     Return the favorites category menu, mirroring _search_category_menu.
 
@@ -1427,7 +1511,7 @@ MY_MUSIC_NODE = [
 ]
 
 
-def _build_preset_items(player):
+def _build_preset_items(player: SlimClient) -> list[dict[str, Any]]:
     """
     Return the home-menu items for the player's presets.
 
@@ -1515,11 +1599,18 @@ NOW_PLAYING_ITEM = {
 }
 
 
-def get_menu(player, index=0, quantity=100):
+def get_menu(player: SlimClient, index: int = 0, quantity: int = 100) -> dict[str, Any]:
     """Return the home menu: Now Playing, My Music and the player's presets."""
     item_loop = [NOW_PLAYING_ITEM, *MY_MUSIC_NODE, *_build_preset_items(player)]
     window, total, offset = _paginate(item_loop, index, quantity)
     return {"item_loop": window, "offset": offset, "count": total}
+
+
+def _flat_menu_for_row(page: dict[str, Any]) -> dict[str, Any]:
+    """Return the flat track menu for the single row in a one-row listing page."""
+    if not page["item_loop"]:
+        raise NotImplementedError
+    return get_track_play_control_menu_flat(page["item_loop"][0]["commonParams"])
 
 
 class BrowseLibraryHandler:
@@ -1536,60 +1627,60 @@ class BrowseLibraryHandler:
     call time.
     """
 
-    def __init__(self, provider):
+    def __init__(self, provider: SqueezelitePlayerProvider) -> None:
         """Initialize the handler."""
         self.provider = provider
         self.mass = provider.mass
 
-    async def __call__(self, slim_command):
+    @property
+    def _slimproto(self) -> SlimServer:
+        """Return the provider's SlimServer, which exists once the provider has loaded."""
+        if self.provider.slimproto is None:
+            msg = "SlimServer is not running"
+            raise RuntimeError(msg)
+        return self.provider.slimproto
+
+    async def __call__(self, slim_command: SlimCLICommand) -> Any:
         """Dispatch a slim command to its handler."""
         # Async because the listings make awaited mass.music.* calls; aioslimproto's
-        # dispatch handles an awaitable result.
-        try:
-            result = await self._dispatch(slim_command)
-            return result
-        except NotImplementedError:
-            raise  # the intentional "let aioslimproto's built-in handle this" signal - not an error
-        except Exception:
-            raise
+        # dispatch handles an awaitable result. NotImplementedError from _dispatch is the
+        # intentional "let aioslimproto's built-in handle this" signal, not an error.
+        return await self._dispatch(slim_command)
 
-    async def _dispatch(self, slim_command):
-        if slim_command.command == "menu":
-            player = self.provider.slimproto.get_player(slim_command.player_id)
+    async def _dispatch(self, slim_command: SlimCLICommand) -> Any:
+        """Route a slim command to its handler, or raise NotImplementedError."""
+        command = slim_command.command
+        if command == "menu":
+            player = self._slimproto.get_player(slim_command.player_id)
             if player is None:
                 raise NotImplementedError  # unknown player - let the built-in handle/reject it
             return get_menu(player)  # no real data involved - stays sync, just not awaited
 
-        if slim_command.command == "playlistcontrol":
-            return await self._handle_playlistcontrol(slim_command)
+        handlers = {
+            "playlistcontrol": self._handle_playlistcontrol,
+            "trackinfo": self._handle_trackinfo,
+            "albuminfo": self._handle_albuminfo,
+            "artistinfo": self._handle_artistinfo,
+            "contextmenu": self._handle_contextmenu,
+            "playlist": self._handle_playlist,
+            "status": self._handle_queue_status,
+        }
+        if (handler := handlers.get(command)) is not None:
+            return await handler(slim_command)
 
-        if slim_command.command == "trackinfo":
-            return await self._handle_trackinfo(slim_command)
-
-        if slim_command.command == "albuminfo":
-            return await self._handle_albuminfo(slim_command)
-
-        if slim_command.command == "artistinfo":
-            return await self._handle_artistinfo(slim_command)
-
-        if slim_command.command == "contextmenu":
-            return await self._handle_contextmenu(slim_command)
-
-        if slim_command.command == "playlist":
-            return await self._handle_playlist(slim_command)
-
-        if slim_command.command == "jiveblankcommand":
+        if command == "jiveblankcommand":
             # LMS's own no-op (what the queue view's "Clear Playlist" Cancel row sends).
             # aioslimproto has no handler, so without this a plain "never mind" tap
             # would surface as an error.
             return None
 
-        if slim_command.command == "status":
-            return await self._handle_queue_status(slim_command)
-
-        if slim_command.command != "browselibrary":
+        if command != "browselibrary":
             raise NotImplementedError
 
+        return await self._browse_library(slim_command)
+
+    async def _browse_library(self, slim_command: SlimCLICommand) -> dict[str, Any]:
+        """Answer a browselibrary request by routing on its mode."""
         args = slim_command.args
         kwargs = slim_command.kwargs
         if not args or args[0] != "items":
@@ -1610,9 +1701,7 @@ class BrowseLibraryHandler:
             # same search term and their own mode.
             return _search_category_menu(search or "")
         if mode == "search_all":
-            return await get_search_all(
-                self.mass, search or "", kwargs, index, quantity, player_id=slim_command.player_id
-            )
+            return await get_search_all(self.mass, search or "", kwargs, index, quantity)
         if mode == "favorites":
             # The Favorites home item: a category menu like "search" above; see
             # _favorites_category_menu().
@@ -1628,76 +1717,7 @@ class BrowseLibraryHandler:
                 self.mass, artist_id, kwargs, index, quantity, search, favorite_only
             )
         if mode == "tracks":
-            # podcast_id / playlist_id / album_id, if present, make this that container's
-            # listing. xmlbrowserPlayControl (the "playControl" re-query) is checked for
-            # every track listing since they share tracks_base_actions: an album gets the
-            # 4-item menu, the rest the flat menu. For podcast/playlist/root tracks the
-            # tapped row is re-fetched (quantity=1) through that listing's own function,
-            # whose row "commonParams" (track_id or uri) is the identity the flat menu
-            # needs.
-            podcast_id = kwargs.get("podcast_id")
-            playlist_id = kwargs.get("playlist_id")
-            album_id = kwargs.get("album_id")
-            play_control_index = kwargs.get("xmlbrowserPlayControl")
-            if album_id is not None:
-                if play_control_index is not None:
-                    return await get_track_play_control_menu(
-                        self.mass, str(album_id), kwargs, play_control_index
-                    )
-                return await get_tracks(
-                    self.mass,
-                    str(album_id),
-                    kwargs,
-                    index,
-                    quantity,
-                    player_id=slim_command.player_id,
-                )
-            if podcast_id is not None:
-                if play_control_index is not None:
-                    idx = int(play_control_index)
-                    page = await get_podcast_episodes(self.mass, str(podcast_id), kwargs, idx, 1)
-                    if not page["item_loop"]:
-                        raise NotImplementedError
-                    return get_track_play_control_menu_flat(page["item_loop"][0]["commonParams"])
-                return await get_podcast_episodes(
-                    self.mass,
-                    str(podcast_id),
-                    kwargs,
-                    index,
-                    quantity,
-                    player_id=slim_command.player_id,
-                )
-            if playlist_id is not None:
-                if play_control_index is not None:
-                    idx = int(play_control_index)
-                    page = await get_playlist_tracks(self.mass, str(playlist_id), kwargs, idx, 1)
-                    if not page["item_loop"]:
-                        raise NotImplementedError
-                    return get_track_play_control_menu_flat(page["item_loop"][0]["commonParams"])
-                return await get_playlist_tracks(
-                    self.mass,
-                    str(playlist_id),
-                    kwargs,
-                    index,
-                    quantity,
-                    player_id=slim_command.player_id,
-                )
-            # No context id: the root-level Tracks browse (get_all_tracks).
-            if play_control_index is not None:
-                idx = int(play_control_index)
-                page = await get_all_tracks(self.mass, kwargs, idx, 1, search, favorite_only)
-                if not page["item_loop"]:
-                    raise NotImplementedError
-                return get_track_play_control_menu_flat(page["item_loop"][0]["commonParams"])
-            return await get_all_tracks(
-                self.mass,
-                kwargs,
-                index,
-                quantity,
-                search,
-                favorite_only,
-                player_id=slim_command.player_id,
-            )
+            return await self._browse_tracks(kwargs, index, quantity, search, favorite_only)
         if mode == "playlists":
             return await get_playlists(self.mass, kwargs, index, quantity, search, favorite_only)
         if mode == "radio":
@@ -1712,7 +1732,52 @@ class BrowseLibraryHandler:
         logger.warning("browselibrary: unhandled mode=%r", mode)
         raise NotImplementedError
 
-    async def _handle_playlistcontrol(self, slim_command):
+    async def _browse_tracks(
+        self,
+        kwargs: dict[str, Any],
+        index: int,
+        quantity: int | None,
+        search: str | None,
+        favorite_only: bool,
+    ) -> dict[str, Any]:
+        """Answer a browselibrary request in tracks mode."""
+        # podcast_id / playlist_id / album_id, if present, make this that container's
+        # listing. xmlbrowserPlayControl (the "playControl" re-query) is checked for
+        # every track listing since they share tracks_base_actions: an album gets the
+        # 4-item menu, the rest the flat menu. For podcast/playlist/root tracks the
+        # tapped row is re-fetched (quantity=1) through that listing's own function,
+        # whose row "commonParams" (track_id or uri) is the identity the flat menu
+        # needs.
+        podcast_id = kwargs.get("podcast_id")
+        playlist_id = kwargs.get("playlist_id")
+        album_id = kwargs.get("album_id")
+        play_control_index = kwargs.get("xmlbrowserPlayControl")
+        if album_id is not None:
+            if play_control_index is not None:
+                return await get_track_play_control_menu(
+                    self.mass, str(album_id), kwargs, play_control_index
+                )
+            return await get_tracks(self.mass, str(album_id), kwargs, index, quantity)
+        if podcast_id is not None:
+            if play_control_index is not None:
+                idx = int(play_control_index)
+                page = await get_podcast_episodes(self.mass, str(podcast_id), kwargs, idx, 1)
+                return _flat_menu_for_row(page)
+            return await get_podcast_episodes(self.mass, str(podcast_id), kwargs, index, quantity)
+        if playlist_id is not None:
+            if play_control_index is not None:
+                idx = int(play_control_index)
+                page = await get_playlist_tracks(self.mass, str(playlist_id), kwargs, idx, 1)
+                return _flat_menu_for_row(page)
+            return await get_playlist_tracks(self.mass, str(playlist_id), kwargs, index, quantity)
+        # No context id: the root-level Tracks browse (get_all_tracks).
+        if play_control_index is not None:
+            idx = int(play_control_index)
+            page = await get_all_tracks(self.mass, kwargs, idx, 1, search, favorite_only)
+            return _flat_menu_for_row(page)
+        return await get_all_tracks(self.mass, kwargs, index, quantity, search, favorite_only)
+
+    async def _handle_playlistcontrol(self, slim_command: SlimCLICommand) -> None:
         """
         Handle playlistcontrol, which JiveLite sends for play/add/insert on a browse item.
 
@@ -1762,7 +1827,7 @@ class BrowseLibraryHandler:
         was_idle = queue is None or queue.state == PlaybackState.IDLE
         old_len = int(queue.items) if queue is not None else 0  # a count, not a list
 
-        async def _start_if_idle():
+        async def _start_if_idle() -> None:
             if not was_idle:
                 return
             if queue_option == QueueOption.ADD:
@@ -1778,55 +1843,9 @@ class BrowseLibraryHandler:
             and kwargs.get("track_id") is None
             and kwargs.get("uri") is None
         ):
-            # The whole album, starting at play_index: what a tap on a track inside an
-            # album's track listing sends ("album_id:X cmd:load play_index:N
-            # sort:albumtrack", no track_id). Not done with play_media's start_item: it
-            # keeps the preceding items only when shuffle is on (keep_preceding_items is
-            # hardcoded to queue.shuffle_enabled), so the selected track would jump to the
-            # front of the queue. Instead the full ordered track list is queued with
-            # play_media and a separate play_index() jumps to the selected position. Also
-            # covers add/insert/replace, for the album rows' add actions and menus.
-            album = await self.mass.music.albums.get_library_item(album_id)
-            tracks = await self.mass.music.albums.tracks(album_id, "library", in_library_only=False)
-            await self.mass.player_queues.play_media(
-                queue_id=player_id,
-                media=tracks,
-                option=queue_option,
+            await self._queue_album(
+                player_id, queue_option, album_id, kwargs.get("play_index"), _start_if_idle
             )
-            if queue_option in (QueueOption.PLAY, QueueOption.REPLACE):
-                # play_index is only sent by a tap on a track inside an album (cmd:load);
-                # the album menu's Play Now rows omit it, so the jump is skipped.
-                play_index = kwargs.get("play_index")
-                idx = int(play_index) if play_index is not None else 0
-                if idx:
-                    await self.mass.player_queues.play_index(queue_id=player_id, index=idx)
-                # A load fires two independent pushes in LMS (see push_show_briefly and
-                # push_play_icon in cli.py): the "song" popup (30s) and the icon-only
-                # "play" popup. REPLACE also starts playing immediately, so it gets both.
-                if 0 <= idx < len(tracks):
-                    self.provider.slimproto.cli.push_show_briefly(
-                        player_id,
-                        text=["Now Playing", tracks[idx].name],
-                        icon_id=str(album.item_id),
-                        duration_ms=30000,
-                        kind="song",
-                    )
-                    self.provider.slimproto.cli.push_play_icon(
-                        player_id,
-                        text=["Now Playing", tracks[idx].name],
-                        icon_id=str(album.item_id),
-                    )
-            elif queue_option in (QueueOption.ADD, QueueOption.NEXT, QueueOption.REPLACE_NEXT):
-                await _start_if_idle()
-                # Same "Adding"/"to play next..." popup and immediate queue-view push as
-                # the track_id/uri path below, named after the album since there is no
-                # single track.
-                await self._push_queue_update(player_id)
-                self.provider.slimproto.cli.push_show_briefly(
-                    player_id,
-                    text=["Adding" if queue_option == QueueOption.ADD else "to play next...", album.name],
-                    icon_id=str(album.item_id),
-                )
             return
 
         if (
@@ -1835,33 +1854,7 @@ class BrowseLibraryHandler:
             and kwargs.get("track_id") is None
             and kwargs.get("uri") is None
         ):
-            # Whole artist: all of their library tracks, queued per queue_option.
-            artist = await self.mass.music.artists.get_library_item(artist_id)
-            tracks = await self.mass.music.artists.tracks(artist_id, "library")
-            if not tracks:
-                return
-            await self.mass.player_queues.play_media(
-                queue_id=player_id,
-                media=tracks,
-                option=queue_option,
-            )
-            await _start_if_idle()
-            if queue_option in (QueueOption.PLAY, QueueOption.REPLACE):
-                self.provider.slimproto.cli.push_show_briefly(
-                    player_id,
-                    text=["Now Playing", artist.name],
-                    duration_ms=30000,
-                    kind="song",
-                )
-            else:
-                await self._push_queue_update(player_id)
-                self.provider.slimproto.cli.push_show_briefly(
-                    player_id,
-                    text=[
-                        "Adding" if queue_option == QueueOption.ADD else "to play next...",
-                        artist.name,
-                    ],
-                )
+            await self._queue_artist(player_id, queue_option, artist_id, _start_if_idle)
             return
 
         if (uri := kwargs.get("uri")) is not None:
@@ -1890,17 +1883,17 @@ class BrowseLibraryHandler:
             # push_play_icon in cli.py): the "song" popup and the icon-only "play" popup,
             # on every load. REPLACE starts playing immediately too, so it gets the same.
             # Only the track_id case is covered: a "uri" item has no readily available
-            # title/icon without another lookup (the album_id branch above has its own).
+            # title/icon without another lookup (_queue_album has its own).
             if uri is None:
                 icon_id = str(track.album.item_id) if track.album is not None else None
-                self.provider.slimproto.cli.push_show_briefly(
+                self._slimproto.cli.push_show_briefly(
                     player_id,
                     text=["Now Playing", track.name],
                     icon_id=icon_id,
                     duration_ms=30000,
                     kind="song",
                 )
-                self.provider.slimproto.cli.push_play_icon(
+                self._slimproto.cli.push_play_icon(
                     player_id,
                     text=["Now Playing", track.name],
                     icon_id=icon_id,
@@ -1920,7 +1913,7 @@ class BrowseLibraryHandler:
             # popup above instead.
             title = track.name if uri is None else media
             icon_id = str(track.album.item_id) if uri is None and track.album is not None else None
-            self.provider.slimproto.cli.push_show_briefly(
+            self._slimproto.cli.push_show_briefly(
                 player_id,
                 text=["Adding" if queue_option == QueueOption.ADD else "to play next...", title],
                 icon_id=icon_id,
@@ -1928,7 +1921,104 @@ class BrowseLibraryHandler:
 
         return
 
-    async def _push_queue_update(self, player_id):
+    async def _queue_album(
+        self,
+        player_id: str,
+        queue_option: QueueOption,
+        album_id: Any,
+        play_index: Any,
+        start_if_idle: Callable[[], Awaitable[None]],
+    ) -> None:
+        """Queue a whole album per queue_option, starting playback at play_index if given."""
+        # The whole album, starting at play_index: what a tap on a track inside an
+        # album's track listing sends ("album_id:X cmd:load play_index:N
+        # sort:albumtrack", no track_id). Not done with play_media's start_item: it
+        # keeps the preceding items only when shuffle is on (keep_preceding_items is
+        # hardcoded to queue.shuffle_enabled), so the selected track would jump to the
+        # front of the queue. Instead the full ordered track list is queued with
+        # play_media and a separate play_index() jumps to the selected position. Also
+        # covers add/insert/replace, for the album rows' add actions and menus.
+        album = await self.mass.music.albums.get_library_item(album_id)
+        tracks = await self.mass.music.albums.tracks(album_id, "library", in_library_only=False)
+        await self.mass.player_queues.play_media(
+            queue_id=player_id,
+            media=list(tracks),
+            option=queue_option,
+        )
+        if queue_option in (QueueOption.PLAY, QueueOption.REPLACE):
+            # play_index is only sent by a tap on a track inside an album (cmd:load);
+            # the album menu's Play Now rows omit it, so the jump is skipped.
+            idx = int(play_index) if play_index is not None else 0
+            if idx:
+                await self.mass.player_queues.play_index(queue_id=player_id, index=idx)
+            # A load fires two independent pushes in LMS (see push_show_briefly and
+            # push_play_icon in cli.py): the "song" popup (30s) and the icon-only
+            # "play" popup. REPLACE also starts playing immediately, so it gets both.
+            if 0 <= idx < len(tracks):
+                self._slimproto.cli.push_show_briefly(
+                    player_id,
+                    text=["Now Playing", tracks[idx].name],
+                    icon_id=str(album.item_id),
+                    duration_ms=30000,
+                    kind="song",
+                )
+                self._slimproto.cli.push_play_icon(
+                    player_id,
+                    text=["Now Playing", tracks[idx].name],
+                    icon_id=str(album.item_id),
+                )
+        elif queue_option in (QueueOption.ADD, QueueOption.NEXT, QueueOption.REPLACE_NEXT):
+            await start_if_idle()
+            # Same "Adding"/"to play next..." popup and immediate queue-view push as
+            # the track_id/uri path below, named after the album since there is no
+            # single track.
+            await self._push_queue_update(player_id)
+            self._slimproto.cli.push_show_briefly(
+                player_id,
+                text=[
+                    "Adding" if queue_option == QueueOption.ADD else "to play next...",
+                    album.name,
+                ],
+                icon_id=str(album.item_id),
+            )
+
+    async def _queue_artist(
+        self,
+        player_id: str,
+        queue_option: QueueOption,
+        artist_id: Any,
+        start_if_idle: Callable[[], Awaitable[None]],
+    ) -> None:
+        """Queue all of an artist's library tracks per queue_option."""
+        # Whole artist: all of their library tracks, queued per queue_option.
+        artist = await self.mass.music.artists.get_library_item(artist_id)
+        tracks = await self.mass.music.artists.tracks(artist_id, "library")
+        if not tracks:
+            return
+        await self.mass.player_queues.play_media(
+            queue_id=player_id,
+            media=list(tracks),
+            option=queue_option,
+        )
+        await start_if_idle()
+        if queue_option in (QueueOption.PLAY, QueueOption.REPLACE):
+            self._slimproto.cli.push_show_briefly(
+                player_id,
+                text=["Now Playing", artist.name],
+                duration_ms=30000,
+                kind="song",
+            )
+        else:
+            await self._push_queue_update(player_id)
+            self._slimproto.cli.push_show_briefly(
+                player_id,
+                text=[
+                    "Adding" if queue_option == QueueOption.ADD else "to play next...",
+                    artist.name,
+                ],
+            )
+
+    async def _push_queue_update(self, player_id: str) -> None:
         """
         Push an immediate queue-view update to any subscribed screen.
 
@@ -1947,12 +2037,12 @@ class BrowseLibraryHandler:
         touches it on playback events. Without the bump, a pure removal/move/clear with no
         track change left it stale and the client never refetched.
         """
-        if player := self.provider.slimproto.get_player(player_id):
+        if player := self._slimproto.get_player(player_id):
             player.extra_data["playlist_timestamp"] = int(time.time())
-        cli = self.provider.slimproto.cli
+        cli = self._slimproto.cli
         await cli._on_player_event(SlimEvent(type=EventType.PLAYER_UPDATED, player_id=player_id))
 
-    async def _handle_trackinfo(self, slim_command):
+    async def _handle_trackinfo(self, slim_command: SlimCLICommand) -> dict[str, Any]:
         """
         Handle the "more" action's trackinfo/items command (long-press on a track row).
 
@@ -1974,7 +2064,7 @@ class BrowseLibraryHandler:
         uri = kwargs.get("uri")
         base_params = {"track_id": track_id} if track_id is not None else {"uri": uri}
 
-        def _row(text, cmd):
+        def _row(text: str, cmd: str) -> dict[str, Any]:
             return {
                 "text": text,
                 "type": "text",
@@ -2008,7 +2098,7 @@ class BrowseLibraryHandler:
             "item_loop": item_loop,
         }
 
-    async def _handle_albuminfo(self, slim_command):
+    async def _handle_albuminfo(self, slim_command: SlimCLICommand) -> dict[str, Any]:
         """
         Handle the "more" action's albuminfo/items command (long-press on an album row).
 
@@ -2028,7 +2118,7 @@ class BrowseLibraryHandler:
         uri = kwargs.get("uri")
         base_params = {"album_id": album_id} if album_id is not None else {"uri": uri}
 
-        def _row(text, cmd):
+        def _row(text: str, cmd: str) -> dict[str, Any]:
             return {
                 "text": text,
                 "type": "text",
@@ -2058,7 +2148,7 @@ class BrowseLibraryHandler:
             "item_loop": item_loop,
         }
 
-    async def _handle_artistinfo(self, slim_command):
+    async def _handle_artistinfo(self, slim_command: SlimCLICommand) -> dict[str, Any]:
         """
         Handle the "more" action's artistinfo/items command (long-press on an artist row).
 
@@ -2069,7 +2159,7 @@ class BrowseLibraryHandler:
         if artist_id is None:
             raise NotImplementedError
 
-        def _row(text, cmd):
+        def _row(text: str, cmd: str) -> dict[str, Any]:
             return {
                 "text": text,
                 "type": "text",
@@ -2098,7 +2188,7 @@ class BrowseLibraryHandler:
             "item_loop": item_loop,
         }
 
-    async def _handle_contextmenu(self, slim_command):
+    async def _handle_contextmenu(self, slim_command: SlimCLICommand) -> dict[str, Any]:
         """
         Handle the "more" action's contextmenu command (long-press on a queue row).
 
@@ -2140,7 +2230,7 @@ class BrowseLibraryHandler:
             playlist_index == current_index and queue.state == PlaybackState.PLAYING
         )
 
-        def _row(text, cmd, style=None):
+        def _row(text: str, cmd: list[str], style: str | None = None) -> dict[str, Any]:
             # The same action under all four keys, so whichever gesture JiveLite resolves
             # a tap or hold to does the same thing; addAction:"go" is part of the captured
             # LMS shape.
@@ -2176,7 +2266,7 @@ class BrowseLibraryHandler:
         if can_edit:
             item_loop.append(_row("Delete item", ["playlist", "delete", str(playlist_index)]))
 
-        result = {
+        return {
             "count": len(item_loop),
             "offset": 0,
             # windowStyle "text_list", not isContextMenu:1: that flag belongs on the
@@ -2186,9 +2276,8 @@ class BrowseLibraryHandler:
             "window": {"windowStyle": "text_list"},
             "item_loop": item_loop,
         }
-        return result
 
-    async def _handle_playlist(self, slim_command):
+    async def _handle_playlist(self, slim_command: SlimCLICommand) -> None:
         """
         Handle the "playlist" jump/delete/move/moveend/clear subcommands.
 
@@ -2255,7 +2344,7 @@ class BrowseLibraryHandler:
         await self._push_queue_update(player_id)
 
     @staticmethod
-    async def _maybe_await(value):
+    async def _maybe_await(value: Any) -> None:
         """
         Await value only if it's actually awaitable.
 
@@ -2266,7 +2355,7 @@ class BrowseLibraryHandler:
         if inspect.isawaitable(value):
             await value
 
-    async def _handle_queue_status(self, slim_command):
+    async def _handle_queue_status(self, slim_command: SlimCLICommand) -> dict[str, Any]:
         """
         Override aioslimproto's built-in _handle_status for every status call.
 
@@ -2279,7 +2368,7 @@ class BrowseLibraryHandler:
             seconds): only a cheap patch of playlist_tracks/playlist_cur_index, which
             drive the "Playing X of Y" header (the built-in hardcodes a 2-item count).
 
-        The built-in is called first (self.provider.slimproto.cli._handle_status, with
+        The built-in is called first (self._slimproto.cli._handle_status, with
         the dispatcher's args/kwargs split) and only item_loop/count/offset are
         overwritten, so everything else it computes stays: player_name, mode, power,
         alarm data, base.actions.more, preset_loop/preset_data. Returning a from-scratch
@@ -2297,8 +2386,8 @@ class BrowseLibraryHandler:
         args = slim_command.args
         player_id = slim_command.player_id
 
-        cli = self.provider.slimproto.cli
-        result = await cli._handle_status(player_id, *args, **kwargs)
+        cli = self._slimproto.cli
+        result: dict[str, Any] | None = await cli._handle_status(player_id, *args, **kwargs)
         if result is None:
             raise NotImplementedError  # unknown player - let the built-in reject it
 
@@ -2369,7 +2458,9 @@ class BrowseLibraryHandler:
         # no per-row "actions", so nothing at the row level shadows it.
         return result
 
-    async def _build_queue_item_loop(self, queue, offset, limit):
+    async def _build_queue_item_loop(
+        self, queue: PlayerQueue, offset: int, limit: int
+    ) -> list[dict[str, Any]]:
         """
         Build the item_loop rows for a slice of the MA queue.
 
@@ -2482,7 +2573,7 @@ class BrowseLibraryHandler:
 # the last-resort fallback when one is missing.
 # ---------------------------------------------------------------------------
 
-_PNG_CACHE = {}
+_PNG_CACHE: dict[tuple[tuple[int, int, int], int], bytes] = {}
 
 # Chrome icon files, downloaded once from a real LMS server (not generated or fetched
 # at runtime). They live next to this file so they travel with the package; reinject.sh
@@ -2496,7 +2587,7 @@ _STATIC_ICON_SUFFIX_RE = re.compile(
 )
 
 
-def _resolve_static_icon_path(filename):
+def _resolve_static_icon_path(filename: str) -> Path | None:
     """
     Resolve a requested chrome-icon filename to a real Path in static/.
 
@@ -2545,7 +2636,7 @@ _COVER_SIZE_RE = re.compile(r"_(?P<w>\d+)x(?P<h>\d+)_[a-zA-Z]$")
 _DEFAULT_COVER_SIZE = 300
 
 
-def _requested_cover_size(path):
+def _requested_cover_size(path: str) -> int:
     """
     Extract the requested pixel size from a JiveLite icon path suffix.
 
@@ -2556,7 +2647,7 @@ def _requested_cover_size(path):
     return _DEFAULT_COVER_SIZE
 
 
-def _artist_no_art_response(request_path):
+def _artist_no_art_response(request_path: str) -> web.Response | None:
     """
     Return the generic Artists icon for an artist with no photo, as LMS does.
 
@@ -2595,7 +2686,7 @@ _AUDIO_EXTENSIONS = (
 )
 
 
-def _pick_best_image(images, img_type):
+def _pick_best_image(images: list[Any], img_type: ImageType) -> Any:
     """
     Pick the best image of img_type (e.g. ImageType.THUMB) from a MediaItem's images.
 
@@ -2622,7 +2713,7 @@ def _pick_best_image(images, img_type):
     return candidates[0]
 
 
-async def _fetch_real_item_art(mass, icon_id, size):
+async def _fetch_real_item_art(mass: MusicAssistant, icon_id: str, size: int) -> bytes | None:
     """
     Resolve icon_id to a real MA library item and return its art bytes, or None.
 
@@ -2635,6 +2726,7 @@ async def _fetch_real_item_art(mass, icon_id, size):
     id would be ambiguous. get_library_item does int(item_id), which also rejects a
     non-numeric id such as a chrome-icon path that reached here via handle_unmatched.
     """
+    controller: MediaControllerBase[Any]
     if icon_id.startswith("artist-"):
         controller, real_id = mass.music.artists, icon_id[len("artist-") :]
     elif icon_id.startswith("playlist-"):
@@ -2657,6 +2749,7 @@ async def _fetch_real_item_art(mass, icon_id, size):
     # Album->artist) only when the item has no images of its own.
     images = getattr(getattr(item, "metadata", None), "images", None) or []
     chosen = _pick_best_image(images, ImageType.THUMB)
+    img_path: str | None
     if chosen is not None:
         img_path = mass.metadata.get_image_url(chosen, prefer_proxy=not chosen.remotely_accessible)
     else:
@@ -2664,18 +2757,22 @@ async def _fetch_real_item_art(mass, icon_id, size):
     if not img_path:
         return None
     try:
-        return await mass.metadata.get_thumbnail(
-            img_path,
-            provider="builtin",
-            size=size,
-            image_format="jpeg",
-            flatten_transparency=True,
+        # base64 is off, so the thumbnail is bytes
+        return cast(
+            "bytes",
+            await mass.metadata.get_thumbnail(
+                img_path,
+                provider="builtin",
+                size=size,
+                image_format="jpeg",
+                flatten_transparency=True,
+            ),
         )
     except MediaNotFoundError:
         return None
 
 
-def _make_placeholder_png(rgb, size=64):
+def _make_placeholder_png(rgb: tuple[int, int, int], size: int = 64) -> bytes:
     """
     Generate a solid-color PNG with only the stdlib (no PIL dependency).
 
@@ -2686,7 +2783,7 @@ def _make_placeholder_png(rgb, size=64):
     if cache_key in _PNG_CACHE:
         return _PNG_CACHE[cache_key]
 
-    def chunk(tag, data):
+    def chunk(tag: bytes, data: bytes) -> bytes:
         c = tag + data
         return struct.pack(">I", len(data)) + c + struct.pack(">I", zlib.crc32(c) & 0xFFFFFFFF)
 
@@ -2709,7 +2806,7 @@ _PLACEHOLDER_COLORS = {
 }
 
 
-def _placeholder_response(color_key):
+def _placeholder_response(color_key: str) -> web.Response:
     png = _make_placeholder_png(_PLACEHOLDER_COLORS[color_key])
     return web.Response(
         body=png,
@@ -2730,7 +2827,12 @@ async def handle_root_redirect(request: web.Request) -> web.Response:
     raise web.HTTPFound(f"http://{request.url.host}:8095/")
 
 
-def make_icon_routes(mass):
+def make_icon_routes(
+    mass: MusicAssistant,
+) -> tuple[
+    Callable[[web.Request], Awaitable[web.Response]],
+    Callable[[web.Request], Awaitable[web.Response]],
+]:
     """
     Build the handle_icon/handle_unmatched closures bound to `mass`.
 
