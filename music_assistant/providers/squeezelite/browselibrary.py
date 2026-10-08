@@ -2995,6 +2995,9 @@ class BrowseLibraryHandler:
         if slim_command.command == "albuminfo":
             return await self._handle_albuminfo(slim_command)
 
+        if slim_command.command == "artistinfo":
+            return await self._handle_artistinfo(slim_command)
+
         if slim_command.command == "contextmenu":
             return await self._handle_contextmenu(slim_command)
 
@@ -3404,6 +3407,41 @@ class BrowseLibraryHandler:
                 )
             return
 
+        if (
+            (artist_id := kwargs.get("artist_id")) is not None
+            and kwargs.get("album_id") is None
+            and kwargs.get("track_id") is None
+            and kwargs.get("uri") is None
+        ):
+            # Whole artist: all of their library tracks, queued per queue_option.
+            artist = await self.mass.music.artists.get_library_item(artist_id)
+            tracks = await self.mass.music.artists.tracks(artist_id, "library")
+            if not tracks:
+                return
+            await self.mass.player_queues.play_media(
+                queue_id=player_id,
+                media=tracks,
+                option=queue_option,
+            )
+            await _start_if_idle()
+            if queue_option in (QueueOption.PLAY, QueueOption.REPLACE):
+                self.provider.slimproto.cli.push_show_briefly(
+                    player_id,
+                    text=["Now Playing", artist.name],
+                    duration_ms=30000,
+                    kind="song",
+                )
+            else:
+                await self._push_queue_update(player_id)
+                self.provider.slimproto.cli.push_show_briefly(
+                    player_id,
+                    text=[
+                        "Adding" if queue_option == QueueOption.ADD else "to play next...",
+                        artist.name,
+                    ],
+                )
+            return
+
         if (uri := kwargs.get("uri")) is not None:
             media = uri
         else:
@@ -3630,8 +3668,8 @@ class BrowseLibraryHandler:
 
         As of this update, those playback options deliberately DON'T match
         real LMS at all - they match Music Assistant's own long-press menu
-        instead (same 5 options, same wording, on tracks/albums/artists -
-        artists not yet implemented here), since that's the more useful
+        instead (same 5 options, same wording, on tracks/albums/artists),
+        since that's the more useful
         reference for anyone using this against Music Assistant: Play Now
         (keep queue)/Play Next (keep queue)/Add to the queue/Play Now
         (replace queue)/Play Next (replace queue), mapped onto
@@ -3716,10 +3754,8 @@ class BrowseLibraryHandler:
         As of this update, those playback options deliberately DON'T
         match real LMS at all - they match Music Assistant's own long-
         press menu instead (same wording _handle_trackinfo now uses - see
-        its own docstring for the full reasoning). Artists aren't
-        implemented yet (there's no artist_id handling in
-        _handle_playlistcontrol, and no artistinfo _dispatch entry) -
-        only tracks and albums so far.
+        its own docstring for the full reasoning). Artists get the same
+        menu from _handle_artistinfo.
 
         kwargs already has the row's own album_id flattened in
         (commonParams, see get_albums above) - same mechanism
@@ -3763,6 +3799,46 @@ class BrowseLibraryHandler:
             # _handle_trackinfo's own response uses (see its docstring
             # for the pcap-confirmed reasoning); not re-verified
             # separately for albuminfo specifically.
+            "window": {"windowStyle": "text_list"},
+            "item_loop": item_loop,
+        }
+
+    async def _handle_artistinfo(self, slim_command):
+        """
+        Handles the "more" action's artistinfo/items command - what JiveLite
+        sends on a long-press of an artist row. Same five Music Assistant
+        long-press options as tracks and albums, applied to all of the
+        artist's library tracks via playlistcontrol with the row's artist_id.
+        """
+        artist_id = slim_command.kwargs.get("artist_id")
+        if artist_id is None:
+            raise NotImplementedError
+
+        def _row(text, cmd):
+            return {
+                "text": text,
+                "type": "text",
+                "style": "item",
+                "actions": {
+                    "go": {
+                        "player": 0,
+                        "cmd": ["playlistcontrol"],
+                        "params": {"artist_id": artist_id, "cmd": cmd},
+                    },
+                },
+                "nextWindow": "nowPlaying" if cmd in ("load", "replace") else "parent",
+            }
+
+        item_loop = [
+            _row("Play Now (keep queue)", "load"),
+            _row("Play Next (keep queue)", "insert"),
+            _row("Add to the queue", "add"),
+            _row("Play Now (replace queue)", "replace"),
+            _row("Play Next (replace queue)", "replace_next"),
+        ]
+        return {
+            "count": len(item_loop),
+            "offset": 0,
             "window": {"windowStyle": "text_list"},
             "item_loop": item_loop,
         }
