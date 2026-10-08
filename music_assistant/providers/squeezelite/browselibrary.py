@@ -2396,6 +2396,19 @@ class BrowseLibraryHandler:
 
     async def _handle_queue_status(self, slim_command: SlimCLICommand) -> dict[str, Any]:
         """
+        Answer a status request, leaving item_loop out when it has no rows.
+
+        JiveLite's _whatsPlaying reads item_loop[1] whenever item_loop exists, so an empty
+        list (an empty queue, or a push just as the first item is added) raises a Lua error
+        in the client. LMS omits item_loop in that case, and so do we.
+        """
+        result = await self._queue_status(slim_command)
+        if not result.get("item_loop"):
+            result.pop("item_loop", None)
+        return result
+
+    async def _queue_status(self, slim_command: SlimCLICommand) -> dict[str, Any]:
+        """
         Override aioslimproto's built-in _handle_status for every status call.
 
         The built-in only reports player.current_media/next_media (two fixed slots), so
