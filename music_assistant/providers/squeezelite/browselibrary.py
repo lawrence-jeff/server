@@ -3818,10 +3818,9 @@ class BrowseLibraryHandler:
             all-four-keys pattern the other two rows prove, using the
             same playlist/move handling _handle_playlist already
             implements (pos_shift=0 - "move to front of upcoming
-            items"). Skipped when this row is already the current or
-            immediately-next track, matching the same reasoning
-            move_item's own real pos_shift=0 case already encodes -
-            there's nothing to usefully move to.
+            items"). Only shown for rows after the immediately-next
+            track: earlier rows (already played, current, or next) have
+            nothing to usefully move to.
           - "Play" -> playlist jump <index>. Pcap-confirmed text,
             command, and pattern exactly, including addAction/style.
             Skipped (matching real LMS's own check) only if this row IS
@@ -3831,7 +3830,7 @@ class BrowseLibraryHandler:
             this.
 
         Text and order deliberately diverge from the real LMS pcap above
-        as of this change - "Play Now"/"Play Next"/"Delete item", in
+        as of this change - "Play Now"/"Play Next"/"Move to End"/"Delete item", in
         that order, to match the MA app's own UI instead. Commands are
         unchanged.
         """
@@ -3869,13 +3868,15 @@ class BrowseLibraryHandler:
                 row["style"] = style
             return row
 
-        # Order and text match MA's own UI: Play Now, Play Next, Delete item.
+        # Order and text match MA's own UI: Play Now, Play Next, Move to End, Delete item.
         item_loop = []
         if not is_current_and_playing:
             item_loop.append(
                 _row("Play Now", ["playlist", "jump", str(playlist_index)], style="itemplay")
             )
-        if playlist_index not in (current_index, current_index + 1):
+        # Only rows after the next one: move_item can't reorder anything at or
+        # before the current track, and the next track is already next.
+        if playlist_index > current_index + 1:
             item_loop.append(_row("Play Next", ["playlist", "move", str(playlist_index)]))
         # Real, confirmed via MA's own delete_item(): it silently no-ops (just a log
         # warning, no error) for any index at or before committed_index() - the player
@@ -3886,7 +3887,10 @@ class BrowseLibraryHandler:
         # is deliberate (the same rows are greyed out there too) - so this matches
         # delete_item's exact guard, rather than offering an action proven to no-op.
         boundary_index = committed_index(queue) if queue.index_in_buffer is not None else None
-        if boundary_index is None or playlist_index > boundary_index:
+        can_edit = boundary_index is None or playlist_index > boundary_index
+        if can_edit and playlist_index < int(queue.items) - 1:
+            item_loop.append(_row("Move to End", ["playlist", "moveend", str(playlist_index)]))
+        if can_edit:
             item_loop.append(_row("Delete item", ["playlist", "delete", str(playlist_index)]))
 
         result = {
@@ -4004,6 +4008,16 @@ class BrowseLibraryHandler:
                 self.mass.player_queues.move_item(
                     queue.queue_id, items[0].queue_item_id, pos_shift=0
                 )
+            )
+        elif subcommand == "moveend":
+            # Same as MA's own "Move to End": move_item_end looks the item up by
+            # queue_item_id and guards the already-played/buffered boundary itself.
+            index = int(args[1])
+            items = self.mass.player_queues.items(queue.queue_id, limit=1, offset=index)
+            if not items:
+                raise NotImplementedError
+            await self._maybe_await(
+                self.mass.player_queues.move_item_end(queue.queue_id, items[0].queue_item_id)
             )
         elif subcommand == "clear":
             await self._maybe_await(self.mass.player_queues.clear(queue.queue_id))
