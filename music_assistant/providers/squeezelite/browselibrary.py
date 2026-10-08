@@ -1726,6 +1726,12 @@ async def get_tracks(mass, album_id, kwargs, index=0, quantity=None, player_id=N
 
 async def get_track_play_control_menu(mass, album_id, kwargs, play_index):
     """
+    The "playControl" menu for a track inside a multi-track album. Row
+    wording follows Music Assistant's (Play Now/Play Next/Add to the
+    queue, then "Play All (keep queue)" for the whole album, starting at
+    the tapped track); the shapes below are the real LMS capture they
+    were built from, with the original LMS wording.
+
     Real LMS's own "playControl" menu - what a track row's "goAction":
 
     "playControl" (see get_tracks above) actually sends when tapped: the
@@ -1809,26 +1815,26 @@ async def get_track_play_control_menu(mass, album_id, kwargs, play_index):
 
     item_loop = [
         _row(
-            "item_add",
-            "Add to End",
-            "parentNoRefresh",
-            {"menu": 1, "cmd": "add", "track_id": track_id},
-        ),
-        _row(
-            "item_insert",
-            "Play Next",
-            "parentNoRefresh",
-            {"track_id": track_id, "menu": 1, "cmd": "insert"},
-        ),
-        _row(
             "item_play",
-            "Play this Song",
+            "Play Now (keep queue)",
             "nowPlaying",
             {"menu": 1, "track_id": track_id, "cmd": "load"},
         ),
         _row(
+            "item_insert",
+            "Play Next (keep queue)",
+            "parentNoRefresh",
+            {"track_id": track_id, "menu": 1, "cmd": "insert"},
+        ),
+        _row(
+            "item_add",
+            "Add to the queue",
+            "parentNoRefresh",
+            {"menu": 1, "cmd": "add", "track_id": track_id},
+        ),
+        _row(
             "item_playall",
-            "Play all songs",
+            "Play All (keep queue)",
             "nowPlaying",
             {
                 **ctx,
