@@ -1,83 +1,52 @@
 """
-BrowseLibraryHandler - the JiveLite integration's browselibrary/menu command
-handler. Wires into the real Music Assistant library (self.mass.music.artists
-/ .albums / .tracks / .playlists / .radio / .podcasts / .audiobooks - the
-MediaControllerBase-derived controllers documented in
-music_assistant/controllers/music/README.md) for
-artists/albums/tracks/playlists/radio/podcasts/audiobooks listings,
-replacing the Stage 1 hardcoded test data.
+BrowseLibraryHandler - the JiveLite integration's command handler for browsing and
+queueing Music Assistant's library from a Squeezebox-style client.
 
-Response shapes (base.actions, windowStyle differences between the
-artist-filtered and unfiltered album views, icon/icon-id conventions,
-textkey/presetParams, pagination) are ported directly from the verified
-standalone scaffold and cross-checked against jivelite-boot-sequence-analysis.md.
+Commands handled (anything else raises NotImplementedError, so aioslimproto's built-ins
+take over):
+  - menu: the home menu - a Now Playing shortcut, a "My Music" node (Favorites, Artists,
+    Albums, Tracks, Playlists, Audiobooks, Podcasts, Radio, Search) and the player's
+    presets. The order follows MA's own root UI, not LMS's menu structure.
+  - browselibrary: the listings behind each node, from the MediaControllerBase-derived
+    controllers (self.mass.music.artists/albums/tracks/playlists/radio/podcasts/
+    audiobooks), plus search (a category menu, or "Search All") and favorites
+    (favorite_only threaded through the same listings).
+  - playlistcontrol: play, add, play next and the "replace queue" variants for a track, a
+    playlist/radio/podcast item (by uri), a whole album or all of an artist's tracks.
+  - trackinfo / albuminfo / artistinfo: the long-press menus, using Music Assistant's
+    wording (Play Now / Play Next, keep or replace queue, Add to the queue).
+  - status / contextmenu / playlist: the queue view - the real queue instead of
+    aioslimproto's two-item view, its long-press menu (Play Now, Play Next, Move to End,
+    Delete item) and the jump/delete/move/clear actions.
+  - jiveblankcommand: the no-op the client's Cancel rows and the Now Playing shortcut send.
+Cover art and chrome icons are served by the routes from make_icon_routes().
 
-Data source notes (verified against the real music_assistant /
-music_assistant_models source, not inferred):
+Response shapes (base.actions, windowStyle differences between the artist-filtered and
+unfiltered album views, icon/icon-id conventions, textkey/presetParams, pagination) come
+from real LMS captures and the SlimBrowse protocol reference.
+
+Data source notes (checked against the real music_assistant / music_assistant_models
+source):
   - Top-level listings (no artist_id/album_id filter) use each controller's
-    own library_items(limit=, offset=, summary=False)/library_count() - MA
-    paginates these server-side.
-  - "Albums for an artist" and "tracks for an album" use the dedicated
-    relationship methods (ArtistsController.albums(artist_id, "library"),
-    AlbumsController.tracks(album_id, "library", in_library_only=True))
-    instead - these are documented as NOT taking limit/offset (they return
-    the full related set), so we paginate that result ourselves with the
-    same _paginate() helper Stage 1 used for its in-memory lists.
-  - item_id is typed as str on the dataclasses but is genuinely handled as
-    both str and int in several places in MA's own source (e.g.
-    remove_item_from_library's `int(item_id)`) - every id we hand back to
-    the client is str()-wrapped defensively rather than assumed to already
-    be a string.
-  - Playlist tracks are the one exception to the "relationship method
-    returns a plain unpaginated list" pattern above: PlaylistController.
-    tracks() is an async generator (playlist tracks aren't stored in MA's
-    db - always fetched, cached, from the provider), and the yielded items
-    aren't guaranteed to be MA library items at all, unlike an album's
-    tracks - see get_playlist_tracks()'s own docstring for the full
-    reasoning and what that changes about how playback is wired for them.
+    library_items(limit=, offset=, summary=False)/library_count(), which paginate
+    server-side.
+  - "Albums for an artist" and "tracks for an album" use the relationship methods
+    (ArtistsController.albums, AlbumsController.tracks), which return the full related set
+    without limit/offset, so they are paginated here with _paginate().
+  - item_id is typed str but handled as both str and int in MA's source, so every id
+    handed to the client is str()-wrapped.
+  - Playlist tracks are the exception to the plain-list pattern: PlaylistController.tracks()
+    is an async generator (playlist tracks are fetched, cached, from the provider), and the
+    items may not be MA library items, so they are played by uri. See
+    get_playlist_tracks().
 
-NOT yet handled (left for later, same as before):
-  - Full home menu parity with real LMS (Favorites, Settings,
-    plugin-contributed entries) - these map to entirely separate MA
-    subsystems, each its own piece of work, not something to add here
-    without review. Only a "My Music" node with what we've actually
-    implemented (Artists, Albums, Tracks, Playlists, Audiobooks,
-    Podcasts, Radio, Search) is added; nothing links to a mode we can't
-    handle, to avoid silent dead ends. This ordering deliberately matches
-    MA's own root UI taxonomy, not real LMS's menu structure - a
-    deliberate choice made once enough of MA's content model was wired
-    up to make that the more honest fit (see MY_MUSIC_NODE's own notes
-    for the reasoning). "Album Artists" and "All Artists" used to be two
-    separate tiles here, modeling a role distinction our data never
-    actually had - collapsed into one real "Artists" tile. Genres was
-    dropped entirely (not just left unimplemented) since MA doesn't
-    model it as a first-class browsable controller the way it does
-    everything else here - more like a tag/filter on albums and tracks -
-    and there's no near-term plan to build that out.
-  - Playback (playlistcontrol) - only cmd=load is wired up
-    (BrowseLibraryHandler._handle_playlistcontrol, using
-    mass.player_queues.play_media), via either a track_id (album tracks)
-    or a uri (playlist tracks). add/insert, and album_id/artist_id/
-    playlist_id-driven playlistcontrol (playing a whole album/artist/
-    playlist rather than one track), aren't handled yet - see that
-    method's own docstring for the full scope.
-  - Real ALBUM and ARTIST art are both wired up now (see the "Icon / cover
-    art serving" section further down and _fetch_real_item_art's own
-    docstring for the icon_id namespacing that keeps the two from
-    colliding). Chrome icons (My Music, category icons) use real files
-    from static/ (see STATIC_DIR/_resolve_static_icon_path further down)
-    rather than placeholders too - the solid-color placeholder is only a
-    last-resort fallback now, for something genuinely not found either
-    way.
-  - The artist/album favorites_url values below still use LMS's own "db:"
-    query convention (kept for fidelity, ported from the scaffold's
-    real-LMS-verified fields) rather than anything MA's squeezelite
-    provider necessarily understands if a user actually tries to save one
-    as a preset against MA - untested against MA specifically, flagged as
-    a follow-up rather than guessed at here. Track favorites_url, by
-    contrast, now uses the track's own MA-native `.uri` (e.g.
-    "library://track/42"), which MA's own provider stack already
-    understands, so that one link is real.
+Known limitations:
+  - The artist and album favorites_url values use LMS's "db:" query convention (kept for
+    fidelity with the captures) and are untested as presets against MA. Track
+    favorites_url uses the track's MA-native .uri, which MA understands.
+  - Not implemented: Settings, Random Mix, plugin-contributed home entries, and genres
+    (MA has no browsable genre controller; it is more a tag/filter on albums and tracks).
+  - Playback by playlist_id (queueing a whole playlist from its row) is not handled.
 """
 
 import asyncio
