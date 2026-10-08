@@ -1728,7 +1728,7 @@ async def get_track_play_control_menu(mass, album_id, kwargs, play_index):
     """
     The "playControl" menu for a track inside a multi-track album. Row
     wording follows Music Assistant's (Play Now/Play Next/Add to the
-    queue, then "Play All (keep queue)" for the whole album, starting at
+    queue, then "Play All from here (keep queue)" for the whole album, starting at
     the tapped track); the shapes below are the real LMS capture they
     were built from, with the original LMS wording.
 
@@ -1834,7 +1834,7 @@ async def get_track_play_control_menu(mass, album_id, kwargs, play_index):
         ),
         _row(
             "item_playall",
-            "Play All (keep queue)",
+            "Play All from here (keep queue)",
             "nowPlaying",
             {
                 **ctx,
