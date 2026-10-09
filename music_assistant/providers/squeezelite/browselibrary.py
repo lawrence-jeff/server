@@ -80,6 +80,7 @@ from music_assistant.helpers import datetime as mass_datetime
 if TYPE_CHECKING:
     from aioslimproto import SlimServer
     from aioslimproto.cli import SlimCLICommand
+    from music_assistant_models.media_items import Playlist, Podcast
     from music_assistant_models.player_queue import PlayerQueue
 
     from music_assistant.controllers.music.media.base import MediaControllerBase
@@ -618,7 +619,9 @@ async def get_tracks(
             "text": item.name,
             "type": "audio",
             "style": "itemplay",
-            "commonParams": {"track_id": str(item.item_id)},
+            # play_index rides along so the long-press menu (trackinfo) can offer "Play
+            # Album from here" without fetching the album again.
+            "commonParams": {"track_id": str(item.item_id), "play_index": play_index},
             "playallParams": {"play_index": play_index},
             "presetParams": {
                 "favorites_type": "audio",
@@ -647,10 +650,10 @@ async def get_track_play_control_menu(
     Return the "playControl" menu for a track inside a multi-track album.
 
     Rows follow Music Assistant's wording: Play Now/Play Next/Add to the queue for the
-    tapped track, then "Play All from here (keep queue)", which loads the whole album
+    tapped track, then "Play Album from here", which loads the whole album
     starting at the tapped track. The row shapes come from a real LMS capture.
 
-    "Play All from here" params match tracks_base_actions' "go" action (album_id,
+    "Play Album from here" params match tracks_base_actions' "go" action (album_id,
     sort:albumtrack, cmd:load, play_index, no track_id), handled by the album branch of
     _handle_playlistcontrol. ctx is included so artist_id/role_id/menu_roles/menu_mode
     carry through when the browse came via an artist. The rows carry no "type" field,
@@ -701,7 +704,7 @@ async def get_track_play_control_menu(
         ),
         _row(
             "item_playall",
-            "Play All from here (keep queue)",
+            "Play Album from here",
             "nowPlaying",
             {
                 **ctx,
@@ -857,7 +860,7 @@ async def get_playlist_tracks(
             "text": item.name,
             "type": "audio",
             "style": "itemplay",
-            "commonParams": {"uri": item.uri},
+            "commonParams": {"uri": item.uri, "play_index": play_index},
             "playallParams": {"play_index": play_index},
             "presetParams": {
                 "favorites_type": "audio",
@@ -1080,7 +1083,7 @@ async def get_podcast_episodes(
             "text": item.name,
             "type": "audio",
             "style": "itemplay",
-            "commonParams": {"uri": item.uri},
+            "commonParams": {"uri": item.uri, "play_index": play_index},
             "playallParams": {"play_index": play_index},
             "presetParams": {
                 "favorites_type": "audio",
@@ -1788,6 +1791,23 @@ class BrowseLibraryHandler:
             )
             return
 
+        for key, kind in (("playlist_id", "playlist"), ("podcast_id", "podcast")):
+            if (
+                (container_id := kwargs.get(key)) is not None
+                and kwargs.get("play_index") is not None
+                and kwargs.get("track_id") is None
+                and kwargs.get("uri") is None
+            ):
+                await self._queue_container(
+                    player_id,
+                    queue_option,
+                    kind,
+                    container_id,
+                    kwargs["play_index"],
+                    _start_if_idle,
+                )
+                return
+
         if (
             (artist_id := kwargs.get("artist_id")) is not None
             and kwargs.get("album_id") is None
@@ -1890,17 +1910,93 @@ class BrowseLibraryHandler:
         # covers add/insert/replace, for the album rows' add actions and menus.
         album = await self.mass.music.albums.get_library_item(album_id)
         tracks = await self.mass.music.albums.tracks(album_id, "library", in_library_only=False)
+        await self._queue_items(
+            player_id,
+            queue_option,
+            list(tracks),
+            album.name,
+            str(album.item_id),
+            play_index,
+            start_if_idle,
+        )
+
+    async def _queue_container(
+        self,
+        player_id: str,
+        queue_option: QueueOption,
+        kind: str,
+        container_id: Any,
+        play_index: Any,
+        start_if_idle: Callable[[], Awaitable[None]],
+    ) -> None:
+        """Queue a whole playlist or podcast per queue_option, starting at play_index."""
+        container: Playlist | Podcast
+        if kind == "playlist":
+            container = await self.mass.music.playlists.get_library_item(container_id)
+            items = [
+                item async for item in self.mass.music.playlists.tracks(container_id, "library")
+            ]
+        else:
+            container = await self.mass.music.podcasts.get_library_item(container_id)
+            items = [
+                item async for item in self.mass.music.podcasts.episodes(container_id, "library")
+            ]
+        await self._queue_items(
+            player_id,
+            queue_option,
+            items,
+            container.name,
+            _art_ref(container) or _uri_ref(container.uri or ""),
+            play_index,
+            start_if_idle,
+        )
+
+    async def _queue_items(
+        self,
+        player_id: str,
+        queue_option: QueueOption,
+        tracks: list[Any],
+        name: str,
+        icon_id: str,
+        play_index: Any,
+        start_if_idle: Callable[[], Awaitable[None]],
+    ) -> None:
+        """Queue an ordered list of items per queue_option, playing from play_index if given."""
+        queue = self.mass.player_queues.get(player_id)
+        had_items = queue is not None and int(queue.items) > 0
+        old_current = queue.current_index if queue is not None else None
         await self.mass.player_queues.play_media(
             queue_id=player_id,
             media=list(tracks),
             option=queue_option,
         )
         if queue_option in (QueueOption.PLAY, QueueOption.REPLACE):
-            # play_index is only sent by a tap on a track inside an album (cmd:load);
-            # the album menu's Play Now rows omit it, so the jump is skipped.
+            # play_index is only sent for a song inside a list (a tap, or "Play Album from
+            # here"); the list menu's own Play Now rows omit it, so the jump is skipped.
             idx = int(play_index) if play_index is not None else 0
             if idx:
-                await self.mass.player_queues.play_index(queue_id=player_id, index=idx)
+                # play_index is the song's position in the list, not in the queue: PLAY
+                # keeps the existing items and inserts the list after the current one, so
+                # the queue position is found by looking for the song from there on.
+                first_inserted = (
+                    (old_current or 0) + 1
+                    if queue_option == QueueOption.PLAY and had_items and old_current is not None
+                    else 0
+                )
+                target = idx
+                if 0 <= idx < len(tracks):
+                    queued = self.mass.player_queues.items(player_id, limit=2000, offset=0)
+                    target = next(
+                        (
+                            position
+                            for position, item in enumerate(queued)
+                            if position >= first_inserted
+                            and item.media_item is not None
+                            and item.media_item.uri == tracks[idx].uri
+                        ),
+                        first_inserted + idx,
+                    )
+                await self.mass.player_queues.play_index(queue_id=player_id, index=target)
             # A load fires two independent pushes in LMS (see push_show_briefly and
             # push_play_icon in cli.py): the "song" popup (30s) and the icon-only
             # "play" popup. REPLACE also starts playing immediately, so it gets both.
@@ -1908,28 +2004,28 @@ class BrowseLibraryHandler:
                 self._slimproto.cli.push_show_briefly(
                     player_id,
                     text=["Now Playing", tracks[idx].name],
-                    icon_id=str(album.item_id),
+                    icon_id=icon_id,
                     duration_ms=30000,
                     kind="song",
                 )
                 self._slimproto.cli.push_play_icon(
                     player_id,
                     text=["Now Playing", tracks[idx].name],
-                    icon_id=str(album.item_id),
+                    icon_id=icon_id,
                 )
         elif queue_option in (QueueOption.ADD, QueueOption.NEXT, QueueOption.REPLACE_NEXT):
             await start_if_idle()
             # Same "Adding"/"to play next..." popup and immediate queue-view push as
-            # the track_id/uri path below, named after the album since there is no
-            # single track.
+            # the track_id/uri path below, named after the list since there is no single
+            # track.
             await self._push_queue_update(player_id)
             self._slimproto.cli.push_show_briefly(
                 player_id,
                 text=[
                     "Adding" if queue_option == QueueOption.ADD else "to play next...",
-                    album.name,
+                    name,
                 ],
-                icon_id=str(album.item_id),
+                icon_id=icon_id,
             )
 
     async def _queue_artist(
@@ -2040,6 +2136,37 @@ class BrowseLibraryHandler:
             _row("Play Now (replace queue)", "replace"),
             _row("Play Next (replace queue)", "replace_next"),
         ]
+        # A song inside an album, playlist or podcast also offers to play that whole list
+        # from here, as the Music Assistant app does ("Play Album from here"). The row
+        # sends the container id and the song's position (tracks_base_actions' rows carry
+        # play_index in commonParams); _handle_playlistcontrol queues the container.
+        play_index = kwargs.get("play_index")
+        for key, label in (
+            ("album_id", "Album"),
+            ("playlist_id", "Playlist"),
+            ("podcast_id", "Podcast"),
+        ):
+            if play_index is not None and kwargs.get(key) is not None:
+                item_loop.append(
+                    {
+                        "text": f"Play {label} from here",
+                        "type": "text",
+                        "style": "item",
+                        "actions": {
+                            "go": {
+                                "player": 0,
+                                "cmd": ["playlistcontrol"],
+                                "params": {
+                                    key: kwargs[key],
+                                    "play_index": play_index,
+                                    "cmd": "load",
+                                },
+                            },
+                        },
+                        "nextWindow": "nowPlaying",
+                    }
+                )
+                break
         return {
             "count": len(item_loop),
             "offset": 0,
