@@ -2137,9 +2137,10 @@ class BrowseLibraryHandler:
             _row("Play Next (replace queue)", "replace_next"),
         ]
         # A song inside an album, playlist or podcast also offers to play that whole list
-        # from here, as the Music Assistant app does ("Play Album from here"). The row
-        # sends the container id and the song's position (tracks_base_actions' rows carry
-        # play_index in commonParams); _handle_playlistcontrol queues the container.
+        # from here, first in the menu as in the Music Assistant app ("Play Album from
+        # here"). The row sends the container id and the song's position
+        # (tracks_base_actions' rows carry play_index in commonParams);
+        # _handle_playlistcontrol queues the container.
         play_index = kwargs.get("play_index")
         for key, label in (
             ("album_id", "Album"),
@@ -2147,7 +2148,8 @@ class BrowseLibraryHandler:
             ("podcast_id", "Podcast"),
         ):
             if play_index is not None and kwargs.get(key) is not None:
-                item_loop.append(
+                item_loop.insert(
+                    0,
                     {
                         "text": f"Play {label} from here",
                         "type": "text",
@@ -2164,7 +2166,7 @@ class BrowseLibraryHandler:
                             },
                         },
                         "nextWindow": "nowPlaying",
-                    }
+                    },
                 )
                 break
         return {
