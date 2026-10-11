@@ -14,6 +14,10 @@ Commands handled (anything else raises NotImplementedError, so aioslimproto's bu
   - jiveblankcommand: the no-op the client's Cancel rows send.
 Cover art and menu icons are served by the routes from make_icon_routes().
 
+The file is laid out in sections, in this order: shared helpers, action templates, long-press
+and play-control menus, library lists, search and favorites, the home menu, the command handler,
+and artwork and icon serving.
+
 Notes:
   - Top-level listings use each controller's library_items()/library_count(), which paginate server-
     side. Albums for an artist and tracks for an album return the full set, so they are paginated
@@ -68,6 +72,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("music_assistant.squeezelite.browselibrary")
 
+
+# -- Shared helpers --------------------------------------------------------------------------------
+
+
 # icon_id bare-path fallback: see handle_unmatched and the "Icon / cover art serving"
 # section below.
 
@@ -107,6 +115,15 @@ def _menu_icon(name: str) -> str:
 _ROW_ACTIONS = ("go", "play", "add", "add-hold", "more")
 
 
+def _paginate(
+    items: list[Any], index: int | None, quantity: int | None
+) -> tuple[list[Any], int, int]:
+    index = index or 0
+    total = len(items)
+    window = items[index : index + quantity] if quantity is not None else items[index:]
+    return window, total, index
+
+
 def _disable_unavailable(rows: list[dict[str, Any]], items: list[Any]) -> list[dict[str, Any]]:
     """
     Mark the rows of items Music Assistant reports as unavailable.
@@ -125,13 +142,45 @@ def _disable_unavailable(rows: list[dict[str, Any]], items: list[Any]) -> list[d
     return rows
 
 
-def _paginate(
-    items: list[Any], index: int | None, quantity: int | None
-) -> tuple[list[Any], int, int]:
-    index = index or 0
-    total = len(items)
-    window = items[index : index + quantity] if quantity is not None else items[index:]
-    return window, total, index
+# Each root tile has its own icon name (AllArtists.png, Albums.png, Playlists.png, AudioBooks.png,
+# podcasts.png, radiolocal.png), each needing a file in static/ (_resolve_static_icon_path matches
+# them 1:1, no aliasing), even where two share an image (Playlists.png and Tracks both use
+# Albums.png).
+# Order and weights follow Music Assistant's root UI. Genres is missing: MA has no browsable genre
+# controller.
+
+
+def _standalone_actions(base_actions: dict[str, Any], item: dict[str, Any]) -> dict[str, Any]:
+    """
+    Build a self-contained per-item actions dict from a base-level template.
+
+    itemsParams only resolves in a response-level "base", not on an item's own "actions", so each
+    action's referenced field (commonParams, addallParams or presetParams) is looked up on the item
+    and baked into the params. Items flagged unavailable get actions that do nothing.
+    """
+    if item.get("unavailable"):
+        return {name: _no_op() for name in _ROW_ACTIONS}
+    result = {}
+    for key, action in base_actions.items():
+        new_action = dict(action)
+        params_field = new_action.pop("itemsParams", None)
+        if params_field and params_field in item:
+            new_action["params"] = {**new_action.get("params", {}), **item[params_field]}
+        result[key] = new_action
+    return result
+
+
+def _text_list_menu(item_loop: list[dict[str, Any]]) -> dict[str, Any]:
+    """Return a menu page that lists the rows as plain text."""
+    return {
+        "count": len(item_loop),
+        "offset": 0,
+        "window": {"windowStyle": "text_list"},
+        "item_loop": item_loop,
+    }
+
+
+# -- Action templates ------------------------------------------------------------------------------
 
 
 def _preset_actions() -> dict[str, Any]:
@@ -349,414 +398,7 @@ def tracks_base_actions(
     return actions
 
 
-async def _library_page(
-    controller: Any,
-    rows_for: Callable[[list[Any], int], list[dict[str, Any]]],
-    *,
-    index: int,
-    quantity: int | None,
-    search: str | None,
-    favorite_only: bool,
-    window_style: str,
-    base_actions: dict[str, Any],
-) -> dict[str, Any]:
-    """
-    Return one page of a library list: fetch the items, count them and build the rows.
-
-    controller is one of Music Assistant's media controllers (artists, albums, ...). rows_for builds
-    the rows from the fetched items and the index of the first one.
-    """
-    limit = quantity if quantity is not None else 500
-    items = await controller.library_items(
-        limit=limit,
-        offset=index,
-        search=search,
-        summary=False,
-        favorite=True if favorite_only else None,
-    )
-    if search:
-        # library_count() has no search param, so the count is what was fetched; a match set larger
-        # than `limit` is undercounted.
-        total = len(items)
-    else:
-        total = await controller.library_count(favorite_only=favorite_only)
-    return {
-        "count": total,
-        "offset": index,
-        "window": {"windowStyle": window_style},
-        "base": {"actions": base_actions},
-        "item_loop": rows_for(items, index),
-    }
-
-
-def _rows(
-    row_for: Callable[[Any], dict[str, Any]],
-    items: list[Any],
-    _index: int = 0,
-    *,
-    mark_unavailable: bool = True,
-) -> list[dict[str, Any]]:
-    """Return a row for each item, with the unavailable ones marked."""
-    rows = [row_for(item) for item in items]
-    return _disable_unavailable(rows, items) if mark_unavailable else rows
-
-
-def _artist_row(item: Any) -> dict[str, Any]:
-    """Return the row of an artist."""
-    return {
-        "text": item.name,
-        "type": "playlist",
-        "commonParams": {"artist_id": str(item.item_id)},
-        "textkey": item.name[0].upper() if item.name else "",
-        "icon": f"music/artist-{item.item_id}/cover",
-        "icon-id": f"artist-{item.item_id}",
-        "presetParams": {
-            "favorites_type": "playlist",
-            "favorites_title": item.name,
-            "favorites_url": f"db:contributor.name={item.name.replace(' ', '%20')}",
-            "icon": f"music/artist-{item.item_id}/cover",
-        },
-    }
-
-
-def _playlist_row(item: Any) -> dict[str, Any]:
-    """Return the row of a playlist."""
-    return {
-        "text": item.name,
-        "type": "playlist",
-        "commonParams": {"playlist_id": str(item.item_id)},
-        "textkey": item.name[0].upper() if item.name else "",
-        "icon": f"music/playlist-{item.item_id}/cover",
-        "icon-id": f"playlist-{item.item_id}",
-        "presetParams": {
-            "favorites_type": "playlist",
-            "favorites_title": item.name,
-            "favorites_url": item.uri,
-            "icon": f"music/playlist-{item.item_id}/cover",
-        },
-    }
-
-
-def _radio_row(item: Any) -> dict[str, Any]:
-    """Return the row of a radio station, played directly."""
-    return {
-        "text": item.name,
-        "type": "audio",
-        "style": "itemplay",
-        "goAction": "play",
-        "commonParams": {"uri": item.uri},
-        "icon": f"music/radio-{item.item_id}/cover",
-        "icon-id": f"radio-{item.item_id}",
-        "presetParams": {
-            "favorites_type": "audio",
-            "favorites_title": item.name,
-            "favorites_url": item.uri,
-        },
-    }
-
-
-def _audiobook_row(item: Any) -> dict[str, Any]:
-    """Return the row of an audiobook, played via its own uri."""
-    return {
-        "text": item.name,
-        "type": "audio",
-        "style": "itemplay",
-        "goAction": "play",
-        "commonParams": {"uri": item.uri},
-        "icon": f"music/audiobook-{item.item_id}/cover",
-        "icon-id": f"audiobook-{item.item_id}",
-        "presetParams": {
-            "favorites_type": "audio",
-            "favorites_title": item.name,
-            "favorites_url": item.uri,
-        },
-    }
-
-
-def _podcast_row(item: Any) -> dict[str, Any]:
-    """Return the row of a podcast, which opens its episodes."""
-    return {
-        "text": item.name,
-        "type": "playlist",
-        "commonParams": {"podcast_id": str(item.item_id)},
-        "textkey": item.name[0].upper() if item.name else "",
-        "icon": f"music/podcast-{item.item_id}/cover",
-        "icon-id": f"podcast-{item.item_id}",
-        "presetParams": {
-            "favorites_type": "playlist",
-            "favorites_title": item.name,
-            "favorites_url": item.uri,
-            "icon": f"music/podcast-{item.item_id}/cover",
-        },
-    }
-
-
-def _album_row(album: Any, *, mixed: bool) -> dict[str, Any]:
-    """
-    Return the row of an album.
-
-    mixed is True in the list of all albums, where each row also needs the artist, an alphabet key
-    and the data to favorite it; the albums of one artist need none of that.
-    """
-    item = {
-        "text": album.name,
-        "type": "playlist",
-        "commonParams": {"album_id": str(album.item_id), "performance": ""},
-        "icon": f"music/{album.item_id}/cover",
-        "icon-id": str(album.item_id),
-    }
-    if mixed:
-        artist_str = album.artist_str
-        if artist_str:
-            item["text"] = f"{album.name}\n{artist_str}"
-        item["textkey"] = album.name[0].upper() if album.name else ""
-        favorites_url = f"db:album.title={urllib.parse.quote(album.name)}"
-        if artist_str:
-            favorites_url += f"&contributor.name={urllib.parse.quote(artist_str)}"
-        item["presetParams"] = {
-            "icon": item["icon"],
-            "favorites_title": album.name,
-            "favorites_url": favorites_url,
-            "favorites_type": "playlist",
-        }
-    return item
-
-
-async def get_artists(
-    mass: MusicAssistant,
-    index: int = 0,
-    quantity: int | None = None,
-    search: str | None = None,
-    favorite_only: bool = False,
-) -> dict[str, Any]:
-    """
-    Return the artists list.
-
-    favorite_only threads through to library_items(favorite=...)/library_count(favorite_only=...).
-    icon_id is "artist-<item_id>", not the bare id albums use: the two id spaces share the
-    /music/{icon_id}/cover route (see _fetch_real_item_art).
-    """
-    return await _library_page(
-        mass.music.artists,
-        partial(_rows, _artist_row, mark_unavailable=False),
-        index=index,
-        quantity=quantity,
-        search=search,
-        favorite_only=favorite_only,
-        window_style="home_menu",
-        base_actions=ARTIST_LIST_BASE_ACTIONS,
-    )
-
-
-def _all_track_rows(items: list[Any], index: int = 0) -> list[dict[str, Any]]:
-    """Return the two-line rows (title, then artist) of get_all_tracks() for the given tracks."""
-    item_loop = []
-    for i, item in enumerate(items):
-        text = item.name
-        if item.artist_str:
-            text = f"{item.name}\n{item.artist_str}"
-        play_index = index + i
-        row = {
-            "text": text,
-            "type": "audio",
-            "style": "itemplay",
-            "commonParams": {"track_id": str(item.item_id)},
-            "playallParams": {"play_index": play_index},
-            "presetParams": {
-                "favorites_type": "audio",
-                "favorites_title": item.name,
-                "favorites_url": item.uri,
-            },
-            # No goAction override: the base "go" action already adds to the queue.
-        }
-        if item.album is not None:
-            row["icon"] = f"music/{item.album.item_id}/cover"
-            row["icon-id"] = str(item.album.item_id)
-        item_loop.append(row)
-    return _disable_unavailable(item_loop, items)
-
-
-async def get_all_tracks(
-    mass: MusicAssistant,
-    kwargs: dict[str, Any],
-    index: int = 0,
-    quantity: int | None = None,
-    search: str | None = None,
-    favorite_only: bool = False,
-) -> dict[str, Any]:
-    r"""
-    Return the flat, root-level track browse.
-
-    Rows use track_id and the album's bare-numeric icon id, as get_albums() does: the album is the
-    track's art source, and tracks with no album fall through to the placeholder. Row text is
-    "Title\nArtist".
-    """
-    return await _library_page(
-        mass.music.tracks,
-        _all_track_rows,
-        index=index,
-        quantity=quantity,
-        search=search,
-        favorite_only=favorite_only,
-        window_style="icon_list",
-        base_actions=tracks_base_actions(kwargs, index, quantity),
-    )
-
-
-async def get_albums(
-    mass: MusicAssistant,
-    artist_id: str | None,
-    kwargs: dict[str, Any],
-    index: int = 0,
-    quantity: int | None = None,
-    search: str | None = None,
-    favorite_only: bool = False,
-) -> dict[str, Any]:
-    r"""
-    Return albums, optionally filtered to one artist.
-
-    With artist_id the full list comes from ArtistsController.albums() and is paginated here;
-    otherwise library_items()/library_count() paginate server-side.
-
-    The all-albums case adds what a mixed-artist list needs: two-line text "Album\nArtist", a
-    "textkey" (first letter, for the alphabet scroll bar) and "presetParams" so albums can be
-    favorited from here.
-    """
-    if artist_id is None:
-        return await _library_page(
-            mass.music.albums,
-            partial(_rows, partial(_album_row, mixed=True)),
-            index=index,
-            quantity=quantity,
-            search=search,
-            favorite_only=favorite_only,
-            window_style="icon_list",
-            base_actions=albums_base_actions(kwargs),
-        )
-    albums = await mass.music.artists.albums(artist_id, "library")
-    window, total, offset = _paginate(albums, index, quantity)
-    return {
-        "count": total,
-        "offset": offset,
-        "window": {"windowStyle": "home_menu"},
-        "base": {"actions": albums_base_actions(kwargs)},
-        "item_loop": _rows(partial(_album_row, mixed=False), window),
-    }
-
-
-async def get_artist_all(
-    mass: MusicAssistant,
-    artist_id: str,
-    kwargs: dict[str, Any],
-    index: int = 0,
-    quantity: int | None = None,
-) -> dict[str, Any]:
-    """
-    Return everything in the library for one artist: albums, then tracks, then radio.
-
-    An artist can be in the library only through a track on someone else's album, and then has no
-    albums. So the albums come first, then the artist's tracks that are not on those albums, then
-    library radio stations whose name contains the artist's name (services such as Pandora file
-    artist stations under Radio).
-
-    Rows are built as in get_favorites_all(), with the same per-row _standalone_actions.
-    """
-    artist = await mass.music.artists.get_library_item(artist_id)
-    albums, tracks = await asyncio.gather(
-        mass.music.artists.albums(artist_id, "library"),
-        mass.music.artists.tracks(artist_id, "library"),
-    )
-    album_ids = {str(album.item_id) for album in albums}
-    extra_tracks = [
-        track
-        for track in tracks
-        if track.album is None or str(track.album.item_id) not in album_ids
-    ]
-    albums_reply = await get_albums(mass, artist_id, kwargs, 0, None)
-    stations = await get_radio_stations(mass, kwargs, 0, 50, artist.name)
-    wanted = artist.name.casefold()
-    station_rows = [row for row in stations["item_loop"] if wanted in row["text"].casefold()]
-    combined = []
-    for rows, actions in (
-        (albums_reply["item_loop"], albums_reply["base"]["actions"]),
-        (_all_track_rows(extra_tracks), tracks_base_actions(kwargs)),
-        (station_rows, stations["base"]["actions"]),
-    ):
-        for item in rows:
-            item["actions"] = _standalone_actions(actions, item)
-            combined.append(item)
-    window, total, offset = _paginate(combined, index, quantity)
-    return {
-        "count": total,
-        "offset": offset,
-        "window": {"windowStyle": "icon_list"},
-        "item_loop": window,
-    }
-
-
-async def get_tracks(
-    mass: MusicAssistant,
-    album_id: str | None,
-    kwargs: dict[str, Any],
-    index: int = 0,
-    quantity: int | None = None,
-) -> dict[str, Any]:
-    """
-    Return an album's tracks.
-
-    in_library_only=False because albums added to the library don't guarantee a local row per track;
-    it also queries the provider for tracks not mirrored locally, which can make those albums slower
-    to load. The list is sorted by (disc, track) and unpaginated, so it is paginated here.
-
-    favorites_url is the track's MA-native .uri; artist and album favorites_url use LMS's "db:"
-    convention.
-    """
-    items = (
-        await mass.music.albums.tracks(album_id, "library", in_library_only=False)
-        if album_id is not None
-        else []
-    )
-    window, total, offset = _paginate(items, index, quantity)
-    item_loop = []
-    for i, item in enumerate(window):
-        play_index = offset + i
-        row = {
-            "text": item.name,
-            "type": "audio",
-            "style": "itemplay",
-            # play_index rides along so the long-press menu can offer "Play Album from here" without
-            # fetching the album again.
-            "commonParams": {"track_id": str(item.item_id), "play_index": play_index},
-            "playallParams": {"play_index": play_index},
-            "presetParams": {
-                "favorites_type": "audio",
-                "favorites_title": item.name,
-                "favorites_url": item.uri,
-            },
-            # always "playControl", so the menu is chosen at tap time rather than from the queue
-            # state when the listing was fetched
-            "goAction": "playControl",
-            "playControlParams": {"xmlbrowserPlayControl": str(play_index)},
-        }
-        item_loop.append(row)
-    _disable_unavailable(item_loop, window)
-    return {
-        "count": total,
-        "offset": offset,
-        "window": {"windowStyle": "text_list"},
-        "base": {"actions": tracks_base_actions(kwargs, index, quantity)},
-        "item_loop": item_loop,
-    }
-
-
-def _text_list_menu(item_loop: list[dict[str, Any]]) -> dict[str, Any]:
-    """Return a menu page that lists the rows as plain text."""
-    return {
-        "count": len(item_loop),
-        "offset": 0,
-        "window": {"windowStyle": "text_list"},
-        "item_loop": item_loop,
-    }
+# -- Long-press and play-control menus -------------------------------------------------------------
 
 
 def _play_control_row(
@@ -892,6 +534,362 @@ def get_track_play_control_menu_flat(common_params: dict[str, Any]) -> dict[str,
     return _text_list_menu(item_loop)
 
 
+def _flat_menu_for_row(page: dict[str, Any]) -> dict[str, Any]:
+    """Return the flat track menu for the single row in a one-row listing page."""
+    if not page["item_loop"]:
+        raise NotImplementedError
+    return get_track_play_control_menu_flat(page["item_loop"][0]["commonParams"])
+
+
+# -- Library lists ---------------------------------------------------------------------------------
+
+
+async def _library_page(
+    controller: Any,
+    rows_for: Callable[[list[Any], int], list[dict[str, Any]]],
+    *,
+    index: int,
+    quantity: int | None,
+    search: str | None,
+    favorite_only: bool,
+    window_style: str,
+    base_actions: dict[str, Any],
+) -> dict[str, Any]:
+    """
+    Return one page of a library list: fetch the items, count them and build the rows.
+
+    controller is one of Music Assistant's media controllers (artists, albums, ...). rows_for builds
+    the rows from the fetched items and the index of the first one.
+    """
+    limit = quantity if quantity is not None else 500
+    items = await controller.library_items(
+        limit=limit,
+        offset=index,
+        search=search,
+        summary=False,
+        favorite=True if favorite_only else None,
+    )
+    if search:
+        # library_count() has no search param, so the count is what was fetched; a match set larger
+        # than `limit` is undercounted.
+        total = len(items)
+    else:
+        total = await controller.library_count(favorite_only=favorite_only)
+    return {
+        "count": total,
+        "offset": index,
+        "window": {"windowStyle": window_style},
+        "base": {"actions": base_actions},
+        "item_loop": rows_for(items, index),
+    }
+
+
+def _rows(
+    row_for: Callable[[Any], dict[str, Any]],
+    items: list[Any],
+    _index: int = 0,
+    *,
+    mark_unavailable: bool = True,
+) -> list[dict[str, Any]]:
+    """Return a row for each item, with the unavailable ones marked."""
+    rows = [row_for(item) for item in items]
+    return _disable_unavailable(rows, items) if mark_unavailable else rows
+
+
+def _artist_row(item: Any) -> dict[str, Any]:
+    """Return the row of an artist."""
+    return {
+        "text": item.name,
+        "type": "playlist",
+        "commonParams": {"artist_id": str(item.item_id)},
+        "textkey": item.name[0].upper() if item.name else "",
+        "icon": f"music/artist-{item.item_id}/cover",
+        "icon-id": f"artist-{item.item_id}",
+        "presetParams": {
+            "favorites_type": "playlist",
+            "favorites_title": item.name,
+            "favorites_url": f"db:contributor.name={item.name.replace(' ', '%20')}",
+            "icon": f"music/artist-{item.item_id}/cover",
+        },
+    }
+
+
+async def get_artists(
+    mass: MusicAssistant,
+    index: int = 0,
+    quantity: int | None = None,
+    search: str | None = None,
+    favorite_only: bool = False,
+) -> dict[str, Any]:
+    """
+    Return the artists list.
+
+    favorite_only threads through to library_items(favorite=...)/library_count(favorite_only=...).
+    icon_id is "artist-<item_id>", not the bare id albums use: the two id spaces share the
+    /music/{icon_id}/cover route (see _fetch_real_item_art).
+    """
+    return await _library_page(
+        mass.music.artists,
+        partial(_rows, _artist_row, mark_unavailable=False),
+        index=index,
+        quantity=quantity,
+        search=search,
+        favorite_only=favorite_only,
+        window_style="home_menu",
+        base_actions=ARTIST_LIST_BASE_ACTIONS,
+    )
+
+
+def _album_row(album: Any, *, mixed: bool) -> dict[str, Any]:
+    """
+    Return the row of an album.
+
+    mixed is True in the list of all albums, where each row also needs the artist, an alphabet key
+    and the data to favorite it; the albums of one artist need none of that.
+    """
+    item = {
+        "text": album.name,
+        "type": "playlist",
+        "commonParams": {"album_id": str(album.item_id), "performance": ""},
+        "icon": f"music/{album.item_id}/cover",
+        "icon-id": str(album.item_id),
+    }
+    if mixed:
+        artist_str = album.artist_str
+        if artist_str:
+            item["text"] = f"{album.name}\n{artist_str}"
+        item["textkey"] = album.name[0].upper() if album.name else ""
+        favorites_url = f"db:album.title={urllib.parse.quote(album.name)}"
+        if artist_str:
+            favorites_url += f"&contributor.name={urllib.parse.quote(artist_str)}"
+        item["presetParams"] = {
+            "icon": item["icon"],
+            "favorites_title": album.name,
+            "favorites_url": favorites_url,
+            "favorites_type": "playlist",
+        }
+    return item
+
+
+async def get_albums(
+    mass: MusicAssistant,
+    artist_id: str | None,
+    kwargs: dict[str, Any],
+    index: int = 0,
+    quantity: int | None = None,
+    search: str | None = None,
+    favorite_only: bool = False,
+) -> dict[str, Any]:
+    r"""
+    Return albums, optionally filtered to one artist.
+
+    With artist_id the full list comes from ArtistsController.albums() and is paginated here;
+    otherwise library_items()/library_count() paginate server-side.
+
+    The all-albums case adds what a mixed-artist list needs: two-line text "Album\nArtist", a
+    "textkey" (first letter, for the alphabet scroll bar) and "presetParams" so albums can be
+    favorited from here.
+    """
+    if artist_id is None:
+        return await _library_page(
+            mass.music.albums,
+            partial(_rows, partial(_album_row, mixed=True)),
+            index=index,
+            quantity=quantity,
+            search=search,
+            favorite_only=favorite_only,
+            window_style="icon_list",
+            base_actions=albums_base_actions(kwargs),
+        )
+    albums = await mass.music.artists.albums(artist_id, "library")
+    window, total, offset = _paginate(albums, index, quantity)
+    return {
+        "count": total,
+        "offset": offset,
+        "window": {"windowStyle": "home_menu"},
+        "base": {"actions": albums_base_actions(kwargs)},
+        "item_loop": _rows(partial(_album_row, mixed=False), window),
+    }
+
+
+async def get_artist_all(
+    mass: MusicAssistant,
+    artist_id: str,
+    kwargs: dict[str, Any],
+    index: int = 0,
+    quantity: int | None = None,
+) -> dict[str, Any]:
+    """
+    Return everything in the library for one artist: albums, then tracks, then radio.
+
+    An artist can be in the library only through a track on someone else's album, and then has no
+    albums. So the albums come first, then the artist's tracks that are not on those albums, then
+    library radio stations whose name contains the artist's name (services such as Pandora file
+    artist stations under Radio).
+
+    Rows are built as in get_favorites_all(), with the same per-row _standalone_actions.
+    """
+    artist = await mass.music.artists.get_library_item(artist_id)
+    albums, tracks = await asyncio.gather(
+        mass.music.artists.albums(artist_id, "library"),
+        mass.music.artists.tracks(artist_id, "library"),
+    )
+    album_ids = {str(album.item_id) for album in albums}
+    extra_tracks = [
+        track
+        for track in tracks
+        if track.album is None or str(track.album.item_id) not in album_ids
+    ]
+    albums_reply = await get_albums(mass, artist_id, kwargs, 0, None)
+    stations = await get_radio_stations(mass, kwargs, 0, 50, artist.name)
+    wanted = artist.name.casefold()
+    station_rows = [row for row in stations["item_loop"] if wanted in row["text"].casefold()]
+    combined = []
+    for rows, actions in (
+        (albums_reply["item_loop"], albums_reply["base"]["actions"]),
+        (_all_track_rows(extra_tracks), tracks_base_actions(kwargs)),
+        (station_rows, stations["base"]["actions"]),
+    ):
+        for item in rows:
+            item["actions"] = _standalone_actions(actions, item)
+            combined.append(item)
+    window, total, offset = _paginate(combined, index, quantity)
+    return {
+        "count": total,
+        "offset": offset,
+        "window": {"windowStyle": "icon_list"},
+        "item_loop": window,
+    }
+
+
+def _all_track_rows(items: list[Any], index: int = 0) -> list[dict[str, Any]]:
+    """Return the two-line rows (title, then artist) of get_all_tracks() for the given tracks."""
+    item_loop = []
+    for i, item in enumerate(items):
+        text = item.name
+        if item.artist_str:
+            text = f"{item.name}\n{item.artist_str}"
+        play_index = index + i
+        row = {
+            "text": text,
+            "type": "audio",
+            "style": "itemplay",
+            "commonParams": {"track_id": str(item.item_id)},
+            "playallParams": {"play_index": play_index},
+            "presetParams": {
+                "favorites_type": "audio",
+                "favorites_title": item.name,
+                "favorites_url": item.uri,
+            },
+            # No goAction override: the base "go" action already adds to the queue.
+        }
+        if item.album is not None:
+            row["icon"] = f"music/{item.album.item_id}/cover"
+            row["icon-id"] = str(item.album.item_id)
+        item_loop.append(row)
+    return _disable_unavailable(item_loop, items)
+
+
+async def get_all_tracks(
+    mass: MusicAssistant,
+    kwargs: dict[str, Any],
+    index: int = 0,
+    quantity: int | None = None,
+    search: str | None = None,
+    favorite_only: bool = False,
+) -> dict[str, Any]:
+    r"""
+    Return the flat, root-level track browse.
+
+    Rows use track_id and the album's bare-numeric icon id, as get_albums() does: the album is the
+    track's art source, and tracks with no album fall through to the placeholder. Row text is
+    "Title\nArtist".
+    """
+    return await _library_page(
+        mass.music.tracks,
+        _all_track_rows,
+        index=index,
+        quantity=quantity,
+        search=search,
+        favorite_only=favorite_only,
+        window_style="icon_list",
+        base_actions=tracks_base_actions(kwargs, index, quantity),
+    )
+
+
+async def get_tracks(
+    mass: MusicAssistant,
+    album_id: str | None,
+    kwargs: dict[str, Any],
+    index: int = 0,
+    quantity: int | None = None,
+) -> dict[str, Any]:
+    """
+    Return an album's tracks.
+
+    in_library_only=False because albums added to the library don't guarantee a local row per track;
+    it also queries the provider for tracks not mirrored locally, which can make those albums slower
+    to load. The list is sorted by (disc, track) and unpaginated, so it is paginated here.
+
+    favorites_url is the track's MA-native .uri; artist and album favorites_url use LMS's "db:"
+    convention.
+    """
+    items = (
+        await mass.music.albums.tracks(album_id, "library", in_library_only=False)
+        if album_id is not None
+        else []
+    )
+    window, total, offset = _paginate(items, index, quantity)
+    item_loop = []
+    for i, item in enumerate(window):
+        play_index = offset + i
+        row = {
+            "text": item.name,
+            "type": "audio",
+            "style": "itemplay",
+            # play_index rides along so the long-press menu can offer "Play Album from here" without
+            # fetching the album again.
+            "commonParams": {"track_id": str(item.item_id), "play_index": play_index},
+            "playallParams": {"play_index": play_index},
+            "presetParams": {
+                "favorites_type": "audio",
+                "favorites_title": item.name,
+                "favorites_url": item.uri,
+            },
+            # always "playControl", so the menu is chosen at tap time rather than from the queue
+            # state when the listing was fetched
+            "goAction": "playControl",
+            "playControlParams": {"xmlbrowserPlayControl": str(play_index)},
+        }
+        item_loop.append(row)
+    _disable_unavailable(item_loop, window)
+    return {
+        "count": total,
+        "offset": offset,
+        "window": {"windowStyle": "text_list"},
+        "base": {"actions": tracks_base_actions(kwargs, index, quantity)},
+        "item_loop": item_loop,
+    }
+
+
+def _playlist_row(item: Any) -> dict[str, Any]:
+    """Return the row of a playlist."""
+    return {
+        "text": item.name,
+        "type": "playlist",
+        "commonParams": {"playlist_id": str(item.item_id)},
+        "textkey": item.name[0].upper() if item.name else "",
+        "icon": f"music/playlist-{item.item_id}/cover",
+        "icon-id": f"playlist-{item.item_id}",
+        "presetParams": {
+            "favorites_type": "playlist",
+            "favorites_title": item.name,
+            "favorites_url": item.uri,
+            "icon": f"music/playlist-{item.item_id}/cover",
+        },
+    }
+
+
 async def get_playlists(
     mass: MusicAssistant,
     kwargs: dict[str, Any],
@@ -965,6 +963,24 @@ async def get_playlist_tracks(
     }
 
 
+def _radio_row(item: Any) -> dict[str, Any]:
+    """Return the row of a radio station, played directly."""
+    return {
+        "text": item.name,
+        "type": "audio",
+        "style": "itemplay",
+        "goAction": "play",
+        "commonParams": {"uri": item.uri},
+        "icon": f"music/radio-{item.item_id}/cover",
+        "icon-id": f"radio-{item.item_id}",
+        "presetParams": {
+            "favorites_type": "audio",
+            "favorites_title": item.name,
+            "favorites_url": item.uri,
+        },
+    }
+
+
 async def get_radio_stations(
     mass: MusicAssistant,
     kwargs: dict[str, Any],
@@ -992,6 +1008,24 @@ async def get_radio_stations(
     )
 
 
+def _audiobook_row(item: Any) -> dict[str, Any]:
+    """Return the row of an audiobook, played via its own uri."""
+    return {
+        "text": item.name,
+        "type": "audio",
+        "style": "itemplay",
+        "goAction": "play",
+        "commonParams": {"uri": item.uri},
+        "icon": f"music/audiobook-{item.item_id}/cover",
+        "icon-id": f"audiobook-{item.item_id}",
+        "presetParams": {
+            "favorites_type": "audio",
+            "favorites_title": item.name,
+            "favorites_url": item.uri,
+        },
+    }
+
+
 async def get_audiobooks(
     mass: MusicAssistant,
     kwargs: dict[str, Any],
@@ -1017,6 +1051,24 @@ async def get_audiobooks(
         window_style="icon_list",
         base_actions=tracks_base_actions(kwargs),
     )
+
+
+def _podcast_row(item: Any) -> dict[str, Any]:
+    """Return the row of a podcast, which opens its episodes."""
+    return {
+        "text": item.name,
+        "type": "playlist",
+        "commonParams": {"podcast_id": str(item.item_id)},
+        "textkey": item.name[0].upper() if item.name else "",
+        "icon": f"music/podcast-{item.item_id}/cover",
+        "icon-id": f"podcast-{item.item_id}",
+        "presetParams": {
+            "favorites_type": "playlist",
+            "favorites_title": item.name,
+            "favorites_url": item.uri,
+            "icon": f"music/podcast-{item.item_id}/cover",
+        },
+    }
 
 
 async def get_podcasts(
@@ -1091,32 +1143,7 @@ async def get_podcast_episodes(
     }
 
 
-# Each root tile has its own icon name (AllArtists.png, Albums.png, Playlists.png, AudioBooks.png,
-# podcasts.png, radiolocal.png), each needing a file in static/ (_resolve_static_icon_path matches
-# them 1:1, no aliasing), even where two share an image (Playlists.png and Tracks both use
-# Albums.png).
-# Order and weights follow Music Assistant's root UI. Genres is missing: MA has no browsable genre
-# controller.
-
-
-def _standalone_actions(base_actions: dict[str, Any], item: dict[str, Any]) -> dict[str, Any]:
-    """
-    Build a self-contained per-item actions dict from a base-level template.
-
-    itemsParams only resolves in a response-level "base", not on an item's own "actions", so each
-    action's referenced field (commonParams, addallParams or presetParams) is looked up on the item
-    and baked into the params. Items flagged unavailable get actions that do nothing.
-    """
-    if item.get("unavailable"):
-        return {name: _no_op() for name in _ROW_ACTIONS}
-    result = {}
-    for key, action in base_actions.items():
-        new_action = dict(action)
-        params_field = new_action.pop("itemsParams", None)
-        if params_field and params_field in item:
-            new_action["params"] = {**new_action.get("params", {}), **item[params_field]}
-        result[key] = new_action
-    return result
+# -- Search and favorites --------------------------------------------------------------------------
 
 
 async def get_search_all(
@@ -1352,6 +1379,9 @@ def _favorites_category_menu() -> dict[str, Any]:
     }
 
 
+# -- Home menu -------------------------------------------------------------------------------------
+
+
 MY_MUSIC_NODE = [
     {"node": "home", "id": "myMusic", "text": "My Music", "isANode": 1, "weight": 11},
     {
@@ -1524,11 +1554,7 @@ def get_menu(index: int = 0, quantity: int = 100) -> dict[str, Any]:
     return {"item_loop": window, "offset": offset, "count": total}
 
 
-def _flat_menu_for_row(page: dict[str, Any]) -> dict[str, Any]:
-    """Return the flat track menu for the single row in a one-row listing page."""
-    if not page["item_loop"]:
-        raise NotImplementedError
-    return get_track_play_control_menu_flat(page["item_loop"][0]["commonParams"])
+# -- Command handler -------------------------------------------------------------------------------
 
 
 class BrowseLibraryHandler:
@@ -2567,6 +2593,9 @@ class BrowseLibraryHandler:
         return item_loop
 
 
+# -- Artwork and icon serving ----------------------------------------------------------------------
+
+
 # Icon / cover art serving
 #
 # The client is never handed a real or proxy image URL. Every "icon"/image_url it gets is a local
@@ -2585,9 +2614,11 @@ class BrowseLibraryHandler:
 
 _PNG_CACHE: dict[tuple[tuple[int, int, int], int], bytes] = {}
 
+
 # Menu icon files, kept next to this file so they travel with the package; reinject.sh copies the
 # whole directory.
 STATIC_DIR = (Path(__file__).parent / "static").resolve()
+
 
 # JiveLite requests a size suffix on every menu icon path (e.g. 'AlbumArtists_225x225_m.png'); this
 # splits it into base name, suffix and extension.
@@ -2673,6 +2704,7 @@ def _resolve_static_icon_path(filename: str) -> Path | None:
 # The size suffix JiveLite puts on every image path (e.g. '.../cover_225x225_m'), used
 # to request a suitably sized thumbnail from MA.
 _COVER_SIZE_RE = re.compile(r"_(?P<w>\d+)x(?P<h>\d+)_[a-zA-Z]$")
+
 
 # Used when a request has no size suffix, mainly the bare-icon_id fallback in handle_unmatched; a
 # reasonable default for an embedded display.
