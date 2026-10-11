@@ -168,6 +168,15 @@ class SqueezelitePlayer(Player):
         await self.client.mute(init_muted)
         await self.client.volume_set(init_volume)
         await self.mass.players.register_or_update(self)
+        # A player that connects (it booted, its connection dropped, or Music Assistant restarted)
+        # comes up powered on, instead of showing the powered-off screen with its queue untouched.
+        # Going through the power command applies "Automatically play (resume on power on)": it
+        # only resumes the queue when that player setting is ticked, which is off by default.
+        if PlayerFeature.POWER in self.supported_features:
+            try:
+                await self.mass.players.cmd_power(player_id, True)
+            except MusicAssistantError as err:
+                self.logger.debug("Could not power on %s after connecting: %s", player_id, err)
 
     async def get_config_entries(self) -> list[ConfigEntry]:
         """Return all (provider/player specific) Config Entries for the player."""
