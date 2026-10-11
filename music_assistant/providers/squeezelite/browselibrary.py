@@ -90,7 +90,19 @@ def _context(kwargs: dict[str, Any]) -> dict[str, str]:
     return {k: str(kwargs[k]) for k in CONTEXT_KEYS if k in kwargs}
 
 
-_NO_ACTION = {"player": 0, "cmd": ["jiveblankcommand"]}
+def _no_op(next_window: str | None = None) -> dict[str, Any]:
+    """Return the server's no-op action, optionally followed by a window change."""
+    action: dict[str, Any] = {"player": 0, "cmd": ["jiveblankcommand"]}
+    if next_window:
+        action["nextWindow"] = next_window
+    return action
+
+
+def _menu_icon(name: str) -> str:
+    """Return the icon path of a menu icon file in static/ (served by handle_icon)."""
+    return f"html/images/{name}.png"
+
+
 _ROW_ACTIONS = ("go", "play", "add", "add-hold", "more")
 
 
@@ -107,7 +119,7 @@ def _disable_unavailable(rows: list[dict[str, Any]], items: list[Any]) -> list[d
             continue
         row["text"] = f"(offline) {row['text']}"
         row["unavailable"] = 1
-        row["actions"] = {name: dict(_NO_ACTION) for name in _ROW_ACTIONS}
+        row["actions"] = {name: _no_op() for name in _ROW_ACTIONS}
         row.pop("goAction", None)
     return rows
 
@@ -670,6 +682,68 @@ async def get_tracks(
     }
 
 
+def _text_list_menu(item_loop: list[dict[str, Any]]) -> dict[str, Any]:
+    """Return a menu page that lists the rows as plain text."""
+    return {
+        "count": len(item_loop),
+        "offset": 0,
+        "window": {"windowStyle": "text_list"},
+        "item_loop": item_loop,
+    }
+
+
+def _play_control_row(
+    style: str, text: str, next_window: str, params: dict[str, Any]
+) -> dict[str, Any]:
+    """Return a row of the "playControl" menu: a playlistcontrol action with its own params."""
+    return {
+        "style": style,
+        "text": text,
+        "actions": {
+            "go": {
+                "player": 0,
+                "cmd": ["playlistcontrol"],
+                "nextWindow": next_window,
+                "params": params,
+            }
+        },
+    }
+
+
+# Music Assistant's long-press options: label and the playlistcontrol cmd each one sends.
+_QUEUE_OPTIONS = (
+    ("Play Now (keep queue)", "load"),
+    ("Play Next (keep queue)", "insert"),
+    ("Add to the queue", "add"),
+    ("Play Now (replace queue)", "replace"),
+    ("Play Next (replace queue)", "replace_next"),
+)
+
+
+def _queue_option_row(text: str, params: dict[str, Any], cmd: str) -> dict[str, Any]:
+    """Return a long-press row that sends playlistcontrol with the item's params and cmd."""
+    return {
+        "text": text,
+        "type": "text",
+        "style": "item",
+        "actions": {
+            "go": {
+                "player": 0,
+                "cmd": ["playlistcontrol"],
+                "params": {**params, "cmd": cmd},
+            },
+        },
+        # load/replace start playing, so they go to Now Playing; the others close back to the
+        # browse list.
+        "nextWindow": "nowPlaying" if cmd in ("load", "replace") else "parent",
+    }
+
+
+def _queue_option_rows(params: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return the five long-press rows for the item identified by params."""
+    return [_queue_option_row(text, params, cmd) for text, cmd in _QUEUE_OPTIONS]
+
+
 async def get_track_play_control_menu(
     mass: MusicAssistant, album_id: str, kwargs: dict[str, Any], play_index: int | str
 ) -> dict[str, Any]:
@@ -690,41 +764,26 @@ async def get_track_play_control_menu(
     if len(tracks) <= 1:
         return get_track_play_control_menu_flat({"track_id": track_id})
     ctx = _context(kwargs)
-
-    def _row(style: str, text: str, next_window: str, params: dict[str, Any]) -> dict[str, Any]:
-        return {
-            "style": style,
-            "text": text,
-            "actions": {
-                "go": {
-                    "player": 0,
-                    "cmd": ["playlistcontrol"],
-                    "nextWindow": next_window,
-                    "params": params,
-                }
-            },
-        }
-
     item_loop = [
-        _row(
+        _play_control_row(
             "item_play",
             "Play Now (keep queue)",
             "nowPlaying",
             {"menu": 1, "track_id": track_id, "cmd": "load"},
         ),
-        _row(
+        _play_control_row(
             "item_insert",
             "Play Next (keep queue)",
             "parentNoRefresh",
             {"track_id": track_id, "menu": 1, "cmd": "insert"},
         ),
-        _row(
+        _play_control_row(
             "item_add",
             "Add to the queue",
             "parentNoRefresh",
             {"menu": 1, "cmd": "add", "track_id": track_id},
         ),
-        _row(
+        _play_control_row(
             "item_playall",
             "Play Album from here",
             "nowPlaying",
@@ -738,12 +797,7 @@ async def get_track_play_control_menu(
             },
         ),
     ]
-    return {
-        "count": len(item_loop),
-        "offset": 0,
-        "window": {"windowStyle": "text_list"},
-        "item_loop": item_loop,
-    }
+    return _text_list_menu(item_loop)
 
 
 def get_track_play_control_menu_flat(common_params: dict[str, Any]) -> dict[str, Any]:
@@ -758,18 +812,8 @@ def get_track_play_control_menu_flat(common_params: dict[str, Any]) -> dict[str,
     """
 
     def _row(style: str, text: str, next_window: str, cmd: str) -> dict[str, Any]:
-        return {
-            "style": style,
-            "text": text,
-            "actions": {
-                "go": {
-                    "player": 0,
-                    "cmd": ["playlistcontrol"],
-                    "nextWindow": next_window,
-                    "params": {**common_params, "menu": 1, "cmd": cmd},
-                }
-            },
-        }
+        params = {**common_params, "menu": 1, "cmd": cmd}
+        return _play_control_row(style, text, next_window, params)
 
     item_loop = [
         _row("item_play", "Play Now (keep queue)", "nowPlaying", "load"),
@@ -778,12 +822,7 @@ def get_track_play_control_menu_flat(common_params: dict[str, Any]) -> dict[str,
         _row("item_play", "Play Now (replace queue)", "nowPlaying", "replace"),
         _row("item_insert", "Play Next (replace queue)", "parentNoRefresh", "replace_next"),
     ]
-    return {
-        "count": len(item_loop),
-        "offset": 0,
-        "window": {"windowStyle": "text_list"},
-        "item_loop": item_loop,
-    }
+    return _text_list_menu(item_loop)
 
 
 async def get_playlists(
@@ -1110,7 +1149,7 @@ def _standalone_actions(base_actions: dict[str, Any], item: dict[str, Any]) -> d
     and baked into the params. Items flagged unavailable get actions that do nothing.
     """
     if item.get("unavailable"):
-        return {name: dict(_NO_ACTION) for name in _ROW_ACTIONS}
+        return {name: _no_op() for name in _ROW_ACTIONS}
     result = {}
     for key, action in base_actions.items():
         new_action = dict(action)
@@ -1336,7 +1375,7 @@ def _favorites_category_menu() -> dict[str, Any]:
         {
             "text": label,
             "type": "playlist",
-            "icon": f"html/images/{icon}.png",
+            "icon": _menu_icon(icon),
             "actions": {
                 "go": {
                     "cmd": ["browselibrary", "items"],
@@ -1363,7 +1402,7 @@ MY_MUSIC_NODE = [
         "id": "myMusicArtists",
         "text": "Artists",
         "homeMenuText": "Browse Artists",
-        "icon": "html/images/AllArtists.png",
+        "icon": _menu_icon("AllArtists"),
         "weight": 45,
         "actions": {
             "go": {"cmd": ["browselibrary", "items"], "params": {"menu": 1, "mode": "artists"}}
@@ -1374,7 +1413,7 @@ MY_MUSIC_NODE = [
         "id": "myMusicAlbums",
         "text": "Albums",
         "homeMenuText": "Browse Albums",
-        "icon": "html/images/Albums.png",
+        "icon": _menu_icon("Albums"),
         "weight": 50,
         "actions": {
             "go": {"cmd": ["browselibrary", "items"], "params": {"menu": 1, "mode": "albums"}}
@@ -1386,7 +1425,7 @@ MY_MUSIC_NODE = [
         "id": "myMusicTracks",
         "text": "Tracks",
         "homeMenuText": "Browse Tracks",
-        "icon": "html/images/Albums.png",
+        "icon": _menu_icon("Albums"),
         "weight": 55,
         "actions": {
             "go": {"cmd": ["browselibrary", "items"], "params": {"menu": 1, "mode": "tracks"}}
@@ -1398,7 +1437,7 @@ MY_MUSIC_NODE = [
         "id": "myMusicPlaylists",
         "text": "Playlists",
         "homeMenuText": "Playlists",
-        "icon": "html/images/Playlists.png",
+        "icon": _menu_icon("Playlists"),
         "weight": 60,
         "actions": {
             "go": {"cmd": ["browselibrary", "items"], "params": {"menu": 1, "mode": "playlists"}}
@@ -1410,7 +1449,7 @@ MY_MUSIC_NODE = [
         "id": "myMusicAudiobooks",
         "text": "Audiobooks",
         "homeMenuText": "Audiobooks",
-        "icon": "html/images/AudioBooks.png",
+        "icon": _menu_icon("AudioBooks"),
         "weight": 65,
         "actions": {
             "go": {"cmd": ["browselibrary", "items"], "params": {"menu": 1, "mode": "audiobooks"}}
@@ -1422,7 +1461,7 @@ MY_MUSIC_NODE = [
         "id": "myMusicPodcasts",
         "text": "Podcasts",
         "homeMenuText": "Podcasts",
-        "icon": "html/images/podcasts.png",
+        "icon": _menu_icon("podcasts"),
         "weight": 70,
         "actions": {
             "go": {"cmd": ["browselibrary", "items"], "params": {"menu": 1, "mode": "podcasts"}}
@@ -1434,7 +1473,7 @@ MY_MUSIC_NODE = [
         "id": "myMusicRadio",
         "text": "Radio",
         "homeMenuText": "Radio",
-        "icon": "html/images/radiolocal.png",
+        "icon": _menu_icon("radiolocal"),
         "weight": 75,
         "actions": {
             "go": {"cmd": ["browselibrary", "items"], "params": {"menu": 1, "mode": "radio"}}
@@ -1465,7 +1504,7 @@ MY_MUSIC_NODE = [
         "id": "myMusicFavorites",
         "text": "Favorites",
         "homeMenuText": "Favorites",
-        "icon": "html/images/favorites.png",
+        "icon": _menu_icon("favorites"),
         "weight": 40,
         "actions": {
             "go": {"cmd": ["browselibrary", "items"], "params": {"menu": 1, "mode": "favorites"}}
@@ -1487,7 +1526,7 @@ NOW_PLAYING_ITEM = {
     "weight": 1,
     "nextWindow": "nowPlaying",
     "actions": {
-        "go": {"cmd": ["jiveblankcommand"], "player": 0, "nextWindow": "nowPlaying"},
+        "go": _no_op("nowPlaying"),
     },
 }
 
@@ -1514,7 +1553,7 @@ ALARM_NOT_SUPPORTED = [
         "weight": 1,
         # An ordinary row whose go action is the server's no-op that closes the window: a row with
         # no action at all left JiveLite's window impossible to close.
-        "actions": {"go": {"player": 0, "cmd": ["jiveblankcommand"], "nextWindow": "parent"}},
+        "actions": {"go": _no_op("parent")},
     },
 ]
 
@@ -1725,7 +1764,7 @@ class BrowseLibraryHandler:
             title = ""
             # The client fails to show a popup that has no icon, so the item's own artwork is
             # used when it can be found, and a menu icon otherwise.
-            icon_id = "html/images/browselibrary.png"
+            icon_id = _menu_icon("browselibrary")
             try:
                 title, icon_id = await self._popup_details(slim_command.kwargs.get("uri"), None)
             except Exception:  # the failed item may not be describable either
@@ -2106,30 +2145,7 @@ class BrowseLibraryHandler:
         uri = kwargs.get("uri")
         base_params = {"track_id": track_id} if track_id is not None else {"uri": uri}
 
-        def _row(text: str, cmd: str) -> dict[str, Any]:
-            return {
-                "text": text,
-                "type": "text",
-                "style": "item",
-                "actions": {
-                    "go": {
-                        "player": 0,
-                        "cmd": ["playlistcontrol"],
-                        "params": {**base_params, "cmd": cmd},
-                    },
-                },
-                # load/replace start playing, so they go to Now Playing; the others close back to
-                # the browse list.
-                "nextWindow": "nowPlaying" if cmd in ("load", "replace") else "parent",
-            }
-
-        item_loop = [
-            _row("Play Now (keep queue)", "load"),
-            _row("Play Next (keep queue)", "insert"),
-            _row("Add to the queue", "add"),
-            _row("Play Now (replace queue)", "replace"),
-            _row("Play Next (replace queue)", "replace_next"),
-        ]
+        item_loop = _queue_option_rows(base_params)
         # A song inside an album, playlist or podcast also offers to play that whole list from here,
         # first in the menu as in the Music Assistant app ("Play Album from here"). The row sends
         # the container id and the song's position (tracks_base_actions' rows carry play_index in
@@ -2141,35 +2157,12 @@ class BrowseLibraryHandler:
             ("podcast_id", "Podcast"),
         ):
             if play_index is not None and kwargs.get(key) is not None:
-                item_loop.insert(
-                    0,
-                    {
-                        "text": f"Play {label} from here",
-                        "type": "text",
-                        "style": "item",
-                        "actions": {
-                            "go": {
-                                "player": 0,
-                                "cmd": ["playlistcontrol"],
-                                "params": {
-                                    key: kwargs[key],
-                                    "play_index": play_index,
-                                    "cmd": "load",
-                                },
-                            },
-                        },
-                        "nextWindow": "nowPlaying",
-                    },
-                )
+                params = {key: kwargs[key], "play_index": play_index}
+                item_loop.insert(0, _queue_option_row(f"Play {label} from here", params, "load"))
                 break
-        return {
-            "count": len(item_loop),
-            "offset": 0,
-            # windowStyle "text_list", not isContextMenu:1: that flag belongs on the action that
-            # navigates here (base.actions.more's "window"), not in the response.
-            "window": {"windowStyle": "text_list"},
-            "item_loop": item_loop,
-        }
+        # windowStyle "text_list", not isContextMenu:1: that flag belongs on the action that
+        # navigates here (base.actions.more's "window"), not in the response.
+        return _text_list_menu(item_loop)
 
     async def _handle_albuminfo(self, slim_command: SlimCLICommand) -> dict[str, Any]:
         """
@@ -2185,35 +2178,8 @@ class BrowseLibraryHandler:
         uri = kwargs.get("uri")
         base_params = {"album_id": album_id} if album_id is not None else {"uri": uri}
 
-        def _row(text: str, cmd: str) -> dict[str, Any]:
-            return {
-                "text": text,
-                "type": "text",
-                "style": "item",
-                "actions": {
-                    "go": {
-                        "player": 0,
-                        "cmd": ["playlistcontrol"],
-                        "params": {**base_params, "cmd": cmd},
-                    },
-                },
-                "nextWindow": "nowPlaying" if cmd in ("load", "replace") else "parent",
-            }
-
-        item_loop = [
-            _row("Play Now (keep queue)", "load"),
-            _row("Play Next (keep queue)", "insert"),
-            _row("Add to the queue", "add"),
-            _row("Play Now (replace queue)", "replace"),
-            _row("Play Next (replace queue)", "replace_next"),
-        ]
-        return {
-            "count": len(item_loop),
-            "offset": 0,
-            # windowStyle "text_list", as in _handle_trackinfo.
-            "window": {"windowStyle": "text_list"},
-            "item_loop": item_loop,
-        }
+        item_loop = _queue_option_rows(base_params)
+        return _text_list_menu(item_loop)
 
     async def _handle_artistinfo(self, slim_command: SlimCLICommand) -> dict[str, Any]:
         """
@@ -2226,34 +2192,8 @@ class BrowseLibraryHandler:
         if artist_id is None:
             raise NotImplementedError
 
-        def _row(text: str, cmd: str) -> dict[str, Any]:
-            return {
-                "text": text,
-                "type": "text",
-                "style": "item",
-                "actions": {
-                    "go": {
-                        "player": 0,
-                        "cmd": ["playlistcontrol"],
-                        "params": {"artist_id": artist_id, "cmd": cmd},
-                    },
-                },
-                "nextWindow": "nowPlaying" if cmd in ("load", "replace") else "parent",
-            }
-
-        item_loop = [
-            _row("Play Now (keep queue)", "load"),
-            _row("Play Next (keep queue)", "insert"),
-            _row("Add to the queue", "add"),
-            _row("Play Now (replace queue)", "replace"),
-            _row("Play Next (replace queue)", "replace_next"),
-        ]
-        return {
-            "count": len(item_loop),
-            "offset": 0,
-            "window": {"windowStyle": "text_list"},
-            "item_loop": item_loop,
-        }
+        item_loop = _queue_option_rows({"artist_id": artist_id})
+        return _text_list_menu(item_loop)
 
     async def _handle_contextmenu(self, slim_command: SlimCLICommand) -> dict[str, Any]:
         """
@@ -2576,13 +2516,13 @@ class BrowseLibraryHandler:
                     # No "type" key: with "type": "playlist" the row opened a blank screen and sent
                     # no request. "Clear queue" (not LMS's "Clear Playlist") matches the MA app.
                     "text": "Clear queue",
-                    "icon": "html/images/playlistclear.png",
+                    "icon": _menu_icon("playlistclear"),
                     "count": 2,
                     "offset": 0,
                     "item_loop": [
                         {
                             "text": "Cancel",
-                            "actions": {"go": {"player": 0, "cmd": ["jiveblankcommand"]}},
+                            "actions": {"go": _no_op()},
                             "nextWindow": "parent",
                         },
                         {
