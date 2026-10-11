@@ -1626,7 +1626,7 @@ class BrowseLibraryHandler:
             presets = await self._slimproto.cli._handle_menu(slim_command.player_id)
             menu["item_loop"] = [*menu["item_loop"], *presets["item_loop"]]
             menu["count"] += len(presets["item_loop"])
-            haextras_items = haextras.menu_items(self.mass)  # HA-EXTRAS
+            haextras_items = await haextras.menu_items(self.mass)  # HA-EXTRAS
             menu["item_loop"] += haextras_items  # HA-EXTRAS
             menu["count"] += len(haextras_items)  # HA-EXTRAS
             return menu

@@ -101,7 +101,8 @@ CLASS_ICONS = {
 COMMANDS = ("haextras", "haextraspicture", "haextrasset", "haextrasrun")
 
 # How long the key in a picture address stays valid.
-KEY_LIFETIME = 120
+# (a rotation shows each picture for the Image Viewer's delay, so this has to cover a whole pass)
+KEY_LIFETIME = 600
 # The picture is shrunk to what the screen needs: a 2560x1920 frame is slow to decode on a Pi.
 DEFAULT_MAX_SIZE = 960
 
@@ -117,9 +118,10 @@ def _hass(mass: MusicAssistant) -> Any:
         return None
 
 
-def menu_items(mass: MusicAssistant) -> list[dict[str, Any]]:
+async def menu_items(mass: MusicAssistant) -> list[dict[str, Any]]:
     """Return the entry for the home menu, or nothing when Home Assistant is not available."""
-    if _hass(mass) is None:
+    ha = _hass(mass)
+    if ha is None:
         return []
     return [
         {
@@ -131,8 +133,34 @@ def menu_items(mass: MusicAssistant) -> list[dict[str, Any]]:
             "actions": {"go": {"player": 0, "cmd": ["haextras", "items"], "params": {"menu": 1}}},
             # the client reads the tile icon from here when there is a window block
             "window": {"windowStyle": "text_list", "icon": "haextras/icons/haextras.png"},
+            # the client lists these with its own screensavers (Settings > Screen)
+            "screensavers": await _screensavers(ha),
         }
     ]
+
+
+async def _screensavers(ha: Any) -> list[dict[str, Any]]:
+    """Return a screensaver for each labeled camera and dashboard, shown by the Image Viewer."""
+    try:
+        labeled = await _labeled_entities(ha) or []
+        states = await _states(ha, [e for e in labeled if _domain(e) not in RUN_DOMAINS])
+    except Exception:  # Home Assistant being slow or down must not break the menu
+        LOGGER.warning("HA Extras could not list its screensavers", exc_info=True)
+        return []
+    pictures = [
+        state for state in states if _domain(state["entity_id"]) == "camera" or _is_dashboard(state)
+    ]
+    savers = []
+    for kind, title in (("cameras", "Cameras"), ("dashboards", "Dashboards")):
+        if await _group(ha, kind):
+            # one screensaver that rotates through all of them
+            command = ["haextraspicture", f"group:{kind}", "slideshow:1"]
+            savers.append({"text": f"HA - {title} - All", "cmd": command})
+    for state in pictures:
+        command = ["haextraspicture", f"entity:{state['entity_id']}", "slideshow:1"]
+        kind = "Cameras" if _domain(state["entity_id"]) == "camera" else "Dashboards"
+        savers.append({"text": f"HA - {kind} - {_name(state)}", "cmd": command})
+    return savers
 
 
 def _row(
@@ -386,6 +414,34 @@ async def _device_listing(ha: Any, entity: str) -> dict[str, Any]:
 # -- commands -------------------------------------------------------------------------------------
 
 
+def _picture_entry(entity: str, title: str) -> dict[str, str]:
+    """
+    Return an Image Viewer list entry for an entity's picture, under a new short-lived key.
+
+    The viewer replaces {resizeParams} with the screen size and fetches the picture again each
+    time it asks for the list, so the picture stays current.
+    """
+    now = time.time()
+    for old in [k for k, (_, expiry) in _keys.items() if expiry < now]:
+        del _keys[old]
+    key = secrets.token_hex(8)
+    _keys[key] = (entity, now + KEY_LIFETIME)
+    return {"image": f"haextras/camera/{key}{{resizeParams}}.jpg", "caption": title}
+
+
+async def _group(ha: Any, kind: str) -> list[tuple[str, str]]:
+    """Return (entity id, title) of every labeled camera ("cameras") or dashboard ("dashboards")."""
+    labeled = await _labeled_entities(ha) or []
+    states = await _states(ha, [e for e in labeled if _domain(e) not in RUN_DOMAINS])
+    if kind == "cameras":
+        found = [s for s in states if _domain(s["entity_id"]) == "camera"]
+    elif kind == "dashboards":
+        found = [s for s in states if _domain(s["entity_id"]) != "camera" and _is_dashboard(s)]
+    else:
+        found = []
+    return [(s["entity_id"], _name(s)) for s in found]
+
+
 async def _entity_title(ha: Any, entity: str) -> str:
     states = await ha.get_states(entity_ids=[entity])
     return _name(states[0]) if states else entity
@@ -412,6 +468,9 @@ async def handle(mass: MusicAssistant, slim_command: SlimCLICommand) -> dict[str
                 return await _device_listing(ha, str(kwargs.get("entity", "")))
             panel = _PANELS.get(name)
             return _listing(await panel(ha) if panel else await _panel_list(ha))
+        if slim_command.command == "haextraspicture" and kwargs.get("group"):
+            pictures = await _group(ha, str(kwargs["group"]))
+            return {"data": [_picture_entry(entity, title) for entity, title in pictures]}
         entity = str(kwargs.get("entity", ""))
         # only entities that carry the label can be reached, whatever the request says
         if not re.fullmatch(r"[a-z_]+\.[a-z0-9_]+", entity) or entity not in (
@@ -431,16 +490,7 @@ async def handle(mass: MusicAssistant, slim_command: SlimCLICommand) -> dict[str
             return {}
         if not entity.startswith("camera.") and not await _dashboard_address(ha, entity):
             return _listing([_row("Not a camera or dashboard")])
-        now = time.time()
-        for key in [k for k, (_, expiry) in _keys.items() if expiry < now]:
-            del _keys[key]
-        key = secrets.token_hex(8)
-        _keys[key] = (entity, now + KEY_LIFETIME)
-        # the Image Viewer replaces {resizeParams} with the screen size and fetches the picture
-        # again each time it asks for the list, so the picture stays current
-        title = await _entity_title(ha, entity)
-        image = f"haextras/camera/{key}{{resizeParams}}.jpg"
-        return {"data": [{"image": image, "caption": title}]}
+        return {"data": [_picture_entry(entity, await _entity_title(ha, entity))]}
     except Exception:  # Home Assistant being slow or down must not break the menu
         LOGGER.warning("HA Extras could not answer %s", slim_command.command, exc_info=True)
         return _listing([_row("Home Assistant did not answer")])
