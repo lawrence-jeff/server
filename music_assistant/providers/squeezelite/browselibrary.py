@@ -37,6 +37,7 @@ import urllib.parse
 import zlib
 from collections.abc import Awaitable, Callable
 from datetime import timedelta
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -133,6 +134,18 @@ def _paginate(
     return window, total, index
 
 
+def _preset_actions() -> dict[str, Any]:
+    """Return the ten set-preset-N actions that save a row's presetParams as a player preset."""
+    return {
+        f"set-preset-{n}": {
+            "player": 0,
+            "itemsParams": "presetParams",
+            "cmd": ["jivefavorites", "set_preset", f"key:{n}"],
+        }
+        for n in range(10)
+    }
+
+
 ARTIST_LIST_BASE_ACTIONS = {
     "go": {
         "player": 0,
@@ -190,22 +203,16 @@ ARTIST_LIST_BASE_ACTIONS = {
         "cmd": ["artistinfo", "items"],
         "window": {"isContextMenu": 1},
     },
-    **{
-        f"set-preset-{n}": {
-            "player": 0,
-            "itemsParams": "presetParams",
-            "cmd": ["jivefavorites", "set_preset", f"key:{n}"],
-        }
-        for n in range(10)
-    },
+    **_preset_actions(),
 }
 
 
-def albums_base_actions(kwargs: dict[str, Any]) -> dict[str, Any]:
+def _container_base_actions(kwargs: dict[str, Any], info_cmd: str) -> dict[str, Any]:
     """
-    Return base.actions for an albums item_loop.
+    Return base.actions for a list of containers (albums, playlists, podcasts).
 
-    Sparse for the no-artist_id case: role_id/menu_roles are only sent when browsing via an artist.
+    A row opens the container's tracks; info_cmd is the long-press menu command. Sparse for the
+    no-artist_id case: role_id/menu_roles are only sent when browsing via an artist.
     """
     ctx = _context(kwargs)
     actions = {
@@ -217,7 +224,7 @@ def albums_base_actions(kwargs: dict[str, Any]) -> dict[str, Any]:
         },
         "more": {
             "player": 0,
-            "cmd": ["albuminfo", "items"],
+            "cmd": [info_cmd, "items"],
             "itemsParams": "commonParams",
             "window": {"isContextMenu": 1},
             "params": dict(ctx),
@@ -242,59 +249,18 @@ def albums_base_actions(kwargs: dict[str, Any]) -> dict[str, Any]:
             "params": {"menu": ctx.get("menu", 1), "cmd": "insert"},
         },
     }
-    for n in range(10):
-        actions[f"set-preset-{n}"] = {
-            "player": 0,
-            "itemsParams": "presetParams",
-            "cmd": ["jivefavorites", "set_preset", f"key:{n}"],
-        }
+    actions.update(_preset_actions())
     return actions
+
+
+def albums_base_actions(kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Return base.actions for an albums item_loop."""
+    return _container_base_actions(kwargs, "albuminfo")
 
 
 def playlists_base_actions(kwargs: dict[str, Any]) -> dict[str, Any]:
     """Return base.actions for a playlists item_loop."""
-    ctx = _context(kwargs)
-    actions = {
-        "go": {
-            "player": 0,
-            "cmd": ["browselibrary", "items"],
-            "itemsParams": "commonParams",
-            "params": {**ctx, "mode": "tracks"},
-        },
-        "more": {
-            "player": 0,
-            "cmd": ["playlistinfo", "items"],
-            "itemsParams": "commonParams",
-            "window": {"isContextMenu": 1},
-            "params": dict(ctx),
-        },
-        "play": {
-            "player": 0,
-            "cmd": ["playlistcontrol"],
-            "itemsParams": "commonParams",
-            "nextWindow": "nowPlaying",
-            "params": {**ctx, "cmd": "load"},
-        },
-        "add": {
-            "player": 0,
-            "cmd": ["playlistcontrol"],
-            "itemsParams": "commonParams",
-            "params": {**ctx, "cmd": "add"},
-        },
-        "add-hold": {
-            "player": 0,
-            "cmd": ["playlistcontrol"],
-            "itemsParams": "commonParams",
-            "params": {"menu": ctx.get("menu", 1), "cmd": "insert"},
-        },
-    }
-    for n in range(10):
-        actions[f"set-preset-{n}"] = {
-            "player": 0,
-            "itemsParams": "presetParams",
-            "cmd": ["jivefavorites", "set_preset", f"key:{n}"],
-        }
-    return actions
+    return _container_base_actions(kwargs, "playlistinfo")
 
 
 def tracks_base_actions(
@@ -379,13 +345,181 @@ def tracks_base_actions(
             "params": dict(ctx),
         },
     }
-    for n in range(10):
-        actions[f"set-preset-{n}"] = {
-            "player": 0,
-            "itemsParams": "presetParams",
-            "cmd": ["jivefavorites", "set_preset", f"key:{n}"],
-        }
+    actions.update(_preset_actions())
     return actions
+
+
+async def _library_page(
+    controller: Any,
+    rows_for: Callable[[list[Any], int], list[dict[str, Any]]],
+    *,
+    index: int,
+    quantity: int | None,
+    search: str | None,
+    favorite_only: bool,
+    window_style: str,
+    base_actions: dict[str, Any],
+) -> dict[str, Any]:
+    """
+    Return one page of a library list: fetch the items, count them and build the rows.
+
+    controller is one of Music Assistant's media controllers (artists, albums, ...). rows_for builds
+    the rows from the fetched items and the index of the first one.
+    """
+    limit = quantity if quantity is not None else 500
+    items = await controller.library_items(
+        limit=limit,
+        offset=index,
+        search=search,
+        summary=False,
+        favorite=True if favorite_only else None,
+    )
+    if search:
+        # library_count() has no search param, so the count is what was fetched; a match set larger
+        # than `limit` is undercounted.
+        total = len(items)
+    else:
+        total = await controller.library_count(favorite_only=favorite_only)
+    return {
+        "count": total,
+        "offset": index,
+        "window": {"windowStyle": window_style},
+        "base": {"actions": base_actions},
+        "item_loop": rows_for(items, index),
+    }
+
+
+def _rows(
+    row_for: Callable[[Any], dict[str, Any]],
+    items: list[Any],
+    _index: int = 0,
+    *,
+    mark_unavailable: bool = True,
+) -> list[dict[str, Any]]:
+    """Return a row for each item, with the unavailable ones marked."""
+    rows = [row_for(item) for item in items]
+    return _disable_unavailable(rows, items) if mark_unavailable else rows
+
+
+def _artist_row(item: Any) -> dict[str, Any]:
+    """Return the row of an artist."""
+    return {
+        "text": item.name,
+        "type": "playlist",
+        "commonParams": {"artist_id": str(item.item_id)},
+        "textkey": item.name[0].upper() if item.name else "",
+        "icon": f"music/artist-{item.item_id}/cover",
+        "icon-id": f"artist-{item.item_id}",
+        "presetParams": {
+            "favorites_type": "playlist",
+            "favorites_title": item.name,
+            "favorites_url": f"db:contributor.name={item.name.replace(' ', '%20')}",
+            "icon": f"music/artist-{item.item_id}/cover",
+        },
+    }
+
+
+def _playlist_row(item: Any) -> dict[str, Any]:
+    """Return the row of a playlist."""
+    return {
+        "text": item.name,
+        "type": "playlist",
+        "commonParams": {"playlist_id": str(item.item_id)},
+        "textkey": item.name[0].upper() if item.name else "",
+        "icon": f"music/playlist-{item.item_id}/cover",
+        "icon-id": f"playlist-{item.item_id}",
+        "presetParams": {
+            "favorites_type": "playlist",
+            "favorites_title": item.name,
+            "favorites_url": item.uri,
+            "icon": f"music/playlist-{item.item_id}/cover",
+        },
+    }
+
+
+def _radio_row(item: Any) -> dict[str, Any]:
+    """Return the row of a radio station, played directly."""
+    return {
+        "text": item.name,
+        "type": "audio",
+        "style": "itemplay",
+        "goAction": "play",
+        "commonParams": {"uri": item.uri},
+        "icon": f"music/radio-{item.item_id}/cover",
+        "icon-id": f"radio-{item.item_id}",
+        "presetParams": {
+            "favorites_type": "audio",
+            "favorites_title": item.name,
+            "favorites_url": item.uri,
+        },
+    }
+
+
+def _audiobook_row(item: Any) -> dict[str, Any]:
+    """Return the row of an audiobook, played via its own uri."""
+    return {
+        "text": item.name,
+        "type": "audio",
+        "style": "itemplay",
+        "goAction": "play",
+        "commonParams": {"uri": item.uri},
+        "icon": f"music/audiobook-{item.item_id}/cover",
+        "icon-id": f"audiobook-{item.item_id}",
+        "presetParams": {
+            "favorites_type": "audio",
+            "favorites_title": item.name,
+            "favorites_url": item.uri,
+        },
+    }
+
+
+def _podcast_row(item: Any) -> dict[str, Any]:
+    """Return the row of a podcast, which opens its episodes."""
+    return {
+        "text": item.name,
+        "type": "playlist",
+        "commonParams": {"podcast_id": str(item.item_id)},
+        "textkey": item.name[0].upper() if item.name else "",
+        "icon": f"music/podcast-{item.item_id}/cover",
+        "icon-id": f"podcast-{item.item_id}",
+        "presetParams": {
+            "favorites_type": "playlist",
+            "favorites_title": item.name,
+            "favorites_url": item.uri,
+            "icon": f"music/podcast-{item.item_id}/cover",
+        },
+    }
+
+
+def _album_row(album: Any, *, mixed: bool) -> dict[str, Any]:
+    """
+    Return the row of an album.
+
+    mixed is True in the list of all albums, where each row also needs the artist, an alphabet key
+    and the data to favorite it; the albums of one artist need none of that.
+    """
+    item = {
+        "text": album.name,
+        "type": "playlist",
+        "commonParams": {"album_id": str(album.item_id), "performance": ""},
+        "icon": f"music/{album.item_id}/cover",
+        "icon-id": str(album.item_id),
+    }
+    if mixed:
+        artist_str = album.artist_str
+        if artist_str:
+            item["text"] = f"{album.name}\n{artist_str}"
+        item["textkey"] = album.name[0].upper() if album.name else ""
+        favorites_url = f"db:album.title={urllib.parse.quote(album.name)}"
+        if artist_str:
+            favorites_url += f"&contributor.name={urllib.parse.quote(artist_str)}"
+        item["presetParams"] = {
+            "icon": item["icon"],
+            "favorites_title": album.name,
+            "favorites_url": favorites_url,
+            "favorites_type": "playlist",
+        }
+    return item
 
 
 async def get_artists(
@@ -402,44 +536,16 @@ async def get_artists(
     icon_id is "artist-<item_id>", not the bare id albums use: the two id spaces share the
     /music/{icon_id}/cover route (see _fetch_real_item_art).
     """
-    limit = quantity if quantity is not None else 500
-    items = await mass.music.artists.library_items(
-        limit=limit,
-        offset=index,
+    return await _library_page(
+        mass.music.artists,
+        partial(_rows, _artist_row, mark_unavailable=False),
+        index=index,
+        quantity=quantity,
         search=search,
-        summary=False,
-        favorite=True if favorite_only else None,
+        favorite_only=favorite_only,
+        window_style="home_menu",
+        base_actions=ARTIST_LIST_BASE_ACTIONS,
     )
-    if search:
-        # library_count() has no search param, so the count is what was fetched; a match set larger
-        # than `limit` is undercounted.
-        total = len(items)
-    else:
-        total = await mass.music.artists.library_count(favorite_only=favorite_only)
-    item_loop = [
-        {
-            "text": item.name,
-            "type": "playlist",
-            "commonParams": {"artist_id": str(item.item_id)},
-            "textkey": item.name[0].upper() if item.name else "",
-            "icon": f"music/artist-{item.item_id}/cover",
-            "icon-id": f"artist-{item.item_id}",
-            "presetParams": {
-                "favorites_type": "playlist",
-                "favorites_title": item.name,
-                "favorites_url": f"db:contributor.name={item.name.replace(' ', '%20')}",
-                "icon": f"music/artist-{item.item_id}/cover",
-            },
-        }
-        for item in items
-    ]
-    return {
-        "count": total,
-        "offset": index,
-        "window": {"windowStyle": "home_menu"},
-        "base": {"actions": ARTIST_LIST_BASE_ACTIONS},
-        "item_loop": item_loop,
-    }
 
 
 def _all_track_rows(items: list[Any], index: int = 0) -> list[dict[str, Any]]:
@@ -485,26 +591,16 @@ async def get_all_tracks(
     track's art source, and tracks with no album fall through to the placeholder. Row text is
     "Title\nArtist".
     """
-    limit = quantity if quantity is not None else 500
-    items = await mass.music.tracks.library_items(
-        limit=limit,
-        offset=index,
+    return await _library_page(
+        mass.music.tracks,
+        _all_track_rows,
+        index=index,
+        quantity=quantity,
         search=search,
-        summary=False,
-        favorite=True if favorite_only else None,
+        favorite_only=favorite_only,
+        window_style="icon_list",
+        base_actions=tracks_base_actions(kwargs, index, quantity),
     )
-    if search:
-        total = len(items)  # library_count() has no search param
-    else:
-        total = await mass.music.tracks.library_count(favorite_only=favorite_only)
-    item_loop = _all_track_rows(items, index)
-    return {
-        "count": total,
-        "offset": index,
-        "window": {"windowStyle": "icon_list"},
-        "base": {"actions": tracks_base_actions(kwargs, index, quantity)},
-        "item_loop": item_loop,
-    }
 
 
 async def get_albums(
@@ -526,54 +622,25 @@ async def get_albums(
     "textkey" (first letter, for the alphabet scroll bar) and "presetParams" so albums can be
     favorited from here.
     """
-    if artist_id is not None:
-        albums = await mass.music.artists.albums(artist_id, "library")
-        window, total, offset = _paginate(albums, index, quantity)
-    else:
-        limit = quantity if quantity is not None else 500
-        window = await mass.music.albums.library_items(
-            limit=limit,
-            offset=index,
+    if artist_id is None:
+        return await _library_page(
+            mass.music.albums,
+            partial(_rows, partial(_album_row, mixed=True)),
+            index=index,
+            quantity=quantity,
             search=search,
-            summary=False,
-            favorite=True if favorite_only else None,
+            favorite_only=favorite_only,
+            window_style="icon_list",
+            base_actions=albums_base_actions(kwargs),
         )
-        if search:
-            total = len(window)  # library_count() has no search param
-        else:
-            total = await mass.music.albums.library_count(favorite_only=favorite_only)
-        offset = index
-    item_loop = []
-    for album in window:
-        item = {
-            "text": album.name,
-            "type": "playlist",
-            "commonParams": {"album_id": str(album.item_id), "performance": ""},
-            "icon": f"music/{album.item_id}/cover",
-            "icon-id": str(album.item_id),
-        }
-        if artist_id is None:
-            artist_str = album.artist_str
-            if artist_str:
-                item["text"] = f"{album.name}\n{artist_str}"
-            item["textkey"] = album.name[0].upper() if album.name else ""
-            favorites_url = f"db:album.title={urllib.parse.quote(album.name)}"
-            if artist_str:
-                favorites_url += f"&contributor.name={urllib.parse.quote(artist_str)}"
-            item["presetParams"] = {
-                "icon": item["icon"],
-                "favorites_title": album.name,
-                "favorites_url": favorites_url,
-                "favorites_type": "playlist",
-            }
-        item_loop.append(item)
-    _disable_unavailable(item_loop, window)
+    albums = await mass.music.artists.albums(artist_id, "library")
+    window, total, offset = _paginate(albums, index, quantity)
     return {
         "count": total,
         "offset": offset,
-        "window": {"windowStyle": "home_menu" if artist_id else "icon_list"},
+        "window": {"windowStyle": "home_menu"},
         "base": {"actions": albums_base_actions(kwargs)},
-        "item_loop": item_loop,
+        "item_loop": _rows(partial(_album_row, mixed=False), window),
     }
 
 
@@ -838,43 +905,16 @@ async def get_playlists(
 
     icon_id is "playlist-<item_id>" (see _fetch_real_item_art).
     """
-    limit = quantity if quantity is not None else 500
-    items = await mass.music.playlists.library_items(
-        limit=limit,
-        offset=index,
+    return await _library_page(
+        mass.music.playlists,
+        partial(_rows, _playlist_row),
+        index=index,
+        quantity=quantity,
         search=search,
-        summary=False,
-        favorite=True if favorite_only else None,
+        favorite_only=favorite_only,
+        window_style="icon_list",
+        base_actions=playlists_base_actions(kwargs),
     )
-    if search:
-        total = len(items)  # library_count() has no search param
-    else:
-        total = await mass.music.playlists.library_count(favorite_only=favorite_only)
-    item_loop = [
-        {
-            "text": item.name,
-            "type": "playlist",
-            "commonParams": {"playlist_id": str(item.item_id)},
-            "textkey": item.name[0].upper() if item.name else "",
-            "icon": f"music/playlist-{item.item_id}/cover",
-            "icon-id": f"playlist-{item.item_id}",
-            "presetParams": {
-                "favorites_type": "playlist",
-                "favorites_title": item.name,
-                "favorites_url": item.uri,
-                "icon": f"music/playlist-{item.item_id}/cover",
-            },
-        }
-        for item in items
-    ]
-    _disable_unavailable(item_loop, items)
-    return {
-        "count": total,
-        "offset": index,
-        "window": {"windowStyle": "icon_list"},
-        "base": {"actions": playlists_base_actions(kwargs)},
-        "item_loop": item_loop,
-    }
 
 
 async def get_playlist_tracks(
@@ -940,43 +980,16 @@ async def get_radio_stations(
     track rows (tracks_base_actions sending a "uri"). icon_id is "radio-<item_id>" (see
     _fetch_real_item_art).
     """
-    limit = quantity if quantity is not None else 500
-    items = await mass.music.radio.library_items(
-        limit=limit,
-        offset=index,
+    return await _library_page(
+        mass.music.radio,
+        partial(_rows, _radio_row),
+        index=index,
+        quantity=quantity,
         search=search,
-        summary=False,
-        favorite=True if favorite_only else None,
+        favorite_only=favorite_only,
+        window_style="icon_list",
+        base_actions=tracks_base_actions(kwargs),
     )
-    if search:
-        total = len(items)  # library_count() has no search param
-    else:
-        total = await mass.music.radio.library_count(favorite_only=favorite_only)
-    item_loop = [
-        {
-            "text": item.name,
-            "type": "audio",
-            "style": "itemplay",
-            "goAction": "play",
-            "commonParams": {"uri": item.uri},
-            "icon": f"music/radio-{item.item_id}/cover",
-            "icon-id": f"radio-{item.item_id}",
-            "presetParams": {
-                "favorites_type": "audio",
-                "favorites_title": item.name,
-                "favorites_url": item.uri,
-            },
-        }
-        for item in items
-    ]
-    _disable_unavailable(item_loop, items)
-    return {
-        "count": total,
-        "offset": index,
-        "window": {"windowStyle": "icon_list"},
-        "base": {"actions": tracks_base_actions(kwargs)},
-        "item_loop": item_loop,
-    }
 
 
 async def get_audiobooks(
@@ -994,43 +1007,16 @@ async def get_audiobooks(
     scoped to a MA user session, which these in-process calls don't have, so it is likely empty
     here. icon_id is "audiobook-<item_id>" (see _fetch_real_item_art).
     """
-    limit = quantity if quantity is not None else 500
-    items = await mass.music.audiobooks.library_items(
-        limit=limit,
-        offset=index,
+    return await _library_page(
+        mass.music.audiobooks,
+        partial(_rows, _audiobook_row),
+        index=index,
+        quantity=quantity,
         search=search,
-        summary=False,
-        favorite=True if favorite_only else None,
+        favorite_only=favorite_only,
+        window_style="icon_list",
+        base_actions=tracks_base_actions(kwargs),
     )
-    if search:
-        total = len(items)  # library_count() has no search param
-    else:
-        total = await mass.music.audiobooks.library_count(favorite_only=favorite_only)
-    item_loop = [
-        {
-            "text": item.name,
-            "type": "audio",
-            "style": "itemplay",
-            "goAction": "play",
-            "commonParams": {"uri": item.uri},
-            "icon": f"music/audiobook-{item.item_id}/cover",
-            "icon-id": f"audiobook-{item.item_id}",
-            "presetParams": {
-                "favorites_type": "audio",
-                "favorites_title": item.name,
-                "favorites_url": item.uri,
-            },
-        }
-        for item in items
-    ]
-    _disable_unavailable(item_loop, items)
-    return {
-        "count": total,
-        "offset": index,
-        "window": {"windowStyle": "icon_list"},
-        "base": {"actions": tracks_base_actions(kwargs)},
-        "item_loop": item_loop,
-    }
 
 
 async def get_podcasts(
@@ -1046,43 +1032,16 @@ async def get_podcasts(
 
     A flat list like get_playlists(). icon_id is "podcast-<id>" (see _fetch_real_item_art).
     """
-    limit = quantity if quantity is not None else 500
-    items = await mass.music.podcasts.library_items(
-        limit=limit,
-        offset=index,
+    return await _library_page(
+        mass.music.podcasts,
+        partial(_rows, _podcast_row),
+        index=index,
+        quantity=quantity,
         search=search,
-        summary=False,
-        favorite=True if favorite_only else None,
+        favorite_only=favorite_only,
+        window_style="icon_list",
+        base_actions=playlists_base_actions(kwargs),
     )
-    if search:
-        total = len(items)  # library_count() has no search param
-    else:
-        total = await mass.music.podcasts.library_count(favorite_only=favorite_only)
-    item_loop = [
-        {
-            "text": item.name,
-            "type": "playlist",
-            "commonParams": {"podcast_id": str(item.item_id)},
-            "textkey": item.name[0].upper() if item.name else "",
-            "icon": f"music/podcast-{item.item_id}/cover",
-            "icon-id": f"podcast-{item.item_id}",
-            "presetParams": {
-                "favorites_type": "playlist",
-                "favorites_title": item.name,
-                "favorites_url": item.uri,
-                "icon": f"music/podcast-{item.item_id}/cover",
-            },
-        }
-        for item in items
-    ]
-    _disable_unavailable(item_loop, items)
-    return {
-        "count": total,
-        "offset": index,
-        "window": {"windowStyle": "icon_list"},
-        "base": {"actions": playlists_base_actions(kwargs)},
-        "item_loop": item_loop,
-    }
 
 
 async def get_podcast_episodes(

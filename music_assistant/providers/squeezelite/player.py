@@ -525,8 +525,8 @@ class SqueezelitePlayer(Player):
         quality_fields = self._build_quality_metadata_fields(audio_format)
         # "duration" is the real track length, not media.stream_duration, which shrinks
         # after a seek on transports whose stream restarts at position zero.
-        # "elapsed_offset" is how far into the track this stream's position 0 is; cli.py
-        # adds it to the stream-relative position it reports.
+        # "elapsed_offset" (declared on aioslimproto's MediaMetadata) is how far into the track
+        # this stream's position 0 is; cli.py adds it to the stream-relative position it reports.
         real_duration = (
             media.duration if media.duration is not None else (media.stream_duration or 0)
         )

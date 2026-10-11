@@ -159,3 +159,118 @@ def test_static_icon_resolves_exact_size_then_master_and_misses_cleanly() -> Non
     assert path is not None
     assert path.name == "AlbumArtists_225x225_m.png"
     assert bl._resolve_static_icon_path("NoSuchIcon_225x225_m.png") is None
+
+
+def test_preset_actions_cover_all_ten_keys() -> None:
+    """Every list can save a row as a preset on any of the ten keys."""
+    actions = bl._preset_actions()
+    assert list(actions) == [f"set-preset-{n}" for n in range(10)]
+    assert actions["set-preset-3"]["cmd"] == ["jivefavorites", "set_preset", "key:3"]
+    assert all(a["itemsParams"] == "presetParams" for a in actions.values())
+    assert set(actions) <= set(bl.ARTIST_LIST_BASE_ACTIONS)
+
+
+def test_album_and_playlist_templates_differ_only_in_the_info_command() -> None:
+    """Both open the container's tracks and share every other action."""
+    albums = bl.albums_base_actions({"artist_id": 4})
+    playlists = bl.playlists_base_actions({"artist_id": 4})
+    assert albums["more"]["cmd"] == ["albuminfo", "items"]
+    assert playlists["more"]["cmd"] == ["playlistinfo", "items"]
+    assert albums["go"]["params"] == {"artist_id": "4", "mode": "tracks"}
+    albums["more"]["cmd"] = playlists["more"]["cmd"]
+    assert albums == playlists
+    assert {"go", "more", "play", "add", "add-hold", "set-preset-9"} <= set(albums)
+
+
+def test_rows_marks_unavailable_items_only_when_asked() -> None:
+    """Each item becomes a row; unavailable ones get the (offline) treatment unless disabled."""
+    items = [_item("A"), _item("B", available=False)]
+
+    def row(item: Any) -> dict[str, Any]:
+        return {"text": item.name}
+
+    marked = bl._rows(row, items)
+    assert [r["text"] for r in marked] == ["A", "(offline) B"]
+    plain = bl._rows(row, items, mark_unavailable=False)
+    assert [r["text"] for r in plain] == ["A", "B"]
+
+
+def test_album_row_adds_artist_and_favorite_data_only_in_the_mixed_list() -> None:
+    """The list of all albums shows the artist and can favorite; one artist's albums do not."""
+    album = _item("Great Hits", item_id=3, artist_str="The Band")
+    mixed = bl._album_row(album, mixed=True)
+    assert mixed["text"] == "Great Hits\nThe Band"
+    assert mixed["textkey"] == "G"
+    assert (
+        mixed["presetParams"]["favorites_url"]
+        == "db:album.title=Great%20Hits&contributor.name=The%20Band"
+    )
+    assert mixed["commonParams"] == {"album_id": "3", "performance": ""}
+    single = bl._album_row(album, mixed=False)
+    assert single["text"] == "Great Hits"
+    assert "textkey" not in single
+    assert "presetParams" not in single
+
+
+class _FakeController:
+    """A media controller that records how it was asked for items."""
+
+    def __init__(self, items: list[Any], count: int) -> None:
+        self.items = items
+        self.count = count
+        self.calls: list[dict[str, Any]] = []
+
+    async def library_items(self, **kwargs: Any) -> list[Any]:
+        self.calls.append(kwargs)
+        return self.items
+
+    async def library_count(self, *, favorite_only: bool) -> int:
+        self.calls.append({"count_favorite_only": favorite_only})
+        return self.count
+
+
+async def test_library_page_counts_from_the_library_without_a_search() -> None:
+    """The total comes from library_count(); the favorite filter reaches both calls."""
+    controller = _FakeController([_item("A")], count=42)
+    page = await bl._library_page(
+        controller,
+        lambda items, index: [{"text": i.name, "index": index} for i in items],
+        index=5,
+        quantity=10,
+        search=None,
+        favorite_only=True,
+        window_style="icon_list",
+        base_actions={"go": {}},
+    )
+    assert page["count"] == 42
+    assert page["offset"] == 5
+    assert page["window"] == {"windowStyle": "icon_list"}
+    assert page["base"] == {"actions": {"go": {}}}
+    assert page["item_loop"] == [{"text": "A", "index": 5}]
+    assert controller.calls[0] == {
+        "limit": 10,
+        "offset": 5,
+        "search": None,
+        "summary": False,
+        "favorite": True,
+    }
+    assert controller.calls[1] == {"count_favorite_only": True}
+
+
+async def test_library_page_counts_what_was_fetched_for_a_search() -> None:
+    """With a search there is no count to ask for, so the fetched items are the total."""
+    controller = _FakeController([_item("A"), _item("B")], count=99)
+    page = await bl._library_page(
+        controller,
+        lambda items, _index: [{"text": i.name} for i in items],
+        index=0,
+        quantity=None,
+        search="a",
+        favorite_only=False,
+        window_style="home_menu",
+        base_actions={},
+    )
+    assert page["count"] == 2
+    assert controller.calls[0]["limit"] == 500
+    assert controller.calls[0]["favorite"] is None
+    assert len(controller.calls) == 1
