@@ -77,6 +77,8 @@ from music_assistant_models.errors import MediaNotFoundError, MusicAssistantErro
 from music_assistant.controllers.player_queues.helpers import committed_index
 from music_assistant.helpers import datetime as mass_datetime
 
+from . import haextras  # HA-EXTRAS
+
 if TYPE_CHECKING:
     from aioslimproto import SlimServer
     from aioslimproto.cli import SlimCLICommand
@@ -1624,7 +1626,14 @@ class BrowseLibraryHandler:
             presets = await self._slimproto.cli._handle_menu(slim_command.player_id)
             menu["item_loop"] = [*menu["item_loop"], *presets["item_loop"]]
             menu["count"] += len(presets["item_loop"])
+            haextras_items = haextras.menu_items(self.mass)  # HA-EXTRAS
+            menu["item_loop"] += haextras_items  # HA-EXTRAS
+            menu["count"] += len(haextras_items)  # HA-EXTRAS
             return menu
+
+        haextras_reply = await haextras.handle(self.mass, slim_command)  # HA-EXTRAS
+        if haextras_reply is not None:  # HA-EXTRAS
+            return haextras_reply  # HA-EXTRAS
 
         handlers = {
             "playlistcontrol": self._handle_playlistcontrol,
