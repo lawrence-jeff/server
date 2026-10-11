@@ -1,0 +1,97 @@
+"""Tests for HA Extras, the optional Home Assistant menu of the squeezelite provider."""
+
+from __future__ import annotations
+
+from types import SimpleNamespace
+from typing import Any
+from unittest.mock import MagicMock
+
+from music_assistant.providers.squeezelite import haextras
+
+
+def _state(entity_id: str, state: str, **attributes: Any) -> dict[str, Any]:
+    return {"entity_id": entity_id, "state": state, "attributes": attributes}
+
+
+def _mass(*, enabled: bool, ha: Any = None) -> MagicMock:
+    mass = MagicMock()
+    mass.config.get_raw_player_config_value.return_value = enabled
+    mass.get_provider.return_value = ha
+    return mass
+
+
+def test_value_formats_on_off_numbers_and_units() -> None:
+    """On and off are upper case, numbers get one decimal, anything else is shown as it is."""
+    assert haextras._value(_state("light.a", "on")) == "ON"
+    assert haextras._value(_state("sensor.t", "73.46", unit_of_measurement="°F")) == "73.5 °F"
+    assert haextras._value(_state("sensor.n", "5.0")) == "5"
+    assert haextras._value(_state("sensor.s", "idle")) == "idle"
+
+
+def test_icon_prefers_device_class_then_kind_then_a_fallback() -> None:
+    """An entity's icon comes from its device class, else its domain, else a generic one."""
+    assert haextras._icon_name(_state("sensor.t", "1", device_class="temperature")) == "thermometer"
+    assert haextras._icon_name(_state("light.a", "on")) == "lightbulb"
+    assert haextras._icon_name(_state("sensor.x", "1")) == "gauge"
+    assert haextras._icon_name(_state("vacuum.v", "docked")) == "information"
+    # every icon the code can pick has a file
+    names = {*haextras.DOMAIN_ICONS.values(), *haextras.CLASS_ICONS.values(), "information"}
+    assert all((haextras.ICON_DIR / f"{name}.png").is_file() for name in names)
+
+
+def test_row_has_a_default_action_and_an_optional_icon() -> None:
+    """A row without an action only closes the window; an icon is a path the server serves."""
+    row = haextras._row("Text")
+    assert row["actions"]["go"]["cmd"] == ["jiveblankcommand"]
+    assert "icon" not in row
+    assert haextras._row("Text", icon="cctv")["icon"] == "haextras/icons/cctv.png"
+
+
+def test_listing_uses_tiles_only_when_rows_have_icons() -> None:
+    """Rows with icons give an icon_list window, others a plain list."""
+    plain = haextras._listing([haextras._row("a")])
+    tiles = haextras._listing([haextras._row("a", icon="cctv")])
+    assert plain["window"]["windowStyle"] == "text_list"
+    assert tiles["window"]["windowStyle"] == "icon_list"
+    assert tiles["count"] == 1
+
+
+def test_state_row_puts_the_value_on_a_second_line() -> None:
+    """Name on the first line, value on the second, with the icon for the entity."""
+    row = haextras._state_row(_state("light.porch", "on", friendly_name="Porch"), {})
+    assert row["text"] == "Porch\nON"
+    assert row["icon"] == "haextras/icons/lightbulb.png"
+
+
+def test_dashboard_entities_are_recognised_by_an_address_state() -> None:
+    """An entity whose state is a web address stands in for a dashboard."""
+    assert haextras._is_dashboard(_state("sensor.d", "http://host:10000/lovelace/0"))
+    assert haextras._is_dashboard(_state("sensor.d", "HTTPS://host/x"))
+    assert not haextras._is_dashboard(_state("sensor.t", "21.5"))
+
+
+def test_picture_entry_uses_a_random_key_and_the_size_placeholder() -> None:
+    """The address carries a key, not the entity name, and the viewer adds the size."""
+    entry = haextras._picture_entry("camera.door", "Door")
+    assert entry["caption"] == "Door"
+    assert "{resizeParams}" in entry["image"]
+    assert "camera.door" not in entry["image"]
+    key = entry["image"].rsplit("/", 1)[1].split("{")[0]
+    assert haextras._keys[key][0] == "camera.door"
+
+
+async def test_menu_entry_is_hidden_unless_the_device_setting_is_ticked() -> None:
+    """Without the setting, or without Home Assistant, there is no entry and no screensaver."""
+    assert await haextras.menu_items(_mass(enabled=False, ha=MagicMock()), "p") == []
+    assert await haextras.menu_items(_mass(enabled=True, ha=None), "p") == []
+
+
+async def test_commands_are_refused_when_the_device_setting_is_not_ticked() -> None:
+    """Other commands pass through; HA Extras commands are answered with a notice."""
+    mass = _mass(enabled=False, ha=MagicMock())
+    other = SimpleNamespace(command="status", player_id="p", kwargs={})
+    assert await haextras.handle(mass, other) is None
+    command = SimpleNamespace(command="haextrasset", player_id="p", kwargs={"entity": "light.a"})
+    reply = await haextras.handle(mass, command)
+    assert reply is not None
+    assert "not enabled" in reply["item_loop"][0]["text"]
