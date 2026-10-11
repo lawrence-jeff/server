@@ -44,6 +44,7 @@ from music_assistant.models.player import (
     PlayerMedia,
 )
 
+from . import haextras  # HA-EXTRAS
 from .constants import (
     CONF_ENTRY_DISPLAY,
     CONF_ENTRY_VISUALIZATION,
@@ -208,6 +209,7 @@ class SqueezelitePlayer(Player):
             CONF_ENTRY_VISUALIZATION,
             CONF_ENTRY_HTTP_PROFILE_FORCED_2,
             CONF_ENTRY_PREFER_WAV_FOR_LIVE_SOURCES_DEFAULT_ENABLED,
+            haextras.CONFIG_ENTRY,  # HA-EXTRAS
         ]
 
     async def volume_set(self, volume_level: int) -> None:

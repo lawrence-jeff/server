@@ -42,6 +42,8 @@ from typing import TYPE_CHECKING, Any
 
 import aiohttp
 from aiohttp import web
+from music_assistant_models.config_entries import ConfigEntry
+from music_assistant_models.enums import ConfigEntryType
 from PIL import Image
 
 if TYPE_CHECKING:
@@ -52,6 +54,20 @@ if TYPE_CHECKING:
     from music_assistant.mass import MusicAssistant
 
 LOGGER = logging.getLogger(f"{__package__}.haextras")
+
+# The per-device setting (a checkbox in the player's settings) that turns HA Extras on for a device.
+CONF_EXPOSE = "expose_ha_extras"
+CONFIG_ENTRY = ConfigEntry(
+    key=CONF_EXPOSE,
+    type=ConfigEntryType.BOOLEAN,
+    label="Expose HA Entities to Device (HA Extras)",
+    description=(
+        'Show the Home Assistant entities that carry the label "HA Extras" on this device, '
+        "and let it control them. Restart the device after changing this."
+    ),
+    default_value=False,
+    required=False,
+)
 
 # The Home Assistant label that exposes an entity here (compared ignoring case).
 LABEL_NAME = "HA Extras"
@@ -118,10 +134,19 @@ def _hass(mass: MusicAssistant) -> Any:
         return None
 
 
-async def menu_items(mass: MusicAssistant) -> list[dict[str, Any]]:
-    """Return the entry for the home menu, or nothing when Home Assistant is not available."""
+def _enabled(mass: MusicAssistant, player_id: str) -> bool:
+    """Return True if the device's HA Extras setting is ticked."""
+    return bool(mass.config.get_raw_player_config_value(player_id, CONF_EXPOSE, False))
+
+
+async def menu_items(mass: MusicAssistant, player_id: str) -> list[dict[str, Any]]:
+    """
+    Return the entry for the home menu.
+
+    Nothing when the device's setting is not ticked or Home Assistant is not available.
+    """
     ha = _hass(mass)
-    if ha is None:
+    if ha is None or not _enabled(mass, player_id):
         return []
     return [
         {
@@ -460,6 +485,8 @@ async def handle(mass: MusicAssistant, slim_command: SlimCLICommand) -> dict[str
     ha = _hass(mass)
     if ha is None:
         return _listing([_row("Home Assistant is not connected")])
+    if not _enabled(mass, slim_command.player_id):
+        return _listing([_row("HA Extras is not enabled for this device")])
     kwargs = slim_command.kwargs
     try:
         if slim_command.command == "haextras":
