@@ -252,8 +252,24 @@ def _listing(rows: list[dict[str, Any]]) -> dict[str, Any]:
 # -- the entities that carry the label ------------------------------------------------------------
 
 
+# Looking up the label costs two Home Assistant round trips, and opening a panel or loading the menu
+# needs it several times, so the answer is reused for this many seconds. Adding or removing the label
+# on an entity therefore takes up to this long to show (and to take effect).
+LABEL_CACHE_SECONDS = 10
+_label_cache: dict[str, tuple[float, list[str] | None]] = {}
+
+
 async def _labeled_entities(ha: Any) -> list[str] | None:
     """Return the ids of the entities that carry the label (None if the label does not exist)."""
+    now = time.monotonic()
+    if (cached := _label_cache.get("labeled")) and now - cached[0] < LABEL_CACHE_SECONDS:
+        return cached[1]
+    found = await _lookup_labeled_entities(ha)
+    _label_cache["labeled"] = (now, found)
+    return found
+
+
+async def _lookup_labeled_entities(ha: Any) -> list[str] | None:
     labels = await ha.hass.send_command("config/label_registry/list")
     wanted = {
         label["label_id"]

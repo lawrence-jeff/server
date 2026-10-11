@@ -95,3 +95,35 @@ async def test_commands_are_refused_when_the_device_setting_is_not_ticked() -> N
     reply = await haextras.handle(mass, command)
     assert reply is not None
     assert "not enabled" in reply["item_loop"][0]["text"]
+
+
+class _FakeHass:
+    """A Home Assistant connection that counts the commands it is sent."""
+
+    def __init__(self) -> None:
+        self.commands: list[str] = []
+
+    async def send_command(self, command: str) -> list[dict[str, Any]]:
+        self.commands.append(command)
+        if command == "config/label_registry/list":
+            return [{"label_id": "x", "name": "ha extras"}]
+        return [
+            {"entity_id": "light.b", "labels": ["x"]},
+            {"entity_id": "light.a", "labels": ["x", "y"]},
+            {"entity_id": "light.c", "labels": []},
+        ]
+
+
+async def test_labeled_entities_are_looked_up_once_within_the_cache_time() -> None:
+    """The label name is matched ignoring case, and repeat calls reuse the answer briefly."""
+    haextras._label_cache.clear()
+    ha = SimpleNamespace(hass=_FakeHass())
+    assert await haextras._labeled_entities(ha) == ["light.a", "light.b"]
+    assert await haextras._labeled_entities(ha) == ["light.a", "light.b"]
+    assert ha.hass.commands == ["config/label_registry/list", "config/entity_registry/list"]
+    # once the cache time has passed, Home Assistant is asked again
+    when, found = haextras._label_cache["labeled"]
+    haextras._label_cache["labeled"] = (when - haextras.LABEL_CACHE_SECONDS - 1, found)
+    await haextras._labeled_entities(ha)
+    assert len(ha.hass.commands) == 4
+    haextras._label_cache.clear()
