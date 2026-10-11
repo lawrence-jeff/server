@@ -117,6 +117,29 @@ def _context(kwargs: dict[str, Any]) -> dict[str, str]:
     return {k: str(kwargs[k]) for k in CONTEXT_KEYS if k in kwargs}
 
 
+_NO_ACTION = {"player": 0, "cmd": ["jiveblankcommand"]}
+_ROW_ACTIONS = ("go", "play", "add", "add-hold", "more")
+
+
+def _disable_unavailable(rows: list[dict[str, Any]], items: list[Any]) -> list[dict[str, Any]]:
+    """
+    Mark the rows of items that Music Assistant reports as not available.
+
+    Music Assistant greys these out (for example every station of a music provider that is
+    disabled or not signed in) and does not let them be chosen. The client has no greyed
+    style, so the row gets an "(offline)" prefix and every action does nothing, instead of
+    offering an item that would fail when chosen. rows and items are in the same order.
+    """
+    for row, item in zip(rows, items, strict=True):
+        if item.available:
+            continue
+        row["text"] = f"(offline) {row['text']}"
+        row["unavailable"] = 1
+        row["actions"] = {name: dict(_NO_ACTION) for name in _ROW_ACTIONS}
+        row.pop("goAction", None)
+    return rows
+
+
 def _paginate(
     items: list[Any], index: int | None, quantity: int | None
 ) -> tuple[list[Any], int, int]:
@@ -480,7 +503,7 @@ def _all_track_rows(items: list[Any], index: int = 0) -> list[dict[str, Any]]:
             row["icon"] = f"music/{item.album.item_id}/cover"
             row["icon-id"] = str(item.album.item_id)
         item_loop.append(row)
-    return item_loop
+    return _disable_unavailable(item_loop, items)
 
 
 async def get_all_tracks(
@@ -586,6 +609,7 @@ async def get_albums(
                 "favorites_type": "playlist",
             }
         item_loop.append(item)
+    _disable_unavailable(item_loop, window)
     return {
         "count": total,
         "offset": offset,
@@ -694,6 +718,7 @@ async def get_tracks(
             "playControlParams": {"xmlbrowserPlayControl": str(play_index)},
         }
         item_loop.append(row)
+    _disable_unavailable(item_loop, window)
     return {
         "count": total,
         "offset": offset,
@@ -873,6 +898,7 @@ async def get_playlists(
         }
         for item in items
     ]
+    _disable_unavailable(item_loop, items)
     return {
         # "icon_list" by analogy to the unfiltered Albums view; not checked against a
         # real LMS capture of Playlists.
@@ -986,6 +1012,7 @@ async def get_radio_stations(
         }
         for item in items
     ]
+    _disable_unavailable(item_loop, items)
     return {
         "count": total,
         "offset": index,
@@ -1046,6 +1073,7 @@ async def get_audiobooks(
         }
         for item in items
     ]
+    _disable_unavailable(item_loop, items)
     return {
         "count": total,
         "offset": index,
@@ -1102,6 +1130,7 @@ async def get_podcasts(
         }
         for item in items
     ]
+    _disable_unavailable(item_loop, items)
     return {
         "count": total,
         "offset": index,
@@ -1183,6 +1212,8 @@ def _standalone_actions(base_actions: dict[str, Any], item: dict[str, Any]) -> d
     track_id. Each action's referenced field (commonParams, addallParams or
     presetParams) is looked up on the item.
     """
+    if item.get("unavailable"):
+        return {name: dict(_NO_ACTION) for name in _ROW_ACTIONS}
     result = {}
     for key, action in base_actions.items():
         new_action = dict(action)
