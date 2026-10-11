@@ -449,6 +449,40 @@ async def get_artists(
     }
 
 
+def _all_track_rows(items: list[Any], index: int = 0) -> list[dict[str, Any]]:
+    """Return the two-line rows (title, then artist) of get_all_tracks() for the given tracks."""
+    item_loop = []
+    for i, item in enumerate(items):
+        text = item.name
+        if item.artist_str:
+            text = f"{item.name}\n{item.artist_str}"
+        play_index = index + i
+        row = {
+            "text": text,
+            "type": "audio",
+            "style": "itemplay",
+            "commonParams": {"track_id": str(item.item_id)},
+            "playallParams": {"play_index": play_index},
+            "presetParams": {
+                "favorites_type": "audio",
+                "favorites_title": item.name,
+                "favorites_url": item.uri,
+            },
+            # No goAction override - the base "go" action itself is now
+            # cmd:"add" unconditionally (see tracks_base_actions' own
+            # matching update), so there's no "load vs. show a menu"
+            # decision left to swap into a different action for. The
+            # goAction/playControlParams mechanism (and the staleness bug
+            # it had) only ever existed to make that decision - removed
+            # along with it, not left in as dead weight.
+        }
+        if item.album is not None:
+            row["icon"] = f"music/{item.album.item_id}/cover"
+            row["icon-id"] = str(item.album.item_id)
+        item_loop.append(row)
+    return item_loop
+
+
 async def get_all_tracks(
     mass: MusicAssistant,
     kwargs: dict[str, Any],
@@ -480,35 +514,7 @@ async def get_all_tracks(
         total = len(items)  # library_count() has no search= param - see get_artists' docstring
     else:
         total = await mass.music.tracks.library_count(favorite_only=favorite_only)
-    item_loop = []
-    for i, item in enumerate(items):
-        text = item.name
-        if item.artist_str:
-            text = f"{item.name}\n{item.artist_str}"
-        play_index = index + i
-        row = {
-            "text": text,
-            "type": "audio",
-            "style": "itemplay",
-            "commonParams": {"track_id": str(item.item_id)},
-            "playallParams": {"play_index": play_index},
-            "presetParams": {
-                "favorites_type": "audio",
-                "favorites_title": item.name,
-                "favorites_url": item.uri,
-            },
-            # No goAction override - the base "go" action itself is now
-            # cmd:"add" unconditionally (see tracks_base_actions' own
-            # matching update), so there's no "load vs. show a menu"
-            # decision left to swap into a different action for. The
-            # goAction/playControlParams mechanism (and the staleness bug
-            # it had) only ever existed to make that decision - removed
-            # along with it, not left in as dead weight.
-        }
-        if item.album is not None:
-            row["icon"] = f"music/{item.album.item_id}/cover"
-            row["icon-id"] = str(item.album.item_id)
-        item_loop.append(row)
+    item_loop = _all_track_rows(items, index)
     return {
         "count": total,
         "offset": index,
@@ -586,6 +592,58 @@ async def get_albums(
         "window": {"windowStyle": "home_menu" if artist_id else "icon_list"},
         "base": {"actions": albums_base_actions(kwargs)},
         "item_loop": item_loop,
+    }
+
+
+async def get_artist_all(
+    mass: MusicAssistant,
+    artist_id: str,
+    kwargs: dict[str, Any],
+    index: int = 0,
+    quantity: int | None = None,
+) -> dict[str, Any]:
+    """
+    Return everything in the library for one artist: albums, then tracks, then radio.
+
+    An artist can be in the library only through a track on someone else's album (a
+    featured artist), and then has no albums at all: the albums-only view showed nothing.
+    So the albums come first, as before, then the artist's tracks that are not on one of
+    those albums, then the library radio stations whose name contains the artist's name
+    (services such as Pandora file artist stations under Radio).
+
+    Rows reuse each type's row-building with the same per-row _standalone_actions treatment
+    as get_favorites_all(), so each row does what it does in the single-type lists.
+    """
+    artist = await mass.music.artists.get_library_item(artist_id)
+    albums, tracks = await asyncio.gather(
+        mass.music.artists.albums(artist_id, "library"),
+        mass.music.artists.tracks(artist_id, "library"),
+    )
+    album_ids = {str(album.item_id) for album in albums}
+    extra_tracks = [
+        track
+        for track in tracks
+        if track.album is None or str(track.album.item_id) not in album_ids
+    ]
+    albums_reply = await get_albums(mass, artist_id, kwargs, 0, None)
+    stations = await get_radio_stations(mass, kwargs, 0, 50, artist.name)
+    wanted = artist.name.casefold()
+    station_rows = [row for row in stations["item_loop"] if wanted in row["text"].casefold()]
+    combined = []
+    for rows, actions in (
+        (albums_reply["item_loop"], albums_reply["base"]["actions"]),
+        (_all_track_rows(extra_tracks), tracks_base_actions(kwargs)),
+        (station_rows, stations["base"]["actions"]),
+    ):
+        for item in rows:
+            item["actions"] = _standalone_actions(actions, item)
+            combined.append(item)
+    window, total, offset = _paginate(combined, index, quantity)
+    return {
+        "count": total,
+        "offset": offset,
+        "window": {"windowStyle": "icon_list"},
+        "item_loop": window,
     }
 
 
@@ -1696,6 +1754,8 @@ class BrowseLibraryHandler:
         if mode == "albums":
             artist_id = kwargs.get("artist_id")
             artist_id = str(artist_id) if artist_id is not None else None
+            if artist_id is not None and not search and not favorite_only:
+                return await get_artist_all(self.mass, artist_id, kwargs, index, quantity)
             return await get_albums(
                 self.mass, artist_id, kwargs, index, quantity, search, favorite_only
             )
