@@ -1822,6 +1822,32 @@ class BrowseLibraryHandler:
 
     async def _handle_playlistcontrol(self, slim_command: SlimCLICommand) -> None:
         """
+        Run _playlistcontrol, and tell the device when Music Assistant cannot play the item.
+
+        Without this a failure (for example a station whose music provider is not loaded)
+        only reached the server log, and a tap on the device appeared to do nothing.
+        """
+        try:
+            await self._playlistcontrol(slim_command)
+        except MusicAssistantError as err:
+            logger.warning("playlistcontrol could not play the item: %s", err)
+            title = ""
+            # The client fails to show a popup that has no icon, so the item's own artwork is
+            # used when it can be found, and a menu icon otherwise.
+            icon_id = "html/images/browselibrary.png"
+            try:
+                title, icon_id = await self._popup_details(slim_command.kwargs.get("uri"), None)
+            except Exception:  # the item that failed may not be describable either
+                title = ""
+            self._slimproto.cli.push_show_briefly(
+                slim_command.player_id,
+                text=["Can't play", title or str(err)],
+                icon_id=icon_id,
+                duration_ms=5000,
+            )
+
+    async def _playlistcontrol(self, slim_command: SlimCLICommand) -> None:
+        """
         Handle playlistcontrol, which JiveLite sends for play/add/insert on a browse item.
 
         Sent by the "go"/"play"/"add"/"add-hold" actions in the base action templates above.
