@@ -1547,16 +1547,18 @@ ALARM_NOT_SUPPORTED = [
         "homeMenuText": "Alarm Clock",
         "isANode": 1,
         "weight": 100,
-        # text_only: the children open as a list, not as the grid tiles a node uses by default,
+        # text_list: the children open as a list, not as the grid tiles a node uses by default,
         # which squeezed a single line into one narrow tile on the wide JiveLite screen.
-        "windowStyle": "text_only",
+        "windowStyle": "text_list",
     },
     {
         "node": "settingsAlarm",
         "id": "settingsAlarmNotSupported",
         "text": "Not Supported - HA can trigger alarm via automation",
-        "style": "itemNoAction",
         "weight": 1,
+        # An ordinary row whose go action is the server's no-op that then closes the window:
+        # a row with no action at all left JiveLite's window unable to be closed.
+        "actions": {"go": {"player": 0, "cmd": ["jiveblankcommand"], "nextWindow": "parent"}},
     },
 ]
 
