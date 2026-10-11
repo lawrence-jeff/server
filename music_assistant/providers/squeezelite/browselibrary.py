@@ -1535,9 +1535,31 @@ NOW_PLAYING_ITEM = {
 }
 
 
+# The alarm button of a device (the UE radios have one) opens the menu entry whose id is
+# settingsAlarm, and does nothing at all when there is none. Alarms are not supported, so the
+# entry is a node with a single line saying so, instead of a button that seems broken.
+ALARM_NOT_SUPPORTED = [
+    {
+        "node": "settings",
+        "id": "settingsAlarm",
+        "text": "Alarm Clock",
+        "homeMenuText": "Alarm Clock",
+        "isANode": 1,
+        "weight": 100,
+    },
+    {
+        "node": "settingsAlarm",
+        "id": "settingsAlarmNotSupported",
+        "text": "Not supported",
+        "style": "itemNoAction",
+        "weight": 1,
+    },
+]
+
+
 def get_menu(index: int = 0, quantity: int = 100) -> dict[str, Any]:
-    """Return the home menu: the Now Playing shortcut and the My Music node."""
-    item_loop = [NOW_PLAYING_ITEM, *MY_MUSIC_NODE]
+    """Return the home menu: the Now Playing shortcut, the My Music node and the alarm entry."""
+    item_loop = [NOW_PLAYING_ITEM, *MY_MUSIC_NODE, *ALARM_NOT_SUPPORTED]
     window, total, offset = _paginate(item_loop, index, quantity)
     return {"item_loop": window, "offset": offset, "count": total}
 
