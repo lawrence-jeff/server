@@ -1537,7 +1537,8 @@ NOW_PLAYING_ITEM = {
 
 # The alarm button of a device (the UE radios have one) opens the menu entry whose id is
 # settingsAlarm, and does nothing at all when there is none. Alarms are not supported, so the
-# entry is a node with a single line saying so, instead of a button that seems broken.
+# entry is a node with a single line saying so (and where an alarm can come from), instead of a
+# button that seems broken.
 ALARM_NOT_SUPPORTED = [
     {
         "node": "settings",
@@ -1546,11 +1547,14 @@ ALARM_NOT_SUPPORTED = [
         "homeMenuText": "Alarm Clock",
         "isANode": 1,
         "weight": 100,
+        # text_only: the children open as a list, not as the grid tiles a node uses by default,
+        # which squeezed a single line into one narrow tile on the wide JiveLite screen.
+        "windowStyle": "text_only",
     },
     {
         "node": "settingsAlarm",
         "id": "settingsAlarmNotSupported",
-        "text": "Not supported",
+        "text": "Not Supported - HA can trigger alarm via automation",
         "style": "itemNoAction",
         "weight": 1,
     },
