@@ -603,9 +603,8 @@ class SqueezelitePlayer(Player):
                 ),
             )
 
-        # queue_item/audio_format may not be resolvable yet when the metadata above is
-        # built (the first status response lacked the quality fields), so re-check at
-        # increasing intervals; each is a no-op if nothing changed or the track changed.
+        # queue_item/audio_format may not be resolvable yet when the metadata above is built, so re-
+        # check at increasing intervals; each is a no-op if nothing changed or the track changed.
         for delay in (1.0, 3.0, 6.0):
             self.mass.call_later(delay, self._recheck_quality_metadata(slimplayer, media))
 
@@ -620,9 +619,8 @@ class SqueezelitePlayer(Player):
             "bitrate": f"{audio_format.bit_rate}kbps"
             if audio_format and audio_format.bit_rate
             else "",
-            # samplesize only for lossless content: LMS omits it for lossy formats,
-            # while AudioFormat.bit_depth always has a value (default 16), which showed
-            # a spurious "16 bits" on mp3.
+            # samplesize only for lossless content: LMS omits it for lossy formats, while
+            # AudioFormat.bit_depth always has a value (default 16).
             "samplesize": (
                 str(audio_format.bit_depth)
                 if audio_format and audio_format.content_type.is_lossless()

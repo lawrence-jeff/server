@@ -1,30 +1,30 @@
 """
-HA Extras: Home Assistant things on the menu of a Squeezebox-style client.
+HA Extras: Home Assistant entities on the menu of a Squeezebox-style client.
 
-An "HA Extras" entry lists panels of Home Assistant entities: cameras and dashboards (choosing one shows a
-snapshot full screen), controls (lights, switches, receivers: choosing one asks Turn On, Turn Off or Cancel),
-scenes (choosing one asks Run or Cancel) and status rows
-(sensors and the like: "Name: value"). Only entities that carry the Home Assistant label
-named LABEL_NAME are shown or controllable, like the label that exposes entities to a voice
-assistant. This has nothing to do with music, so it is kept apart from the rest of the
-provider and is meant to be removable:
+An "HA Extras" entry under Settings lists panels of Home Assistant entities: cameras and dashboards
+(shown full screen in the client's Image Viewer), controls (lights, switches, receivers: Turn On /
+Turn Off / Cancel), scenes and scripts (Run / Cancel) and read-only status rows. Only entities that
+carry the Home Assistant label named LABEL_NAME are shown or controllable, and only on devices whose
+"Expose HA Entities to Device (HA Extras)" setting is ticked. This has nothing to do with music, so
+it is kept apart from the rest of the provider and is meant to be removable:
 
-    To remove HA Extras, delete this file, static/HAExtras/, and the lines tagged "HA-EXTRAS"
-    in browselibrary.py, provider.py and reinject.sh (grep -rn HA-EXTRAS). Nothing else refers to it.
+    To remove HA Extras, delete this file, static/HAExtras/, and the lines tagged "HA-EXTRAS" in
+    browselibrary.py, player.py, provider.py and reinject.sh (grep -rn HA-EXTRAS). Nothing else
+    refers to it.
 
-It uses Music Assistant's own Home Assistant plugin (its connection and login), so there is
-nothing to configure, and it does nothing at all when that plugin is not set up.
+It uses Music Assistant's own Home Assistant plugin (its connection and login), so there is no
+connection to configure, and it does nothing when that plugin is not set up.
 
-Pictures: the device cannot send a login, so the server fetches the camera frame from Home
-Assistant with the plugin's login and serves it on the CLI web port, where the device fetches
-it like album art. The address carries a short-lived random key instead of the camera's name,
-so a camera cannot be fetched just by knowing its entity id.
+Pictures: the device cannot send a login, so the server fetches the camera frame from Home Assistant
+with the plugin's login and serves it on the CLI web port, where the device fetches it like album
+art. The address carries a short-lived random key instead of the camera's name, so a camera cannot
+be fetched just by knowing its entity id.
 
-Dashboards: Home Assistant cannot label a dashboard, so a labeled entity (a template sensor
-works) whose state is the address of a picture of the dashboard stands in for it, with the
-entity's name as the title. The picture comes from a screenshot service such as the Puppet
-add-on (http://host:10000/lovelace/3?viewport=800x480&format=jpeg). The server fetches that
-address and serves the result like a camera frame.
+Dashboards: Home Assistant cannot label a dashboard, so a labeled entity (a template sensor works)
+whose state is the address of a picture of the dashboard stands in for it, with the entity's name as
+the title. The picture comes from a screenshot service such as the Puppet add-on
+(http://host:10000/lovelace/3?viewport=1920x1080&format=jpeg). The server fetches that address and
+serves the result like a camera frame.
 """
 
 from __future__ import annotations
@@ -116,8 +116,8 @@ CLASS_ICONS = {
 # The commands this module answers (what the menu entries below send).
 COMMANDS = ("haextras", "haextraspicture", "haextrasset", "haextrasrun")
 
-# How long the key in a picture address stays valid.
-# (a rotation shows each picture for the Image Viewer's delay, so this has to cover a whole pass)
+# How long the key in a picture address stays valid. A rotation shows each picture for the Image
+# Viewer's delay, so it has to cover a whole pass.
 KEY_LIFETIME = 600
 # The picture is shrunk to what the screen needs: a 2560x1920 frame is slow to decode on a Pi.
 DEFAULT_MAX_SIZE = 960
