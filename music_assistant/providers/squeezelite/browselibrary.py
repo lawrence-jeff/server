@@ -1607,6 +1607,7 @@ class BrowseLibraryHandler:
             "playlist": self._handle_playlist,
             "status": self._handle_queue_status,
             "button": self._handle_button,
+            "power": self._handle_power,
         }
         if (handler := handlers.get(command)) is not None:
             return await handler(slim_command)
@@ -2412,6 +2413,31 @@ class BrowseLibraryHandler:
         if queue is None:
             raise NotImplementedError
         await self.mass.player_queues.next(queue.queue_id)
+
+    async def _handle_power(self, slim_command: SlimCLICommand) -> None:
+        """
+        Handle the player's own power on/off through Music Assistant's power command.
+
+        A power command that starts at the device (the power key or button, a remote) reaches
+        aioslimproto's built-in handler, which only flips the player's flag. That skips what
+        Music Assistant does around a power change, notably "Automatically play (resume on
+        power on)". Going through players.cmd_power runs all of it. The "?" query and any
+        failure fall through to the built-in handler.
+        """
+        player_id = slim_command.player_id
+        player = self._slimproto.get_player(player_id) if player_id else None
+        args = slim_command.args
+        if player is None or (args and str(args[0]) == "?"):
+            raise NotImplementedError
+        # power 1 / power 0, or no value to toggle; other arguments (seq_no etc.) are ignored
+        powered = bool(int(args[0])) if args else not player.powered
+        try:
+            await self.mass.players.cmd_power(player_id, powered)
+        except MusicAssistantError as err:
+            logger.debug(
+                "Power command through Music Assistant failed (%s), using the built-in", err
+            )
+            raise NotImplementedError from err
 
     async def _handle_playlist(self, slim_command: SlimCLICommand) -> None:
         """
