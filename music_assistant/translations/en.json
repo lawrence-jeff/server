@@ -2576,6 +2576,8 @@
   "provider.squeezelite.config_entries.discovery.label": "Enable Discovery server",
   "provider.squeezelite.config_entries.display.description": "Enable/disable native display support on squeezebox or squeezelite32 hardware.",
   "provider.squeezelite.config_entries.display.label": "Enable display support",
+  "provider.squeezelite.config_entries.expose_ha_extras.description": "Show the Home Assistant entities that carry the label \"HA Extras\" on this device, and let it control them. Restart the device after changing this.",
+  "provider.squeezelite.config_entries.expose_ha_extras.label": "Expose HA Entities to Device (HA Extras)",
   "provider.squeezelite.config_entries.port.description": "The TCP/UDP port to run the slimproto sockets server. The default is 3483 and using a different port is not supported by hardware squeezebox players. Only adjust this port if you want to use other slimproto based servers side by side with (squeezelite) software players.",
   "provider.squeezelite.config_entries.port.label": "Slimproto port",
   "provider.squeezelite.config_entries.preset.description": "Assign a playable item to the player's preset. Only supported on real squeezebox hardware or jive(lite) based emulators.",

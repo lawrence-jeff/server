@@ -89,7 +89,8 @@ mass = "music_assistant.__main__:main"
 # translations/*.json are machine-translated locale files (Lokalise); foreign words aren't typos
 # tidal fixtures are captured API responses; foreign album/track titles aren't typos
 # instructions/*.instructions.md quotes reviewer comments verbatim (incl. their original typos)
-ignore-words-list = "provid,hass,followings,childs,explict,additionals,commitish,nam,connexion,claus,childrens,speaches,overal,"
+# "ue" is the Squeezebox UE Radio referenced in the squeezelite provider's own comments
+ignore-words-list = "provid,hass,followings,childs,explict,additionals,commitish,nam,connexion,claus,childrens,speaches,overal,ue,"
 skip = """*.js,*.svg,\
 .github/instructions/music-assistant-standards.instructions.md,\
 music_assistant/helpers/resources/countries.json,\
