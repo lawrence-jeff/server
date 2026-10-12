@@ -27,6 +27,10 @@
     "preset": {
       "label": "Preset {0}",
       "description": "Assign a playable item to the player's preset. Only supported on real squeezebox hardware or jive(lite) based emulators."
+    },
+    "expose_ha_extras": {
+      "label": "Expose HA Entities to Device (HA Extras)",
+      "description": "Show the Home Assistant entities that carry the label \"HA Extras\" on this device, and let it control them. Restart the device after changing this."
     }
   },
   "manifest": {

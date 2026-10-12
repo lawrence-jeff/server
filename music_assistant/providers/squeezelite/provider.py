@@ -10,7 +10,7 @@ from aioslimproto.models import EventType as SlimEventType
 from aioslimproto.models import SlimEvent
 from aioslimproto.server import SlimServer
 from music_assistant_models.config_entries import ConfigEntry
-from music_assistant_models.enums import ConfigEntryType, MediaType
+from music_assistant_models.enums import ConfigEntryType, EventType, MediaType
 from music_assistant_models.errors import SetupFailedError
 
 from music_assistant.constants import CONF_PORT, CONF_SYNC_ADJUST, VERBOSE_LOG_LEVEL
@@ -18,16 +18,20 @@ from music_assistant.helpers.audio import get_mime_type
 from music_assistant.helpers.util import is_port_in_use
 from music_assistant.models.player_provider import PlayerProvider
 
+from . import haextras  # HA-EXTRAS
+from .browselibrary import BrowseLibraryHandler, handle_root_redirect, make_icon_routes
 from .constants import (
     CONF_CLI_JSON_PORT,
     CONF_CLI_TELNET_PORT,
     CONF_DISCOVERY,
     DEFAULT_SLIMPROTO_PORT,
+    REPEATMODE_MAP,
 )
 from .player import SqueezelitePlayer
 
 if TYPE_CHECKING:
     from aioslimproto.client import SlimClient
+    from music_assistant_models.event import MassEvent
 
 
 class SqueezelitePlayerProvider(PlayerProvider):
@@ -82,21 +86,48 @@ class SqueezelitePlayerProvider(PlayerProvider):
 
         # create the server here (also validates config and sets up the CLI) but defer
         # start() to loaded_in_mass, so we subscribe to events before accepting clients
+        # Icon/cover-art routes are built per provider (make_icon_routes) because
+        # resolving real album art needs self.mass, and aiohttp route handlers only
+        # receive the request. See make_icon_routes in browselibrary.py.
+        icon_handler, unmatched_handler = make_icon_routes(self.mass)
         self.slimproto = SlimServer(
             cli_port=telnet_port or None,
             cli_port_json=json_port or None,
             ip_address=self.mass.streams.publish_ip,
             name="Music Assistant",
             control_port=control_port,
+            cli_command_handler=BrowseLibraryHandler(self),
+            extra_routes={
+                # Plain GET on the CLI web port (e.g. the link on a piCorePlayer's
+                # LMS settings page) goes to the Music Assistant web UI instead.
+                "/": handle_root_redirect,
+                "/html/images/{filename}": icon_handler,
+                "/music/{icon_id}/{filename}": icon_handler,
+                **haextras.routes(self.mass),  # HA-EXTRAS
+                # Lowest priority - only reached if nothing above matches.
+                # See handle_unmatched's own docstring (in browselibrary.py,
+                # the function this closure wraps) for why this exists.
+                "/{tail:.*}": unmatched_handler,
+            },
         )
 
     async def loaded_in_mass(self) -> None:
         """Call after the provider has been loaded."""
         await super().loaded_in_mass()
         assert self.slimproto is not None  # for type checker
+        # Gives the CLI MA's display_name for each player, without going through
+        # BrowseLibraryHandler, so the device name updates even with browse off.
+        self.slimproto.cli.display_name_lookup = self._lookup_display_name
+        # Gives the CLI MA itself for seek and play, without going through BrowseLibraryHandler.
+        self.slimproto.cli.mass = self.mass
         # subscribe before starting the socket server: aioslimproto does not buffer
         # events, so a client connecting before we subscribe would be missed entirely
         self.slimproto.subscribe(self._handle_slimproto_event)
+        # QUEUE_UPDATED (not QUEUE_ITEMS_UPDATED) because it is signalled on every
+        # change, including shuffle/repeat toggles, so queue edits made from the MA app,
+        # voice or other integrations also refresh the client. Shares
+        # _push_queue_update() with the command handlers in browselibrary.py.
+        self.mass.subscribe(self._handle_queue_items_updated, EventType.QUEUE_UPDATED)
         try:
             await self.slimproto.start()
         except Exception as err:
@@ -113,6 +144,9 @@ class SqueezelitePlayerProvider(PlayerProvider):
         self.mass.streams.register_dynamic_route(
             "/jsonrpc.js", self.slimproto.cli._handle_jsonrpc_client
         )
+        # Icon/cover-art routes are registered via extra_routes in the SlimServer(...)
+        # constructor above, not here: the router is frozen once start() has run
+        # AppRunner.setup(), so a later add_get raises RuntimeError.
 
     async def unload(self, is_removed: bool = False) -> None:
         """Handle unload/close of the provider."""
@@ -127,6 +161,11 @@ class SqueezelitePlayerProvider(PlayerProvider):
             slimplayer.player_id, CONF_SYNC_ADJUST, 0
         )
         return int(slimplayer.elapsed_milliseconds - sync_delay)
+
+    def _lookup_display_name(self, player_id: str) -> str | None:
+        """Return MA's display_name for a player, or None if MA doesn't know it."""
+        mass_player = self.mass.players.get_player(player_id)
+        return mass_player.display_name if mass_player else None
 
     async def _validate_all_ports(
         self, control_port: int, telnet_port: int | None, json_port: int | None
@@ -193,6 +232,30 @@ class SqueezelitePlayerProvider(PlayerProvider):
 
         # forward all other events to the player itself
         player.handle_slim_event(event)
+
+    def _handle_queue_items_updated(self, event: MassEvent) -> None:
+        """
+        Push a queue-view update when the queue changes from any source.
+
+        Covers changes from the MA app/web UI, voice or another integration, not just this
+        provider's own SlimProto command handlers.
+
+        :param event: The queue updated event.
+        """
+        # Uses the same update those handlers push. Subscribed to QUEUE_UPDATED (see
+        # loaded_in_mass), so event.data is the PlayerQueue and object_id is the queue_id, the same
+        # value as player_id for this provider. Its repeat/shuffle mode is refreshed into extra_data
+        # here, as play_media() does: the client's shuffle/repeat indicator only updates from a
+        # playerstatus push whose values changed (see Player.lua's
+        # notify_playerShuffleModeChange/notify_playerRepeatModeChange), and nothing else keeps
+        # extra_data current for a change made from the MA app.
+        if self.mass.closing or not self.slimproto or not event.object_id:
+            return
+        if (player := self.slimproto.get_player(event.object_id)) and event.data:
+            player.extra_data["playlist repeat"] = REPEATMODE_MAP[event.data.repeat_mode]
+            player.extra_data["playlist shuffle"] = int(event.data.shuffle_enabled)
+        handler = cast("BrowseLibraryHandler", self.slimproto.cli.command_handler)
+        self.mass.create_task(handler._push_queue_update(event.object_id))
 
     async def _serve_multi_client_stream(self, request: web.Request) -> web.StreamResponse:
         """Serve the multi-client flow stream audio to a player."""
