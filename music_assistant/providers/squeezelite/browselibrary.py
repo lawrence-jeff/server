@@ -1662,6 +1662,12 @@ class BrowseLibraryHandler:
         self.provider = provider
         self.mass = provider.mass
 
+    async def __call__(self, slim_command: SlimCLICommand) -> Any:
+        """Dispatch a slim command to its handler."""
+        # Async because the listings await mass.music.* calls. NotImplementedError from _dispatch is
+        # the intentional "let aioslimproto's built-in handle this" signal, not an error.
+        return await self._dispatch(slim_command)
+
     @property
     def _slimproto(self) -> SlimServer:
         """Return the provider's SlimServer, which exists once the provider has loaded."""
@@ -1669,12 +1675,6 @@ class BrowseLibraryHandler:
             msg = "SlimServer is not running"
             raise RuntimeError(msg)
         return self.provider.slimproto
-
-    async def __call__(self, slim_command: SlimCLICommand) -> Any:
-        """Dispatch a slim command to its handler."""
-        # Async because the listings await mass.music.* calls. NotImplementedError from _dispatch is
-        # the intentional "let aioslimproto's built-in handle this" signal, not an error.
-        return await self._dispatch(slim_command)
 
     async def _dispatch(self, slim_command: SlimCLICommand) -> Any:
         """Route a slim command to its handler, or raise NotImplementedError."""

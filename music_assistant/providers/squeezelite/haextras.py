@@ -60,11 +60,6 @@ CONF_EXPOSE = "expose_ha_extras"
 CONFIG_ENTRY = ConfigEntry(
     key=CONF_EXPOSE,
     type=ConfigEntryType.BOOLEAN,
-    label="Expose HA Entities to Device (HA Extras)",
-    description=(
-        'Show the Home Assistant entities that carry the label "HA Extras" on this device, '
-        "and let it control them. Restart the device after changing this."
-    ),
     default_value=False,
     required=False,
 )
