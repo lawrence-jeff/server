@@ -238,17 +238,17 @@ class SqueezelitePlayerProvider(PlayerProvider):
         Push a queue-view update when the queue changes from any source.
 
         Covers changes from the MA app/web UI, voice or another integration, not just this
-        provider's own SlimProto command handlers, using the same update those handlers push.
+        provider's own SlimProto command handlers.
 
-        Subscribed to QUEUE_UPDATED (see loaded_in_mass), so event.data is the PlayerQueue.
-        Its repeat/shuffle mode is refreshed into extra_data here, as play_media() does:
-        the client's shuffle/repeat indicator only updates from a playerstatus push whose
-        values changed (see Player.lua's notify_playerShuffleModeChange/
-        notify_playerRepeatModeChange), and nothing else keeps extra_data current for a
-        change made from the MA app.
-
-        object_id is the queue_id, which is the same value as player_id for this provider.
+        :param event: The queue updated event.
         """
+        # Uses the same update those handlers push. Subscribed to QUEUE_UPDATED (see
+        # loaded_in_mass), so event.data is the PlayerQueue and object_id is the queue_id, the same
+        # value as player_id for this provider. Its repeat/shuffle mode is refreshed into extra_data
+        # here, as play_media() does: the client's shuffle/repeat indicator only updates from a
+        # playerstatus push whose values changed (see Player.lua's
+        # notify_playerShuffleModeChange/notify_playerRepeatModeChange), and nothing else keeps
+        # extra_data current for a change made from the MA app.
         if self.mass.closing or not self.slimproto or not event.object_id:
             return
         if (player := self.slimproto.get_player(event.object_id)) and event.data:

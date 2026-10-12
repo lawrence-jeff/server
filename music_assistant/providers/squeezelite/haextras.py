@@ -144,6 +144,9 @@ async def menu_items(mass: MusicAssistant, player_id: str) -> list[dict[str, Any
     Return the entry for the home menu.
 
     Nothing when the device's setting is not ticked or Home Assistant is not available.
+
+    :param mass: The Music Assistant instance.
+    :param player_id: The player the menu is for.
     """
     ha = _hass(mass)
     if ha is None or not _enabled(mass, player_id):
@@ -194,12 +197,14 @@ def _row(
     """
     Return a menu row.
 
-    A line break in the text gives the row a second line, and icon (the name of a picture in
-    ICON_DIR) puts a picture beside it.
+    A line break in the text gives the row a second line, and icon puts a picture beside it.
 
-    Without an action it only closes the window (an ordinary row, because a row with no action
-    at all cannot be left on JiveLite).
+    :param text: The text; a line break gives a second line.
+    :param action: What the row does, or None to only close the window.
+    :param icon: The name of a picture in ICON_DIR, or None.
     """
+    # A row with no action at all cannot be left on JiveLite, so without an action it is an ordinary
+    # row that only closes the window.
     action = action or {"player": 0, "cmd": ["jiveblankcommand"], "nextWindow": "parent"}
     row: dict[str, Any] = {"text": text, "type": "text", "style": "item", "actions": {"go": action}}
     if icon:
@@ -237,9 +242,11 @@ def _listing(rows: list[dict[str, Any]]) -> dict[str, Any]:
     """
     Return a menu.
 
-    Rows with icons give an icon_list window, as the album and favorites lists use. Rows without
-    icons give a plain list.
+    Rows with icons give an icon_list window, others a plain list.
+
+    :param rows: The rows of the menu.
     """
+    # The same window styles the album and favorites lists use.
     style = "icon_list" if any("icon" in row for row in rows) else "text_list"
     return {
         "count": len(rows),
@@ -459,9 +466,11 @@ def _picture_entry(entity: str, title: str) -> dict[str, str]:
     """
     Return an Image Viewer list entry for an entity's picture, under a new short-lived key.
 
-    The viewer replaces {resizeParams} with the screen size and fetches the picture again each
-    time it asks for the list, so the picture stays current.
+    :param entity: The entity id of the camera or picture.
+    :param title: The caption.
     """
+    # The viewer replaces {resizeParams} with the screen size and fetches the picture again each
+    # time it asks for the list, so the picture stays current.
     now = time.time()
     for old in [k for k, (_, expiry) in _keys.items() if expiry < now]:
         del _keys[old]

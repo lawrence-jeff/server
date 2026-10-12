@@ -632,10 +632,13 @@ class SqueezelitePlayer(Player):
         """
         Re-check and, if needed, correct the Now Playing quality fields after the fact.
 
-        queue_item/audio_format may not be resolvable yet when playback starts (see the
-        re-checks scheduled in _handle_play_url_for_slimplayer). Updates the metadata
-        in place and signals an update, without restarting playback.
+        Updates the metadata in place and signals an update, without restarting playback.
+
+        :param slimplayer: The player.
+        :param media: The media being played.
         """
+        # queue_item/audio_format may not be resolvable yet when playback starts (see the re-checks
+        # scheduled in _handle_play_url_for_slimplayer).
         current_media = slimplayer.current_media
         # only touch it if it is still the track this was scheduled for
         if not current_media or current_media.metadata.get("queue_item_id") != media.queue_item_id:
