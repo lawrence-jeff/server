@@ -44,6 +44,7 @@ from music_assistant.models.player import (
     PlayerMedia,
 )
 
+from . import haextras  # HA-EXTRAS
 from .constants import (
     CONF_ENTRY_DISPLAY,
     CONF_ENTRY_VISUALIZATION,
@@ -60,6 +61,7 @@ from .multi_client_stream import MultiClientStream
 
 if TYPE_CHECKING:
     from aioslimproto.client import SlimClient
+    from music_assistant_models.media_items import AudioFormat
 
     from .provider import SqueezelitePlayerProvider
 
@@ -67,6 +69,17 @@ if TYPE_CHECKING:
 CACHE_CATEGORY_PREV_STATE = (
     1  # category for caching previous player state (bumped to invalidate old format)
 )
+
+# icon_id prefix per media type, as the server's icon route expects (see
+# browselibrary._fetch_real_item_art); albums use the bare id.
+PRESET_ICON_PREFIX = {
+    MediaType.PLAYLIST: "playlist-",
+    MediaType.RADIO: "radio-",
+    MediaType.PODCAST: "podcast-",
+    MediaType.AUDIOBOOK: "audiobook-",
+    MediaType.ARTIST: "artist-",
+    MediaType.ALBUM: "",
+}
 
 PROTOCOL_ONLY_MODELS = (
     # Device models where slimproto is only a secondary protocol on a device with
@@ -129,6 +142,7 @@ class SqueezelitePlayer(Player):
         self.multi_client_stream: MultiClientStream | None = None
         self._sync_playpoints: deque[SyncPlayPoint] = deque(maxlen=MIN_REQ_PLAYPOINTS)
         self._do_not_resync_before: float = 0.0
+        self._audio_source_active: bool = False
 
     async def on_config_updated(self) -> None:
         """Handle logic when the PlayerConfig is first loaded or updated."""
@@ -155,6 +169,15 @@ class SqueezelitePlayer(Player):
         await self.client.mute(init_muted)
         await self.client.volume_set(init_volume)
         await self.mass.players.register_or_update(self)
+        # A player that connects (it booted, its connection dropped, or Music Assistant restarted)
+        # comes up powered on, instead of showing the powered-off screen with its queue untouched.
+        # Going through the power command applies "Automatically play (resume on power on)": it
+        # only resumes the queue when that player setting is ticked, which is off by default.
+        if PlayerFeature.POWER in self.supported_features:
+            try:
+                await self.mass.players.cmd_power(player_id, True)
+            except MusicAssistantError as err:
+                self.logger.debug("Could not power on %s after connecting: %s", player_id, err)
 
     async def get_config_entries(self) -> list[ConfigEntry]:
         """Return all (provider/player specific) Config Entries for the player."""
@@ -186,6 +209,7 @@ class SqueezelitePlayer(Player):
             CONF_ENTRY_VISUALIZATION,
             CONF_ENTRY_HTTP_PROFILE_FORCED_2,
             CONF_ENTRY_PREFER_WAV_FOR_LIVE_SOURCES_DEFAULT_ENABLED,
+            haextras.CONFIG_ENTRY,  # HA-EXTRAS
         ]
 
     async def volume_set(self, volume_level: int) -> None:
@@ -218,6 +242,7 @@ class SqueezelitePlayer(Player):
 
     async def stop(self) -> None:
         """Handle STOP command on the player."""
+        self._audio_source_active = False
         # Clean up any existing multi-client stream
         if self.multi_client_stream is not None:
             await self.multi_client_stream.stop()
@@ -247,6 +272,18 @@ class SqueezelitePlayer(Player):
         if self.synced_to:
             msg = "A synced player cannot receive play commands directly"
             raise InvalidCommand(msg)
+
+        # Protocol players are powered off on stop(), so power them (and every sync
+        # client, as stop() does) back on when playback starts; otherwise the device
+        # stays silent.
+        if self.type == PlayerType.PROTOCOL:
+
+            async def _power_on(client: SlimClient) -> None:
+                await client.power(True)
+
+            async with TaskManager(self.mass) as tg:
+                for client in self._get_sync_clients():
+                    tg.create_task(_power_on(client))
 
         # Clean up any existing multi-client stream before starting a new one
         if self.multi_client_stream is not None:
@@ -469,25 +506,63 @@ class SqueezelitePlayer(Player):
         mime_type: str | None = None,
     ) -> None:
         """Handle playback of an url on slimproto player(s)."""
-        if mime_type is None:
-            # derive from the url extension (only reliable for plain file urls; sync
-            # group member urls have no extension, so callers pass the codec mime)
-            mime_type = get_mime_type(url.rsplit(".", maxsplit=1)[-1].split("?", maxsplit=1)[0])
+        # Look up the queue item to get its real audio format (same lookup as
+        # start_queue_item in play_media). The quality fields are re-checked
+        # shortly after playback starts, see below.
+        queue_item = (
+            self.mass.player_queues.get_item(media.source_id, media.queue_item_id)
+            if media.source_id and media.queue_item_id
+            else None
+        )
+        audio_format = None
+        if queue_item and queue_item.streamdetails:
+            # prefer the format MA actually sends (decoded, when it transcoded) over
+            # the source file's own, as that is what plays
+            audio_format = (
+                queue_item.streamdetails.decoded_audio_format
+                or queue_item.streamdetails.audio_format
+            )
+        quality_fields = self._build_quality_metadata_fields(audio_format)
+        # "duration" is the real track length, not media.stream_duration, which shrinks
+        # after a seek on transports whose stream restarts at position zero.
+        # "elapsed_offset" (declared on aioslimproto's MediaMetadata) is how far into the track
+        # this stream's position 0 is; cli.py adds it to the stream-relative position it reports.
+        real_duration = (
+            media.duration if media.duration is not None else (media.stream_duration or 0)
+        )
+        elapsed_offset = (
+            media.duration - media.stream_duration
+            if media.duration is not None and media.stream_duration is not None
+            else 0
+        )
         metadata = {
             "item_id": media.uri,
             "title": media.title,
             "album": media.album,
             "artist": media.artist,
             "image_url": media.image_url,
-            "duration": media.stream_duration or media.duration,
+            "duration": real_duration,
+            "elapsed_offset": elapsed_offset,
             "source_id": media.source_id,
             "queue_item_id": media.queue_item_id,
+            "samplerate": str(audio_format.sample_rate) if audio_format else "",
+            **quality_fields,
         }
         queue = None
         if media.source_id and (queue := self.mass.player_queues.get(media.source_id)):
             self.extra_data["playlist repeat"] = REPEATMODE_MAP[queue.repeat_mode]
             self.extra_data["playlist shuffle"] = int(queue.shuffle_enabled)
-        low_latency_stream = media.media_type in (MediaType.AUDIO_SOURCE, MediaType.RADIO)
+        audio_source_active = media.media_type == MediaType.AUDIO_SOURCE
+        low_latency_stream = audio_source_active or media.media_type == MediaType.RADIO
+        # set the flag on the player that owns the slimclient (may differ from self
+        # during group playback where self is the leader but slimplayer is a member)
+        target_player = self.mass.players.get_player(slimplayer.player_id)
+        if isinstance(target_player, SqueezelitePlayer):
+            target_player._audio_source_active = audio_source_active
+        if mime_type is None:
+            # derive from the url extension (only reliable for plain file urls; sync
+            # group member urls have no extension, so callers pass the codec mime)
+            mime_type = get_mime_type(url.rsplit(".", maxsplit=1)[-1].split("?", maxsplit=1)[0])
         # live streams start on a smaller buffer (KB, tenths of a second) to cut latency
         stream_threshold, output_threshold = (64, 1) if low_latency_stream else (200, 20)
         await slimplayer.play_url(
@@ -527,6 +602,66 @@ class SqueezelitePlayer(Player):
                     output_threshold=output_threshold,
                 ),
             )
+
+        # queue_item/audio_format may not be resolvable yet when the metadata above is built, so re-
+        # check at increasing intervals; each is a no-op if nothing changed or the track changed.
+        for delay in (1.0, 3.0, 6.0):
+            self.mass.call_later(delay, self._recheck_quality_metadata(slimplayer, media))
+
+    def _build_quality_metadata_fields(self, audio_format: AudioFormat | None) -> dict[str, str]:
+        """Build the "type"/"bitrate"/"samplesize" Now Playing fields from an AudioFormat."""
+        return {
+            # plain codec name (e.g. "mp3"), which is the ContentType value
+            "type": str(audio_format.content_type) if audio_format else "",
+            # "<n>kbps" (AudioFormat.bit_rate is already normalized to kbps). LMS also
+            # appends CBR/VBR, but AudioFormat has no such indicator and a wrong label
+            # would mislead, so it is left out.
+            "bitrate": f"{audio_format.bit_rate}kbps"
+            if audio_format and audio_format.bit_rate
+            else "",
+            # samplesize only for lossless content: LMS omits it for lossy formats, while
+            # AudioFormat.bit_depth always has a value (default 16).
+            "samplesize": (
+                str(audio_format.bit_depth)
+                if audio_format and audio_format.content_type.is_lossless()
+                else ""
+            ),
+        }
+
+    async def _recheck_quality_metadata(self, slimplayer: SlimClient, media: PlayerMedia) -> None:
+        """
+        Re-check and, if needed, correct the Now Playing quality fields after the fact.
+
+        Updates the metadata in place and signals an update, without restarting playback.
+
+        :param slimplayer: The player.
+        :param media: The media being played.
+        """
+        # queue_item/audio_format may not be resolvable yet when playback starts (see the re-checks
+        # scheduled in _handle_play_url_for_slimplayer).
+        current_media = slimplayer.current_media
+        # only touch it if it is still the track this was scheduled for
+        if not current_media or current_media.metadata.get("queue_item_id") != media.queue_item_id:
+            return
+        queue_item = (
+            self.mass.player_queues.get_item(media.source_id, media.queue_item_id)
+            if media.source_id and media.queue_item_id
+            else None
+        )
+        audio_format = None
+        if queue_item and queue_item.streamdetails:
+            audio_format = (
+                queue_item.streamdetails.decoded_audio_format
+                or queue_item.streamdetails.audio_format
+            )
+        quality_fields = self._build_quality_metadata_fields(audio_format)
+        quality_fields["samplerate"] = str(audio_format.sample_rate) if audio_format else ""
+        if any(
+            quality_fields[key] and quality_fields[key] != current_media.metadata.get(key)
+            for key in quality_fields
+        ):
+            current_media.metadata.update(quality_fields)
+            slimplayer.signal_update()
 
     def _handle_player_heartbeat(self) -> None:
         """Process SlimClient elapsed_time update."""
@@ -577,12 +712,12 @@ class SqueezelitePlayer(Player):
 
         # all child's ready (or timeout) - start play
         async with TaskManager(self.mass) as tg:
-            for sync_client in self._get_sync_clients():
+            for sync_child in self._get_sync_clients():
                 # NOTE: Officially you should do an unpause_at based on the player timestamp
                 # but I did not have any good results with that.
                 # Instead just start playback on all players and let the sync logic work out
                 # the delays etc.
-                tg.create_task(pause_and_unpause(sync_client, 200))
+                tg.create_task(pause_and_unpause(sync_child, 200))
 
     async def _handle_player_cli_event(self, event: SlimEvent) -> None:
         """Process CLI Event."""
@@ -712,13 +847,17 @@ class SqueezelitePlayer(Player):
             ):
                 try:
                     media_item = await self.mass.music.get_item_by_uri(cast("str", preset_conf))
+                    # A local identifier that the server's icon route resolves to art. The
+                    # client must never be handed a raw image URL (it asks the server for an
+                    # /imageproxy/ path that does not exist).
+                    prefix = PRESET_ICON_PREFIX.get(media_item.media_type)
                     preset_items.append(
                         SlimPreset(
                             uri=media_item.uri,
                             text=media_item.name,
                             icon=(
-                                self.mass.metadata.get_image_url(media_item.image)
-                                if media_item.image
+                                f"music/{prefix}{media_item.item_id}/cover"
+                                if prefix is not None
                                 else ""
                             ),
                         )
