@@ -34,6 +34,7 @@ import asyncio
 import base64
 import inspect
 import logging
+import math
 import re
 import struct
 import time
@@ -2503,15 +2504,29 @@ class BrowseLibraryHandler:
         if player is None or not args or str(args[0]) == "?":
             raise NotImplementedError
         cli = self._slimproto.cli
-        text = str(args[0])
-        target = int(text)
+        text = str(args[0]).strip()
+        try:
+            amount = float(text)
+        except ValueError:
+            raise NotImplementedError from None
+        if not math.isfinite(amount):
+            raise NotImplementedError
         if text[0] in "+-":
             # relative to the position being shown, since the player's own is relative to the
             # stream it is playing, which restarts at zero after a seek
-            target += int(cli._corrected_elapsed_seconds(player))
+            amount += cli._corrected_elapsed_seconds(player)
+        # Whole seconds within the track: Music Assistant takes the start as 0 and refuses a
+        # position after the end, so a drag or a skip past either end lands on it.
+        target = max(0, int(amount))
+        if player.current_media and (duration := player.current_media.metadata.get("duration")):
+            target = min(target, int(duration))
         cli.set_pending_position(player_id, target)
         try:
             await self.mass.player_queues.seek(queue_id=player_id, position=target)
+        except MusicAssistantError as err:
+            # for example an item without a duration, which cannot be seeked
+            logger.warning("Seek to %ss was refused by Music Assistant: %s", target, err)
+            cli.set_pending_position(player_id, None)
         except Exception:
             cli.set_pending_position(player_id, None)
             raise
