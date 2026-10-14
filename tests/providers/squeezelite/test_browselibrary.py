@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from aioslimproto.models import PlayerState
+from music_assistant_models.errors import MusicAssistantError
 
 from music_assistant.providers.squeezelite import browselibrary as bl
 
@@ -350,4 +351,56 @@ async def test_a_refused_seek_stops_showing_its_target() -> None:
     handler.mass.player_queues.seek.side_effect = RuntimeError("cannot seek")
     with pytest.raises(RuntimeError):
         await handler._handle_time(_command("time", 90))
+    cli.set_pending_position.assert_called_with("p1", None)
+
+
+@pytest.mark.parametrize(
+    ("value", "target"),
+    [
+        (90, 90),
+        ("12.5", 12),
+        ("+2.5", 32),
+        ("-5", 25),
+        # before the start of the track, and after the end of it
+        ("-100", 0),
+        (999, 200),
+        ("+500", 200),
+        (200, 200),
+    ],
+)
+async def test_a_seek_is_in_whole_seconds_and_stays_inside_the_track(
+    value: Any, target: int
+) -> None:
+    """Decimals are cut, and the target is kept between the start and the end of the track."""
+    handler, cli, player = _handler()
+    player.current_media = SimpleNamespace(metadata={"duration": 200})
+    await handler._handle_time(_command("time", value))
+    handler.mass.player_queues.seek.assert_awaited_once_with(queue_id="p1", position=target)
+    cli.set_pending_position.assert_called_with("p1", target)
+
+
+async def test_a_seek_in_a_track_of_unknown_length_is_not_cut_at_the_end() -> None:
+    """Without a known duration there is no end to keep the position inside."""
+    handler, _cli, _player = _handler()
+    await handler._handle_time(_command("time", 5000))
+    handler.mass.player_queues.seek.assert_awaited_once_with(queue_id="p1", position=5000)
+
+
+@pytest.mark.parametrize("value", ["abc", "", "  ", "nan", "inf", "-inf", "1e999"])
+async def test_a_seek_that_is_not_a_number_is_the_built_ins_and_seeks_nothing(
+    value: str,
+) -> None:
+    """Anything that is not a finite number is passed on, not turned into a position."""
+    handler, cli, _player = _handler()
+    with pytest.raises(NotImplementedError):
+        await handler._handle_time(_command("time", value))
+    handler.mass.player_queues.seek.assert_not_awaited()
+    cli.set_pending_position.assert_not_called()
+
+
+async def test_a_seek_music_assistant_refuses_is_logged_and_forgotten() -> None:
+    """For an item that cannot be seeked the device is not given an error, and the position returns."""
+    handler, cli, _player = _handler()
+    handler.mass.player_queues.seek.side_effect = MusicAssistantError("no duration")
+    await handler._handle_time(_command("time", 90))
     cli.set_pending_position.assert_called_with("p1", None)
