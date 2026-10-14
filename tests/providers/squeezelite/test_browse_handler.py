@@ -734,6 +734,9 @@ def _status_handler(queue: SimpleNamespace | None, built_in: dict[str, Any] | No
     base = {"player_name": "Kitchen", "mode": "play"} if built_in is None else built_in
     handler.cli._handle_status = AsyncMock(return_value=base)
     handler.mass.player_queues.items.return_value = _queue_rows(3)
+    handler.mass.players.get_player.return_value = SimpleNamespace(
+        volume_muted=False, volume_level=40
+    )
     return handler
 
 
@@ -789,3 +792,27 @@ async def test_an_empty_item_loop_is_left_out_of_the_reply() -> None:
     handler.mass.player_queues.items.return_value = []
     result = await handler._handle_queue_status(_status_cmd("-", 10, menu="menu"))
     assert "item_loop" not in result
+
+
+@pytest.mark.parametrize(
+    ("muted", "level", "expected"),
+    [(True, 40, -40), (False, 40, 40), (True, 0, 40), (None, 40, 40)],
+)
+async def test_a_muted_players_status_volume_is_negative(
+    muted: bool | None, level: int, expected: int
+) -> None:
+    """A muted player reports its negated level; with none to negate the built-in's stays."""
+    handler = _status_handler(_queue(), built_in={"mixer volume": 40})
+    handler.mass.players.get_player.return_value = SimpleNamespace(
+        volume_muted=muted, volume_level=level
+    )
+    result = await handler._handle_queue_status(_status_cmd("-", 1))
+    assert result["mixer volume"] == expected
+
+
+async def test_the_status_of_an_unknown_player_keeps_its_volume() -> None:
+    """A player Music Assistant does not know is not reported as muted."""
+    handler = _status_handler(_queue(), built_in={"mixer volume": 40})
+    handler.mass.players.get_player.return_value = None
+    result = await handler._handle_queue_status(_status_cmd("-", 1))
+    assert result["mixer volume"] == 40
