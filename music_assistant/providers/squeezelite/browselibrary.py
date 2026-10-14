@@ -2017,12 +2017,12 @@ class BrowseLibraryHandler:
         # A library track is already resolved; any other item (radio, podcast episode, audiobook,
         # playlist track) is looked up by its uri.
         if uri is None:
-            return track.name, _art_ref(track)
+            return track.name, art_ref_for_item(track)
         try:
             item = await self.mass.music.get_item_by_uri(uri)
         except MusicAssistantError, ValueError:
             return uri, _uri_ref(uri)
-        return item.name, _art_ref(item) or _uri_ref(uri)
+        return item.name, art_ref_for_item(item) or _uri_ref(uri)
 
     async def _queue_album(
         self,
@@ -2077,7 +2077,7 @@ class BrowseLibraryHandler:
             queue_option,
             items,
             container.name,
-            _art_ref(container) or _uri_ref(container.uri or ""),
+            art_ref_for_item(container) or _uri_ref(container.uri or ""),
             play_index,
             start_if_idle,
         )
@@ -2740,7 +2740,7 @@ class BrowseLibraryHandler:
             # never a resolved image URL: a remote image reached the device as an
             # "/imageproxy/<url>/..." request this server doesn't serve, leaving some queue rows
             # without art.
-            art_ref = _art_ref(track) if track is not None else ""
+            art_ref = art_ref_for_item(track) if track is not None else ""
             icon_path = f"music/{art_ref}/cover" if art_ref else ""
             media_details = MediaDetails(
                 url=uri,
@@ -2828,7 +2828,7 @@ def _uri_ref(uri: str) -> str:
     return "uri-" + base64.urlsafe_b64encode(uri.encode()).decode().rstrip("=")
 
 
-def _art_ref(item: Any) -> str:
+def art_ref_for_item(item: Any) -> str:
     """
     Return the icon id the server's icon route resolves to art for a media item.
 
