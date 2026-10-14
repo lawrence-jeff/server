@@ -1716,6 +1716,7 @@ class BrowseLibraryHandler:
             "pause": self._handle_pause,
             "stop": self._handle_stop,
             "mode": self._handle_mode,
+            "mixer": self._handle_mixer,
             "time": self._handle_time,
         }
         if (handler := handlers.get(command)) is not None:
@@ -2541,6 +2542,34 @@ class BrowseLibraryHandler:
         if (handler := handlers.get(sub)) is None:
             raise NotImplementedError
         await handler(dataclasses.replace(slim_command, command=sub, args=slim_command.args[1:]))
+
+    async def _handle_mixer(self, slim_command: SlimCLICommand) -> int | None:
+        """
+        Handle `mixer muting` through the player's own mute, which silences it with the volume.
+
+        The volume itself, and anything else of `mixer`, is the built-in handler's.
+
+        :param slim_command: The command the device sent.
+        """
+        # The built-in sends the protocol's mute, which switches the audio output off and breaks
+        # the stream that is playing (see SqueezelitePlayer.volume_mute).
+        args = slim_command.args
+        player_id = slim_command.player_id
+        mass_player = self.mass.players.get_player(player_id) if player_id else None
+        if mass_player is None or len(args) < 1 or str(args[0]) != "muting":
+            raise NotImplementedError
+        value = str(args[1]) if len(args) > 1 else "toggle"
+        if value == "?":
+            return int(bool(mass_player.volume_muted))
+        if value == "toggle":
+            muted = not mass_player.volume_muted
+        else:
+            try:
+                muted = bool(int(value))
+            except ValueError:
+                raise NotImplementedError from None
+        await mass_player.volume_mute(muted)
+        return None
 
     async def _handle_time(self, slim_command: SlimCLICommand) -> None:
         """
