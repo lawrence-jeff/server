@@ -522,6 +522,8 @@ async def test_the_ha_extras_module_gets_to_answer_first(
         ("power", "_handle_power"),
         ("play", "_handle_play"),
         ("pause", "_handle_pause"),
+        ("stop", "_handle_stop"),
+        ("mode", "_handle_mode"),
         ("time", "_handle_time"),
     ],
 )
