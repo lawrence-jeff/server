@@ -469,6 +469,61 @@ def _cli_command(command: str, *args: Any) -> SlimCLICommand:
     return SlimCLICommand(player_id="p1", command=command, args=list(args), kwargs={})
 
 
+def _mixer_handler(muted: bool = False) -> tuple[Any, AsyncMock]:
+    handler, _cli, _player = _handler()
+    mute = AsyncMock()
+    handler.mass.players.get_player.return_value = SimpleNamespace(
+        volume_muted=muted, volume_mute=mute
+    )
+    return handler, mute
+
+
+@pytest.mark.parametrize(
+    ("muted", "args", "expected"),
+    [
+        (False, ("muting", "1"), True),
+        (True, ("muting", "0"), False),
+        (True, ("muting",), False),
+        (False, ("muting", "toggle"), True),
+        (False, ("muting",), True),
+    ],
+)
+async def test_muting_from_the_device_mutes_the_player(
+    muted: bool, args: tuple[str, ...], expected: bool
+) -> None:
+    """The device's mute is the player's own, not the library's output switch."""
+    handler, mute = _mixer_handler(muted)
+    assert await handler._handle_mixer(_cli_command("mixer", *args)) is None
+    mute.assert_awaited_once_with(expected)
+
+
+async def test_the_muting_state_is_reported_to_the_device() -> None:
+    """`mixer muting ?` answers with the player's state."""
+    handler, mute = _mixer_handler(muted=True)
+    assert await handler._handle_mixer(_cli_command("mixer", "muting", "?")) == 1
+    handler, _mute = _mixer_handler(muted=False)
+    assert await handler._handle_mixer(_cli_command("mixer", "muting", "?")) == 0
+    mute.assert_not_awaited()
+
+
+@pytest.mark.parametrize("args", [("volume", "40"), ("muting", "x"), ()])
+async def test_other_mixer_commands_are_the_built_ins(args: tuple[str, ...]) -> None:
+    """The volume and anything unparseable are left to the library."""
+    handler, mute = _mixer_handler()
+    with pytest.raises(NotImplementedError):
+        await handler._handle_mixer(_cli_command("mixer", *args))
+    mute.assert_not_awaited()
+
+
+async def test_mixer_from_an_unknown_player_is_the_built_ins() -> None:
+    """A device Music Assistant does not know is not muted here."""
+    handler, mute = _mixer_handler()
+    handler.mass.players.get_player.return_value = None
+    with pytest.raises(NotImplementedError):
+        await handler._handle_mixer(_cli_command("mixer", "muting", "1"))
+    mute.assert_not_awaited()
+
+
 @pytest.mark.parametrize(
     ("state", "args", "group", "expected"),
     [
