@@ -2547,6 +2547,7 @@ class BrowseLibraryHandler:
         """
         Handle `mixer muting` through the player's own mute, which silences it with the volume.
 
+        The volume query of a muted player answers with its negated volume, as the status does.
         The volume itself, and anything else of `mixer`, is the built-in handler's.
 
         :param slim_command: The command the device sent.
@@ -2555,6 +2556,10 @@ class BrowseLibraryHandler:
         # the stream that is playing (see SqueezelitePlayer.volume_mute).
         args = slim_command.args
         player_id = slim_command.player_id
+        if [str(arg) for arg in args[:2]] == ["volume", "?"] and (
+            muted_level := self._muted_level(player_id)
+        ):
+            return muted_level
         mass_player = self.mass.players.get_player(player_id) if player_id else None
         if mass_player is None or len(args) < 1 or str(args[0]) != "muting":
             raise NotImplementedError
@@ -2727,7 +2732,29 @@ class BrowseLibraryHandler:
         result = await self._queue_status(slim_command)
         if not result.get("item_loop"):
             result.pop("item_loop", None)
+        # JiveLite decides whether a mute press mutes or unmutes from the sign of the volume it
+        # holds: it reads the volume from the status each time its volume popup opens, and treats
+        # 0 or more as "not muted". LMS reports a muted player's volume as negative, but the mute
+        # here is a volume of 0, so after the popup closed the next press was taken for another
+        # mute (and showed the muted popup while the player was being unmuted). The volume the
+        # player returns to, negated, tells the client it is muted.
+        if muted_level := self._muted_level(slim_command.player_id):
+            result["mixer volume"] = muted_level
         return result
+
+    def _muted_level(self, player_id: str | None) -> int:
+        """
+        Return a muted player's volume as a negative number, or 0 when it is not muted.
+
+        A negative volume is how LMS tells a client that the player is muted, and how JiveLite
+        tells a mute press from an unmute press (see _handle_queue_status).
+
+        :param player_id: The player to look up.
+        """
+        mass_player = self.mass.players.get_player(player_id) if player_id else None
+        if mass_player is None or not mass_player.volume_muted:
+            return 0
+        return -int(mass_player.volume_level or 0)
 
     async def _queue_status(self, slim_command: SlimCLICommand) -> dict[str, Any]:
         """
