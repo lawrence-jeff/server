@@ -242,3 +242,39 @@ async def test_grouped_play_media_passes_per_member_mime_type() -> None:
     flac_client, mp3_client = clients
     assert flac_client.play_url.call_args.kwargs["mime_type"] == "audio/flac"
     assert mp3_client.play_url.call_args.kwargs["mime_type"] == "audio/mpeg"
+
+
+@pytest.mark.parametrize(
+    ("media_type", "item_id", "has_album", "expected_icon"),
+    [
+        (MediaType.RADIO, "7", False, "music/radio-7/cover"),
+        (MediaType.PLAYLIST, "5", False, "music/playlist-5/cover"),
+        (MediaType.ALBUM, "42", False, "music/42/cover"),
+        # a track shows the art of its album, which has a library id
+        (MediaType.TRACK, "9", True, "music/42/cover"),
+        # an episode has no library album, so it is identified by its uri
+        (MediaType.PODCAST_EPISODE, "3", False, None),
+    ],
+)
+async def test_presets_get_an_icon_for_every_kind_of_item(
+    media_type: MediaType, item_id: str, has_album: bool, expected_icon: str | None
+) -> None:
+    """A preset of any media type has an icon the server's icon route can resolve."""
+    player, mass = _player_with_mocked_mass()
+    player.client = MagicMock()
+    item = MagicMock(media_type=media_type, item_id=item_id, uri=f"library://x/{item_id}")
+    item.name = "Item"
+    item.album = MagicMock(item_id="42") if has_album else None
+    mass.config.get_raw_player_config_value.side_effect = lambda _pid, key, *_a: (
+        item.uri if key == "preset_1" else None
+    )
+    mass.music.get_item_by_uri = AsyncMock(return_value=item)
+    with patch.object(SqueezelitePlayer, "player_id", "p1", create=True):
+        await player._set_preset_items()
+
+    icon = player.client.presets[0].icon
+    if expected_icon is None:
+        assert icon.startswith("music/uri-")
+        assert icon.endswith("/cover")
+    else:
+        assert icon == expected_icon
