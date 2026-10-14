@@ -104,6 +104,10 @@ def is_protocol_only_device(device_model: str) -> bool:
 class SqueezelitePlayer(Player):
     """Squeezelite Player implementation."""
 
+    # set once the saved power state has been restored: the state a player starts with is not a
+    # choice made by the user, so it is not saved
+    _power_tracking: bool = False
+
     def __init__(
         self,
         provider: SqueezelitePlayerProvider,
@@ -169,15 +173,7 @@ class SqueezelitePlayer(Player):
         await self.client.mute(init_muted)
         await self.client.volume_set(init_volume)
         await self.mass.players.register_or_update(self)
-        # A player that connects (it booted, its connection dropped, or Music Assistant restarted)
-        # comes up powered on, instead of showing the powered-off screen with its queue untouched.
-        # Going through the power command applies "Automatically play (resume on power on)": it
-        # only resumes the queue when that player setting is ticked, which is off by default.
-        if PlayerFeature.POWER in self.supported_features:
-            try:
-                await self.mass.players.cmd_power(player_id, True)
-            except MusicAssistantError as err:
-                self.logger.debug("Could not power on %s after connecting: %s", player_id, err)
+        await self._restore_power()
 
     async def get_config_entries(self) -> list[ConfigEntry]:
         """Return all (provider/player specific) Config Entries for the player."""
@@ -459,7 +455,10 @@ class SqueezelitePlayer(Player):
         # Update player state from slim player
         self._attr_available = self.client.connected
         self._attr_name = self.client.name
+        was_powered = self._attr_powered
         self._attr_powered = self.client.powered
+        if self._power_tracking and self.client.connected and self._attr_powered != was_powered:
+            self.mass.create_task(self._save_power_state(self._attr_powered))
         old_state = self._attr_playback_state
         self._attr_playback_state = STATE_MAP[self.client.state]
         self._attr_volume_level = self.client.volume_level
@@ -909,6 +908,41 @@ class SqueezelitePlayer(Player):
                 return "wav"
         return self.mass.config.get_raw_player_config_value(
             member_player_id, CONF_OUTPUT_CODEC, "flac"
+        )
+
+    async def _restore_power(self) -> None:
+        """Power the player on again, unless it was switched off before it disconnected."""
+        # As on LMS: a player that was on comes back on after it reboots, loses its connection or
+        # Music Assistant restarts, and one that was switched off stays off. A player with no saved
+        # state comes up on. Going through the power command applies "Automatically play (resume on
+        # power on)": it only resumes the queue when that player setting is ticked, which is off by
+        # default.
+        # Hardware that powers itself on at boot (e.g. the Squeezebox Radio) overrides a saved off.
+        if PlayerFeature.POWER not in self.supported_features:
+            return
+        was_powered = await self.mass.cache.get(
+            key=self._power_cache_key,
+            provider=self.provider.instance_id,
+            category=CACHE_CATEGORY_PREV_STATE,
+        )
+        if was_powered is None or was_powered:
+            try:
+                await self.mass.players.cmd_power(self.player_id, True)
+            except MusicAssistantError as err:
+                self.logger.debug("Could not power on %s after connecting: %s", self.player_id, err)
+        self._power_tracking = True
+
+    @property
+    def _power_cache_key(self) -> str:
+        return f"{self.player_id}_power"
+
+    async def _save_power_state(self, powered: bool) -> None:
+        """Remember the power state, next to the volume and mute, for the next connection."""
+        await self.mass.cache.set(
+            key=self._power_cache_key,
+            data=powered,
+            provider=self.provider.instance_id,
+            category=CACHE_CATEGORY_PREV_STATE,
         )
 
 
