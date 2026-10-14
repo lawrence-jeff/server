@@ -32,6 +32,7 @@ Notes:
 
 import asyncio
 import base64
+import dataclasses
 import inspect
 import logging
 import math
@@ -1713,6 +1714,8 @@ class BrowseLibraryHandler:
             "power": self._handle_power,
             "play": self._handle_play,
             "pause": self._handle_pause,
+            "stop": self._handle_stop,
+            "mode": self._handle_mode,
             "time": self._handle_time,
         }
         if (handler := handlers.get(command)) is not None:
@@ -2464,27 +2467,80 @@ class BrowseLibraryHandler:
         :param slim_command: The command the device sent.
         """
         # SlimClient.play() only acts when paused, so it silently does nothing once a track has
-        # ended (stopped). The queue's play() handles both the paused and the stopped case.
+        # ended (stopped). The queue's play() handles both the paused and the stopped case, and
+        # for a device in a group it starts the whole group, not just that device.
         player_id = slim_command.player_id
         if not player_id or self._slimproto.get_player(player_id) is None:
             raise NotImplementedError
-        await self.mass.player_queues.play(queue_id=player_id)
+        if (control := self._control_queue(player_id)) is None:
+            raise NotImplementedError
+        await self.mass.player_queues.play(queue_id=control[0])
 
     async def _handle_pause(self, slim_command: SlimCLICommand) -> None:
         """
-        Handle the `pause` command, which toggles play and pause.
+        Handle the `pause` command: `pause 1` pauses, `pause 0` resumes, `pause` alone toggles.
 
-        Pausing is the built-in handler's; starting again goes through Music Assistant's queue.
+        Resuming goes through Music Assistant's queue, and so does pausing a device that is in a
+        group, so that the whole group pauses. Pausing a single player is the built-in handler's.
 
         :param slim_command: The command the device sent.
         """
-        # The built-in toggle starts again with SlimClient.play(), which does nothing once a track
-        # has ended (stopped), as in _handle_play.
+        # The built-in treats every pause as a toggle and resumes with SlimClient.play(), which
+        # does nothing once a track has ended (stopped), as in _handle_play. Asking for the state
+        # the player is already in changes nothing, so a device whose idea of the state is out of
+        # date cannot invert it.
         player_id = slim_command.player_id
         player = self._slimproto.get_player(player_id) if player_id else None
-        if player is None or player.state == PlayerState.PLAYING:
+        if player is None or (control := self._control_queue(player_id)) is None:
             raise NotImplementedError
-        await self.mass.player_queues.play(queue_id=player_id)
+        queue_id, in_group = control
+        playing = player.state == PlayerState.PLAYING
+        try:
+            want_pause = bool(int(str(slim_command.args[0]))) if slim_command.args else playing
+        except ValueError:
+            want_pause = playing
+        if not want_pause:
+            if not playing:
+                await self.mass.player_queues.play(queue_id=queue_id)
+        elif playing:
+            if not in_group:
+                raise NotImplementedError
+            # the built-in would pause only this device and leave the rest of the group playing
+            await self.mass.player_queues.pause(queue_id=queue_id)
+
+    async def _handle_stop(self, slim_command: SlimCLICommand) -> None:
+        """
+        Handle the `stop` command for a device that is in a group, so the whole group stops.
+
+        A single player is stopped by the built-in handler.
+
+        :param slim_command: The command the device sent.
+        """
+        player_id = slim_command.player_id
+        if not player_id or self._slimproto.get_player(player_id) is None:
+            raise NotImplementedError
+        control = self._control_queue(player_id)
+        if control is None or not control[1]:
+            raise NotImplementedError
+        await self.mass.player_queues.stop(queue_id=control[0])
+
+    async def _handle_mode(self, slim_command: SlimCLICommand) -> None:
+        """
+        Handle `mode play`, `mode pause` and `mode stop` like the commands of the same name.
+
+        :param slim_command: The command the device sent.
+        """
+        # The built-in calls its own play, pause and stop handlers, which only act on the device
+        # that sent the command, so the buttons of a device in a group would not reach the group.
+        sub = str(slim_command.args[0]) if slim_command.args else ""
+        handlers = {
+            "play": self._handle_play,
+            "pause": self._handle_pause,
+            "stop": self._handle_stop,
+        }
+        if (handler := handlers.get(sub)) is None:
+            raise NotImplementedError
+        await handler(dataclasses.replace(slim_command, command=sub, args=slim_command.args[1:]))
 
     async def _handle_time(self, slim_command: SlimCLICommand) -> None:
         """
@@ -2502,6 +2558,8 @@ class BrowseLibraryHandler:
         player = self._slimproto.get_player(player_id) if player_id else None
         args = slim_command.args
         if player is None or not args or str(args[0]) == "?":
+            raise NotImplementedError
+        if (control := self._control_queue(player_id)) is None:
             raise NotImplementedError
         cli = self._slimproto.cli
         text = str(args[0]).strip()
@@ -2522,7 +2580,7 @@ class BrowseLibraryHandler:
             target = min(target, int(duration))
         cli.set_pending_position(player_id, target)
         try:
-            await self.mass.player_queues.seek(queue_id=player_id, position=target)
+            await self.mass.player_queues.seek(queue_id=control[0], position=target)
         except MusicAssistantError as err:
             # for example an item without a duration, which cannot be seeked
             logger.warning("Seek to %ss was refused by Music Assistant: %s", target, err)
@@ -2530,6 +2588,20 @@ class BrowseLibraryHandler:
         except Exception:
             cli.set_pending_position(player_id, None)
             raise
+
+    def _control_queue(self, player_id: str) -> tuple[str, bool] | None:
+        """
+        Return the queue that play, pause and seek on a device apply to, and if it is in a group.
+
+        :param player_id: The device the command came from.
+        """
+        # A device that is a member of a group plays the group's queue, not its own, so a command
+        # from it has to go to that queue to reach every device of the group.
+        if (queue := self.mass.player_queues.get_active_queue(player_id)) is None:
+            return None
+        mass_player = self.mass.players.get_player(player_id)
+        in_group = queue.queue_id != player_id or bool(mass_player and mass_player.group_members)
+        return queue.queue_id, in_group
 
     async def _handle_playlist(self, slim_command: SlimCLICommand) -> None:
         """

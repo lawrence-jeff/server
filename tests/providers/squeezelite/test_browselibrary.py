@@ -7,6 +7,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from aioslimproto.cli import SlimCLICommand
 from aioslimproto.models import PlayerState
 from music_assistant_models.errors import MusicAssistantError
 
@@ -292,7 +293,11 @@ def _handler(
     handler.provider = SimpleNamespace(slimproto=slimproto)
     handler.mass = MagicMock()
     handler.mass.player_queues.play = AsyncMock()
+    handler.mass.player_queues.pause = AsyncMock()
+    handler.mass.player_queues.stop = AsyncMock()
     handler.mass.player_queues.seek = AsyncMock()
+    handler.mass.player_queues.get_active_queue.return_value = SimpleNamespace(queue_id="p1")
+    handler.mass.players.get_player.return_value = SimpleNamespace(group_members=[])
     return handler, cli, player
 
 
@@ -404,3 +409,175 @@ async def test_a_seek_music_assistant_refuses_is_logged_and_forgotten() -> None:
     handler.mass.player_queues.seek.side_effect = MusicAssistantError("no duration")
     await handler._handle_time(_command("time", 90))
     cli.set_pending_position.assert_called_with("p1", None)
+
+
+def _grouped(handler: Any, *, queue_id: str, members: list[str] | None = None) -> None:
+    """Make the handler's player part of a group whose active queue is queue_id."""
+    handler.mass.player_queues.get_active_queue.return_value = SimpleNamespace(queue_id=queue_id)
+    handler.mass.players.get_player.return_value = SimpleNamespace(group_members=members or [])
+
+
+async def test_play_pause_and_seek_on_a_member_control_the_whole_group() -> None:
+    """A member plays the leader's queue, so its controls go there and reach every device."""
+    handler, _cli, _player = _handler(PlayerState.PLAYING)
+    _grouped(handler, queue_id="leader")
+    queues = handler.mass.player_queues
+    await handler._handle_pause(_command("pause"))
+    queues.pause.assert_awaited_once_with(queue_id="leader")
+    await handler._handle_time(_command("time", 90))
+    queues.seek.assert_awaited_once_with(queue_id="leader", position=90)
+    paused, _cli, _player = _handler(PlayerState.PAUSED)
+    _grouped(paused, queue_id="leader")
+    await paused._handle_pause(_command("pause"))
+    await paused._handle_play(_command("play"))
+    assert paused.mass.player_queues.play.await_count == 2
+    paused.mass.player_queues.play.assert_awaited_with(queue_id="leader")
+    paused.mass.player_queues.pause.assert_not_awaited()
+
+
+async def test_pausing_the_leader_of_a_group_pauses_the_group() -> None:
+    """The leader has its own queue, but with members its pause must not stop at itself."""
+    handler, _cli, _player = _handler(PlayerState.PLAYING)
+    _grouped(handler, queue_id="p1", members=["p1", "m1"])
+    await handler._handle_pause(_command("pause"))
+    handler.mass.player_queues.pause.assert_awaited_once_with(queue_id="p1")
+
+
+async def test_pausing_a_single_player_is_still_the_built_ins() -> None:
+    """Without a group nothing changes: the library pauses the device itself."""
+    handler, _cli, _player = _handler(PlayerState.PLAYING)
+    with pytest.raises(NotImplementedError):
+        await handler._handle_pause(_command("pause"))
+    handler.mass.player_queues.pause.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("method", "args"),
+    [("_handle_play", ()), ("_handle_pause", ()), ("_handle_time", (90,))],
+)
+async def test_without_an_active_queue_the_commands_are_the_built_ins(
+    method: str, args: tuple[Any, ...]
+) -> None:
+    """If Music Assistant has no queue for the device there is nothing to control through."""
+    handler, _cli, _player = _handler(PlayerState.PAUSED)
+    handler.mass.player_queues.get_active_queue.return_value = None
+    with pytest.raises(NotImplementedError):
+        await getattr(handler, method)(_command(method.removeprefix("_handle_"), *args))
+
+
+def _cli_command(command: str, *args: Any) -> SlimCLICommand:
+    return SlimCLICommand(player_id="p1", command=command, args=list(args), kwargs={})
+
+
+@pytest.mark.parametrize(
+    ("state", "args", "group", "expected"),
+    [
+        # a single player: the library pauses, and resuming goes through the queue
+        (PlayerState.PLAYING, (), False, "library"),
+        (PlayerState.PLAYING, ("1",), False, "library"),
+        (PlayerState.PLAYING, ("0",), False, "nothing"),
+        (PlayerState.PAUSED, ("1",), False, "nothing"),
+        (PlayerState.PAUSED, ("0",), False, "play"),
+        (PlayerState.PAUSED, (), False, "play"),
+        (PlayerState.STOPPED, ("1",), False, "nothing"),
+        (PlayerState.STOPPED, ("0",), False, "play"),
+        # a device in a group acts on the group's queue
+        (PlayerState.PLAYING, ("1",), True, "pause"),
+        (PlayerState.PLAYING, (), True, "pause"),
+        (PlayerState.PLAYING, ("0",), True, "nothing"),
+        (PlayerState.PAUSED, ("0",), True, "play"),
+        (PlayerState.PAUSED, ("1",), True, "nothing"),
+        # something that is not a number toggles, as the plain command does
+        (PlayerState.PLAYING, ("abc",), True, "pause"),
+        (PlayerState.PAUSED, ("abc",), False, "play"),
+    ],
+)
+async def test_an_explicit_pause_value_is_taken_as_asked_and_a_plain_pause_toggles(
+    state: PlayerState, args: tuple[str, ...], group: bool, expected: str
+) -> None:
+    """`pause 1` pauses, `pause 0` resumes, and asking for the state it is in does nothing."""
+    handler, _cli, _player = _handler(state)
+    if group:
+        _grouped(handler, queue_id="leader")
+    queue_id = "leader" if group else "p1"
+    queues = handler.mass.player_queues
+    if expected == "library":
+        with pytest.raises(NotImplementedError):
+            await handler._handle_pause(_cli_command("pause", *args))
+        queues.play.assert_not_awaited()
+        queues.pause.assert_not_awaited()
+        return
+    await handler._handle_pause(_cli_command("pause", *args))
+    if expected == "play":
+        queues.play.assert_awaited_once_with(queue_id=queue_id)
+        queues.pause.assert_not_awaited()
+    elif expected == "pause":
+        queues.pause.assert_awaited_once_with(queue_id=queue_id)
+        queues.play.assert_not_awaited()
+    else:
+        queues.play.assert_not_awaited()
+        queues.pause.assert_not_awaited()
+
+
+async def test_stopping_a_device_in_a_group_stops_the_group() -> None:
+    """The group's queue is stopped, so every device stops, not only the one pressed."""
+    handler, _cli, _player = _handler(PlayerState.PLAYING)
+    _grouped(handler, queue_id="leader")
+    await handler._handle_stop(_cli_command("stop"))
+    handler.mass.player_queues.stop.assert_awaited_once_with(queue_id="leader")
+    _grouped(handler, queue_id="p1", members=["p1", "m1"])
+    handler.mass.player_queues.stop.reset_mock()
+    await handler._handle_stop(_cli_command("stop"))
+    handler.mass.player_queues.stop.assert_awaited_once_with(queue_id="p1")
+
+
+async def test_stopping_a_single_player_or_an_unknown_one_is_the_built_ins() -> None:
+    """The library stops a device that is not in a group."""
+    handler, _cli, _player = _handler(PlayerState.PLAYING)
+    with pytest.raises(NotImplementedError):
+        await handler._handle_stop(_cli_command("stop"))
+    unknown, _cli, _player = _handler(known=False)
+    with pytest.raises(NotImplementedError):
+        await unknown._handle_stop(_cli_command("stop"))
+    handler.mass.player_queues.stop.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("sub", "state", "args", "expected"),
+    [
+        ("play", PlayerState.PAUSED, (), "play"),
+        ("play", PlayerState.STOPPED, (), "play"),
+        ("pause", PlayerState.PLAYING, (), "pause"),
+        ("pause", PlayerState.PLAYING, ("1",), "pause"),
+        ("pause", PlayerState.PAUSED, ("0",), "play"),
+        ("stop", PlayerState.PLAYING, (), "stop"),
+    ],
+)
+async def test_the_mode_buttons_of_a_device_in_a_group_control_the_group(
+    sub: str, state: PlayerState, args: tuple[str, ...], expected: str
+) -> None:
+    """UE2's play button sends `mode play`, so it must reach the group like `play` does."""
+    handler, _cli, _player = _handler(state)
+    _grouped(handler, queue_id="leader")
+    await handler._handle_mode(_cli_command("mode", sub, *args))
+    queues = handler.mass.player_queues
+    getattr(queues, expected).assert_awaited_once_with(queue_id="leader")
+
+
+async def test_a_mode_it_does_not_know_is_the_built_ins() -> None:
+    """Only play, pause and stop are taken."""
+    handler, _cli, _player = _handler()
+    for command in (_cli_command("mode", "bogus"), _cli_command("mode")):
+        with pytest.raises(NotImplementedError):
+            await handler._handle_mode(command)
+
+
+async def test_a_mode_pause_keeps_its_value() -> None:
+    """`mode pause 0` is a resume, so a playing group is left alone, not paused."""
+    handler, _cli, _player = _handler(PlayerState.PLAYING)
+    _grouped(handler, queue_id="leader")
+    await handler._handle_mode(_cli_command("mode", "pause", "0"))
+    handler.mass.player_queues.pause.assert_not_awaited()
+    handler.mass.player_queues.play.assert_not_awaited()
+    await handler._handle_mode(_cli_command("mode", "pause", "1"))
+    handler.mass.player_queues.pause.assert_awaited_once_with(queue_id="leader")
