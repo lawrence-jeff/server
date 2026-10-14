@@ -469,11 +469,11 @@ def _cli_command(command: str, *args: Any) -> SlimCLICommand:
     return SlimCLICommand(player_id="p1", command=command, args=list(args), kwargs={})
 
 
-def _mixer_handler(muted: bool = False) -> tuple[Any, AsyncMock]:
+def _mixer_handler(muted: bool = False, level: int = 40) -> tuple[Any, AsyncMock]:
     handler, _cli, _player = _handler()
     mute = AsyncMock()
     handler.mass.players.get_player.return_value = SimpleNamespace(
-        volume_muted=muted, volume_mute=mute
+        volume_muted=muted, volume_mute=mute, volume_level=level
     )
     return handler, mute
 
@@ -513,6 +513,23 @@ async def test_other_mixer_commands_are_the_built_ins(args: tuple[str, ...]) -> 
     with pytest.raises(NotImplementedError):
         await handler._handle_mixer(_cli_command("mixer", *args))
     mute.assert_not_awaited()
+
+
+async def test_the_volume_query_of_a_muted_player_is_negative() -> None:
+    """A muted player answers with the volume it returns to, negated, as the status does."""
+    handler, mute = _mixer_handler(muted=True, level=40)
+    assert await handler._handle_mixer(_cli_command("mixer", "volume", "?")) == -40
+    mute.assert_not_awaited()
+
+
+@pytest.mark.parametrize(("muted", "level"), [(False, 40), (True, 0)])
+async def test_the_volume_query_of_a_player_that_is_not_muted_is_the_built_ins(
+    muted: bool, level: int
+) -> None:
+    """Without a muted volume to report, the library answers the query."""
+    handler, _mute = _mixer_handler(muted=muted, level=level)
+    with pytest.raises(NotImplementedError):
+        await handler._handle_mixer(_cli_command("mixer", "volume", "?"))
 
 
 async def test_mixer_from_an_unknown_player_is_the_built_ins() -> None:
