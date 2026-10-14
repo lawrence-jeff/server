@@ -557,8 +557,19 @@ class SqueezelitePlayer(Player):
             mime_type = get_mime_type(url.rsplit(".", maxsplit=1)[-1].split("?", maxsplit=1)[0])
         # live streams start on a smaller buffer (KB, tenths of a second) to cut latency
         stream_threshold, output_threshold = (64, 1) if low_latency_stream else (200, 20)
-        if send_flush and not enqueue and self._provider.slimproto:
-            self._provider.slimproto.cli.set_pending_position(slimplayer.player_id, elapsed_offset)
+        if send_flush and not enqueue:
+            if self._provider.slimproto:
+                self._provider.slimproto.cli.set_pending_position(
+                    slimplayer.player_id, elapsed_offset
+                )
+            # The position of the flushed stream no longer applies. Music Assistant adds the new
+            # stream's offset to the player's position, so the old one would show up in the queue
+            # as a jump forward until the new stream starts and the player reports again.
+            target = self.mass.players.get_player(slimplayer.player_id)
+            if isinstance(target, SqueezelitePlayer):
+                target._attr_elapsed_time = 0
+                target._attr_elapsed_time_last_updated = time.time()
+                target.update_state()
         await slimplayer.play_url(
             url=url,
             mime_type=mime_type,
