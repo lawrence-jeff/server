@@ -644,3 +644,48 @@ async def test_playing_powers_a_protocol_player_back_on(
         client.power.assert_awaited_once_with(True)
     else:
         client.power.assert_not_awaited()
+
+
+async def test_a_new_stream_resets_the_position_of_the_player_it_goes_to() -> None:
+    """The flushed stream's position is dropped, so it is not added to the new stream's offset."""
+    target = MagicMock(spec=SqueezelitePlayer)
+    target._attr_elapsed_time = 10
+    player, mass = _player_with_mocked_mass()
+    mass.players.get_player.return_value = target
+    player._extra_data = {}
+    mass.player_queues.get.return_value = None
+    mass.player_queues.get_item.return_value = None
+    slimplayer = MagicMock(player_id="m1")
+    slimplayer.play_url = AsyncMock()
+    await player._handle_play_url_for_slimplayer(
+        slimplayer, url="http://127.0.0.1:8097/stream.flac", media=_media(duration=200)
+    )
+    for call in mass.call_later.call_args_list:
+        call.args[1].close()
+    mass.players.get_player.assert_any_call("m1")
+    assert target._attr_elapsed_time == 0
+    assert target._attr_elapsed_time_last_updated > 0
+    target.update_state.assert_called_once()
+
+
+@pytest.mark.parametrize("kwargs", [{"enqueue": True}, {"send_flush": False}])
+async def test_a_stream_that_does_not_replace_the_playing_one_keeps_the_position(
+    kwargs: dict[str, Any],
+) -> None:
+    """An enqueued track, or one without a flush, leaves the playing position alone."""
+    target = MagicMock(spec=SqueezelitePlayer)
+    target._attr_elapsed_time = 10
+    player, mass = _player_with_mocked_mass()
+    mass.players.get_player.return_value = target
+    player._extra_data = {}
+    mass.player_queues.get.return_value = None
+    mass.player_queues.get_item.return_value = None
+    slimplayer = MagicMock(player_id="p1")
+    slimplayer.play_url = AsyncMock()
+    await player._handle_play_url_for_slimplayer(
+        slimplayer, url="http://127.0.0.1:8097/stream.flac", media=_media(duration=200), **kwargs
+    )
+    for call in mass.call_later.call_args_list:
+        call.args[1].close()
+    assert target._attr_elapsed_time == 10
+    target.update_state.assert_not_called()
