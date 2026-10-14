@@ -689,3 +689,105 @@ async def test_a_stream_that_does_not_replace_the_playing_one_keeps_the_position
         call.args[1].close()
     assert target._attr_elapsed_time == 10
     target.update_state.assert_not_called()
+
+
+async def _connected_with_volume(
+    saved: list[Any] | None = None,
+) -> tuple[SqueezelitePlayer, MagicMock]:
+    player, mass = _connecting_player(set())
+    mass.cache.get = AsyncMock(side_effect=lambda key, **_k: saved if key == "p1" else None)
+    await player.setup()
+    player.update_state = MagicMock()  # type: ignore[method-assign]
+
+    async def set_level(level: int) -> None:
+        player.client.volume_level = level
+
+    player.client.volume_set = AsyncMock(side_effect=set_level)
+    player.client.mute.reset_mock()
+    player.client.volume_set.reset_mock()
+    mass.cache.set.reset_mock()
+    return player, mass
+
+
+def _saved_volume(mass: MagicMock) -> list[Any]:
+    return list(mass.cache.set.await_args.kwargs["data"])
+
+
+async def test_muting_silences_the_volume_and_leaves_the_audio_output_on() -> None:
+    """The protocol mute would tear the playing stream down, so the volume goes to 0."""
+    try:
+        player, mass = await _connected_with_volume()
+        await player.volume_mute(True)
+        player.client.volume_set.assert_awaited_once_with(0)
+        player.client.mute.assert_not_awaited()
+        assert player._muted_volume == 50
+        assert _saved_volume(mass) == [True, 50]
+    finally:
+        patch.stopall()
+
+
+async def test_unmuting_returns_to_the_volume_from_before() -> None:
+    """The level at the time of muting comes back, and muting twice does not lose it."""
+    try:
+        player, mass = await _connected_with_volume()
+        await player.volume_mute(True)
+        player.client.volume_level = 0
+        await player.volume_mute(True)
+        player.client.volume_set.reset_mock()
+        await player.volume_mute(False)
+        player.client.volume_set.assert_awaited_once_with(50)
+        assert player._muted_volume is None
+        assert _saved_volume(mass) == [False, 50]
+        player.client.volume_set.reset_mock()
+        await player.volume_mute(False)
+        player.client.volume_set.assert_not_awaited()
+    finally:
+        patch.stopall()
+
+
+async def test_the_volume_set_while_muted_is_what_unmuting_returns_to() -> None:
+    """Changing the volume while muted stays silent until the player is unmuted."""
+    try:
+        player, mass = await _connected_with_volume()
+        await player.volume_mute(True)
+        player.client.volume_set.reset_mock()
+        await player.volume_set(30)
+        player.client.volume_set.assert_not_awaited()
+        assert _saved_volume(mass) == [True, 30]
+        await player.volume_mute(False)
+        player.client.volume_set.assert_awaited_once_with(30)
+    finally:
+        patch.stopall()
+
+
+async def test_the_reported_volume_is_the_real_one_while_muted() -> None:
+    """The mute does not show as a volume of 0, and raising it on the device unmutes."""
+    try:
+        player, _mass = await _connected_with_volume()
+        await player.volume_mute(True)
+        player.client.volume_level = 0
+        player.update_attributes()
+        assert player._attr_volume_muted is True
+        assert player._attr_volume_level == 50
+        player.client.volume_level = 20
+        player.update_attributes()
+        assert player._attr_volume_muted is False
+        assert player._attr_volume_level == 20
+    finally:
+        patch.stopall()
+
+
+@pytest.mark.parametrize(("saved", "sent"), [([True, 40], 0), ([False, 40], 40)])
+async def test_a_saved_mute_is_restored_without_switching_the_output_off(
+    saved: list[Any], sent: int
+) -> None:
+    """After a connect the audio output is on, and a saved mute is silence by volume."""
+    try:
+        player, mass = _connecting_player(set())
+        mass.cache.get = AsyncMock(side_effect=lambda key, **_k: saved if key == "p1" else None)
+        await player.setup()
+        player.client.mute.assert_awaited_once_with(False)
+        player.client.volume_set.assert_awaited_once_with(sent)
+        assert player._muted_volume == (40 if saved[0] else None)
+    finally:
+        patch.stopall()

@@ -525,6 +525,7 @@ async def test_the_ha_extras_module_gets_to_answer_first(
         ("stop", "_handle_stop"),
         ("mode", "_handle_mode"),
         ("time", "_handle_time"),
+        ("mixer", "_handle_mixer"),
     ],
 )
 async def test_each_command_goes_to_its_handler(

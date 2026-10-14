@@ -107,6 +107,9 @@ class SqueezelitePlayer(Player):
     # set once the saved power state has been restored: the state a player starts with is not a
     # choice made by the user, so it is not saved
     _power_tracking: bool = False
+    # the volume to return to while muted: the player is muted by setting its volume to 0 (see
+    # volume_mute), so this is None when it is not muted
+    _muted_volume: int | None = None
 
     def __init__(
         self,
@@ -170,8 +173,13 @@ class SqueezelitePlayer(Player):
             init_muted = False
             init_volume = DEFAULT_PLAYER_VOLUME
         await self.client.stop()
-        await self.client.mute(init_muted)
-        await self.client.volume_set(init_volume)
+        # the audio output must be on whatever the saved mute is, as it is muted with the volume
+        await self.client.mute(False)
+        if init_muted:
+            self._muted_volume = init_volume
+            await self.client.volume_set(0)
+        else:
+            await self.client.volume_set(init_volume)
         await self.mass.players.register_or_update(self)
         await self._restore_power()
 
@@ -210,25 +218,29 @@ class SqueezelitePlayer(Player):
 
     async def volume_set(self, volume_level: int) -> None:
         """Handle VOLUME_SET command on the player."""
-        await self.client.volume_set(volume_level)
-        # store last state in cache
-        await self.mass.cache.set(
-            key=self.player_id,
-            data=[self.client.muted, volume_level],
-            provider=self.provider.instance_id,
-            category=CACHE_CATEGORY_PREV_STATE,
-        )
+        if self._muted_volume is not None:
+            # stays silent while muted; the level is what unmuting returns to
+            self._muted_volume = volume_level
+        else:
+            await self.client.volume_set(volume_level)
+        await self._save_volume_state()
 
     async def volume_mute(self, muted: bool) -> None:
         """Handle VOLUME MUTE command on the player."""
-        await self.client.mute(muted)
-        # store last state in cache
-        await self.mass.cache.set(
-            key=self.player_id,
-            data=[muted, self.client.volume_level],
-            provider=self.provider.instance_id,
-            category=CACHE_CATEGORY_PREV_STATE,
-        )
+        # The protocol's mute switches the audio output off, which squeezelite and SqueezePlay
+        # treat like a power off: the stream that is playing is torn down and is not brought back
+        # by unmuting. So muting sets the volume to 0 and unmuting returns it to the level it had.
+        if muted == (self._muted_volume is not None):
+            return
+        if muted:
+            self._muted_volume = self.client.volume_level
+            await self.client.volume_set(0)
+        else:
+            level, self._muted_volume = self._muted_volume, None
+            await self.client.volume_set(level or 0)
+        await self._save_volume_state()
+        self.update_attributes()
+        self.update_state()
 
     async def power(self, powered: bool) -> None:
         """Handle POWER command on the player."""
@@ -461,8 +473,13 @@ class SqueezelitePlayer(Player):
             self.mass.create_task(self._save_power_state(self._attr_powered))
         old_state = self._attr_playback_state
         self._attr_playback_state = STATE_MAP[self.client.state]
-        self._attr_volume_level = self.client.volume_level
-        self._attr_volume_muted = self.client.muted
+        if self._muted_volume is not None and self.client.volume_level != 0:
+            # the volume was raised on the device while muted, which ends the mute
+            self._muted_volume = None
+        self._attr_volume_level = (
+            self.client.volume_level if self._muted_volume is None else self._muted_volume
+        )
+        self._attr_volume_muted = self._muted_volume is not None
         self._attr_device_info = DeviceInfo(
             model=self.client.device_model,
             manufacturer=self.client.device_type,
@@ -946,6 +963,16 @@ class SqueezelitePlayer(Player):
     @property
     def _power_cache_key(self) -> str:
         return f"{self.player_id}_power"
+
+    async def _save_volume_state(self) -> None:
+        """Remember the mute and the volume for the next connection."""
+        muted = self._muted_volume is not None
+        await self.mass.cache.set(
+            key=self.player_id,
+            data=[muted, self._muted_volume if muted else self.client.volume_level],
+            provider=self.provider.instance_id,
+            category=CACHE_CATEGORY_PREV_STATE,
+        )
 
     async def _save_power_state(self, powered: bool) -> None:
         """Remember the power state, next to the volume and mute, for the next connection."""
