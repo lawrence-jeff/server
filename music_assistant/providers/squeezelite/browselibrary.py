@@ -2719,9 +2719,11 @@ class BrowseLibraryHandler:
 
         :param slim_command: The command the device sent.
         """
-        # JiveLite's _whatsPlaying reads item_loop[1] whenever item_loop exists, so an empty list
-        # (an empty queue, or a push just as the first item is added) raises a Lua error in the
-        # client. LMS omits item_loop in that case, and so do we.
+        # The queue rows replace aioslimproto's item_loop, which already leaves its own empty one
+        # out, so this covers the provider's list. JiveLite's _whatsPlaying reads item_loop[1]
+        # whenever item_loop exists, so an empty list (an empty queue, or a push just as the first
+        # item is added) raises a Lua error in the client. LMS omits item_loop in that case, and
+        # so do we.
         result = await self._queue_status(slim_command)
         if not result.get("item_loop"):
             result.pop("item_loop", None)
