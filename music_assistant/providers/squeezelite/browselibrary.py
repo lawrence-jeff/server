@@ -50,7 +50,7 @@ from aiohttp import web
 # Reuses aioslimproto's menu_item_from_media_details; its MediaDetails input (url, metadata) is
 # built in player.py.
 from aioslimproto.cli import menu_item_from_media_details
-from aioslimproto.models import EventType, MediaDetails, SlimEvent
+from aioslimproto.models import EventType, MediaDetails, PlayerState, SlimEvent
 from music_assistant_models.enums import ImageType, MediaType, PlaybackState, QueueOption
 from music_assistant_models.errors import MediaNotFoundError, MusicAssistantError
 
@@ -1710,6 +1710,9 @@ class BrowseLibraryHandler:
             "status": self._handle_queue_status,
             "button": self._handle_button,
             "power": self._handle_power,
+            "play": self._handle_play,
+            "pause": self._handle_pause,
+            "time": self._handle_time,
         }
         if (handler := handlers.get(command)) is not None:
             return await handler(slim_command)
@@ -2452,6 +2455,66 @@ class BrowseLibraryHandler:
                 "Power command through Music Assistant failed (%s), using the built-in", err
             )
             raise NotImplementedError from err
+
+    async def _handle_play(self, slim_command: SlimCLICommand) -> None:
+        """
+        Handle the `play` command through Music Assistant's queue.
+
+        :param slim_command: The command the device sent.
+        """
+        # SlimClient.play() only acts when paused, so it silently does nothing once a track has
+        # ended (stopped). The queue's play() handles both the paused and the stopped case.
+        player_id = slim_command.player_id
+        if not player_id or self._slimproto.get_player(player_id) is None:
+            raise NotImplementedError
+        await self.mass.player_queues.play(queue_id=player_id)
+
+    async def _handle_pause(self, slim_command: SlimCLICommand) -> None:
+        """
+        Handle the `pause` command, which toggles play and pause.
+
+        Pausing is the built-in handler's; starting again goes through Music Assistant's queue.
+
+        :param slim_command: The command the device sent.
+        """
+        # The built-in toggle starts again with SlimClient.play(), which does nothing once a track
+        # has ended (stopped), as in _handle_play.
+        player_id = slim_command.player_id
+        player = self._slimproto.get_player(player_id) if player_id else None
+        if player is None or player.state == PlayerState.PLAYING:
+            raise NotImplementedError
+        await self.mass.player_queues.play(queue_id=player_id)
+
+    async def _handle_time(self, slim_command: SlimCLICommand) -> None:
+        """
+        Handle a seek (`time N`, `time +N`, `time -N`) through Music Assistant's queue.
+
+        The "?" query is the built-in handler's.
+
+        :param slim_command: The command the device sent.
+        """
+        # A seek needs a new stream that starts at the position, which only Music Assistant can
+        # make. The position the device is shown is the target from the moment the command
+        # arrives: the status pushes the seek itself triggers come before the new stream is
+        # requested and would otherwise carry the old position.
+        player_id = slim_command.player_id
+        player = self._slimproto.get_player(player_id) if player_id else None
+        args = slim_command.args
+        if player is None or not args or str(args[0]) == "?":
+            raise NotImplementedError
+        cli = self._slimproto.cli
+        text = str(args[0])
+        target = int(text)
+        if text[0] in "+-":
+            # relative to the position being shown, since the player's own is relative to the
+            # stream it is playing, which restarts at zero after a seek
+            target += int(cli._corrected_elapsed_seconds(player))
+        cli.set_pending_position(player_id, target)
+        try:
+            await self.mass.player_queues.seek(queue_id=player_id, position=target)
+        except Exception:
+            cli.set_pending_position(player_id, None)
+            raise
 
     async def _handle_playlist(self, slim_command: SlimCLICommand) -> None:
         """

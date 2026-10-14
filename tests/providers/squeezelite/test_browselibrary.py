@@ -4,6 +4,10 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+from aioslimproto.models import PlayerState
 
 from music_assistant.providers.squeezelite import browselibrary as bl
 
@@ -274,3 +278,76 @@ async def test_library_page_counts_what_was_fetched_for_a_search() -> None:
     assert controller.calls[0]["limit"] == 500
     assert controller.calls[0]["favorite"] is None
     assert len(controller.calls) == 1
+
+
+def _handler(
+    state: PlayerState = PlayerState.PLAYING, *, known: bool = True
+) -> tuple[Any, MagicMock, SimpleNamespace]:
+    player = SimpleNamespace(state=state, current_media=None, elapsed_seconds=30)
+    cli = MagicMock()
+    cli._corrected_elapsed_seconds.return_value = 30
+    slimproto = SimpleNamespace(get_player=lambda _id: player if known else None, cli=cli)
+    handler: Any = bl.BrowseLibraryHandler.__new__(bl.BrowseLibraryHandler)
+    handler.provider = SimpleNamespace(slimproto=slimproto)
+    handler.mass = MagicMock()
+    handler.mass.player_queues.play = AsyncMock()
+    handler.mass.player_queues.seek = AsyncMock()
+    return handler, cli, player
+
+
+def _command(command: str, *args: Any) -> SimpleNamespace:
+    return SimpleNamespace(command=command, player_id="p1", args=list(args), kwargs={})
+
+
+async def test_play_goes_through_the_queue_for_a_known_player() -> None:
+    """Play is the queue's play, which also works once a track has ended."""
+    handler, _cli, _player = _handler(PlayerState.STOPPED)
+    await handler._handle_play(_command("play"))
+    handler.mass.player_queues.play.assert_awaited_once_with(queue_id="p1")
+    unknown, _cli, _player = _handler(known=False)
+    with pytest.raises(NotImplementedError):
+        await unknown._handle_play(_command("play"))
+
+
+async def test_pause_only_starts_again_through_the_queue() -> None:
+    """A playing player is paused by the built-in handler, any other is started."""
+    playing, _cli, _player = _handler(PlayerState.PLAYING)
+    with pytest.raises(NotImplementedError):
+        await playing._handle_pause(_command("pause"))
+    playing.mass.player_queues.play.assert_not_awaited()
+    for state in (PlayerState.PAUSED, PlayerState.STOPPED):
+        handler, _cli, _player = _handler(state)
+        await handler._handle_pause(_command("pause"))
+        handler.mass.player_queues.play.assert_awaited_once_with(queue_id="p1")
+
+
+async def test_seek_shows_the_target_and_asks_the_queue_to_seek() -> None:
+    """The target is reported from the moment the command arrives, absolute or relative."""
+    handler, cli, _player = _handler()
+    seek = handler.mass.player_queues.seek
+    await handler._handle_time(_command("time", 90))
+    cli.set_pending_position.assert_called_with("p1", 90)
+    seek.assert_awaited_with(queue_id="p1", position=90)
+    await handler._handle_time(_command("time", "+10"))
+    seek.assert_awaited_with(queue_id="p1", position=40)
+    await handler._handle_time(_command("time", "-5"))
+    seek.assert_awaited_with(queue_id="p1", position=25)
+
+
+async def test_the_position_query_and_unknown_players_are_left_to_the_built_in() -> None:
+    """Only a seek is handled here."""
+    handler, _cli, _player = _handler()
+    with pytest.raises(NotImplementedError):
+        await handler._handle_time(_command("time", "?"))
+    unknown, _cli, _player = _handler(known=False)
+    with pytest.raises(NotImplementedError):
+        await unknown._handle_time(_command("time", 90))
+
+
+async def test_a_refused_seek_stops_showing_its_target() -> None:
+    """If Music Assistant cannot seek, the position is read from the player again."""
+    handler, cli, _player = _handler()
+    handler.mass.player_queues.seek.side_effect = RuntimeError("cannot seek")
+    with pytest.raises(RuntimeError):
+        await handler._handle_time(_command("time", 90))
+    cli.set_pending_position.assert_called_with("p1", None)
