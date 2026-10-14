@@ -314,7 +314,7 @@ async def test_a_bare_id_without_art_falls_back_like_the_cover_route() -> None:
 
 async def test_the_root_page_sends_the_browser_to_the_music_assistant_web_ui() -> None:
     """The link on a piCorePlayer's settings page ends up on the MA UI of the same host."""
-    request = make_mocked_request("GET", "/", headers={"Host": "192.168.0.75:9000"})
+    request = make_mocked_request("GET", "/", headers={"Host": "192.0.2.10:9000"})
     with pytest.raises(web.HTTPFound) as redirect:
         await bl.handle_root_redirect(request)
-    assert redirect.value.location == "http://192.168.0.75:8095/"
+    assert redirect.value.location == "http://192.0.2.10:8095/"

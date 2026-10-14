@@ -196,7 +196,7 @@ async def test_a_huge_playlist_or_podcast_is_capped_defensively() -> None:
 
 async def test_an_artists_view_lists_albums_then_other_tracks_then_matching_radio() -> None:
     """Tracks already on the artist's albums are left out, and radio is matched by name."""
-    artist = _item("Avril Lavigne", 8)
+    artist = _item("Test Artist", 8)
     on_album = _item("On Album", 1, album=_item("Record", 42))
     featured = _item("Featured", 2, album=_item("Other Record", 77))
     no_album = _item("Loose", 3)
@@ -206,7 +206,7 @@ async def test_an_artists_view_lists_albums_then_other_tracks_then_matching_radi
         tracks=AsyncMock(return_value=[on_album, featured, no_album]),
     )
     radio = _Controller(
-        [_item("Avril Lavigne Radio", 5), _item("Jazz FM", 6), _item("avril lavigne mix", 7)]
+        [_item("Test Artist Radio", 5), _item("Jazz FM", 6), _item("test artist mix", 7)]
     )
     page = await bl.get_artist_all(_mass(artists=artists, radio=radio), "8", KWARGS)
     texts = [row["text"].split("\n")[0] for row in page["item_loop"]]
@@ -214,12 +214,12 @@ async def test_an_artists_view_lists_albums_then_other_tracks_then_matching_radi
         "Record",
         "Featured",
         "Loose",
-        "Avril Lavigne Radio",
-        "avril lavigne mix",
+        "Test Artist Radio",
+        "test artist mix",
     ]
     assert page["count"] == 5
     assert all("actions" in row for row in page["item_loop"])
-    assert radio.calls[0]["search"] == "Avril Lavigne"
+    assert radio.calls[0]["search"] == "Test Artist"
 
 
 async def test_an_artists_view_can_be_paged() -> None:
