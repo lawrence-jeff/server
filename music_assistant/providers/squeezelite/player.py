@@ -45,6 +45,7 @@ from music_assistant.models.player import (
 )
 
 from . import haextras  # HA-EXTRAS
+from .browselibrary import art_ref_for_item
 from .constants import (
     CONF_ENTRY_DISPLAY,
     CONF_ENTRY_VISUALIZATION,
@@ -142,7 +143,6 @@ class SqueezelitePlayer(Player):
         self.multi_client_stream: MultiClientStream | None = None
         self._sync_playpoints: deque[SyncPlayPoint] = deque(maxlen=MIN_REQ_PLAYPOINTS)
         self._do_not_resync_before: float = 0.0
-        self._audio_source_active: bool = False
 
     async def on_config_updated(self) -> None:
         """Handle logic when the PlayerConfig is first loaded or updated."""
@@ -242,7 +242,6 @@ class SqueezelitePlayer(Player):
 
     async def stop(self) -> None:
         """Handle STOP command on the player."""
-        self._audio_source_active = False
         # Clean up any existing multi-client stream
         if self.multi_client_stream is not None:
             await self.multi_client_stream.stop()
@@ -531,7 +530,7 @@ class SqueezelitePlayer(Player):
             media.duration if media.duration is not None else (media.stream_duration or 0)
         )
         elapsed_offset = (
-            media.duration - media.stream_duration
+            max(0, media.duration - media.stream_duration)
             if media.duration is not None and media.stream_duration is not None
             else 0
         )
@@ -552,13 +551,7 @@ class SqueezelitePlayer(Player):
         if media.source_id and (queue := self.mass.player_queues.get(media.source_id)):
             self.extra_data["playlist repeat"] = REPEATMODE_MAP[queue.repeat_mode]
             self.extra_data["playlist shuffle"] = int(queue.shuffle_enabled)
-        audio_source_active = media.media_type == MediaType.AUDIO_SOURCE
-        low_latency_stream = audio_source_active or media.media_type == MediaType.RADIO
-        # set the flag on the player that owns the slimclient (may differ from self
-        # during group playback where self is the leader but slimplayer is a member)
-        target_player = self.mass.players.get_player(slimplayer.player_id)
-        if isinstance(target_player, SqueezelitePlayer):
-            target_player._audio_source_active = audio_source_active
+        low_latency_stream = media.media_type in (MediaType.AUDIO_SOURCE, MediaType.RADIO)
         if mime_type is None:
             # derive from the url extension (only reliable for plain file urls; sync
             # group member urls have no extension, so callers pass the codec mime)
@@ -851,17 +844,19 @@ class SqueezelitePlayer(Player):
                     media_item = await self.mass.music.get_item_by_uri(cast("str", preset_conf))
                     # A local identifier that the server's icon route resolves to art. The
                     # client must never be handed a raw image URL (it asks the server for an
-                    # /imageproxy/ path that does not exist).
+                    # /imageproxy/ path that does not exist). Other kinds of item (a track, a
+                    # podcast episode) are identified like the rows of the browse lists.
                     prefix = PRESET_ICON_PREFIX.get(media_item.media_type)
+                    art_ref = (
+                        f"{prefix}{media_item.item_id}"
+                        if prefix is not None
+                        else art_ref_for_item(media_item)
+                    )
                     preset_items.append(
                         SlimPreset(
                             uri=media_item.uri,
                             text=media_item.name,
-                            icon=(
-                                f"music/{prefix}{media_item.item_id}/cover"
-                                if prefix is not None
-                                else ""
-                            ),
+                            icon=f"music/{art_ref}/cover" if art_ref else "",
                         )
                     )
                 except MusicAssistantError:
