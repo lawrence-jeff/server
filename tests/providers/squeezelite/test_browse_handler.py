@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -355,14 +354,14 @@ async def test_an_album_is_queued_through_its_library_tracks() -> None:
 
 
 async def test_a_playlist_and_a_podcast_are_queued_from_their_items() -> None:
-    """Async generators of tracks and episodes are collected before queuing."""
+    """The tracks and episodes of a playlist or podcast are fetched, up to the cap, before queuing."""
     handler = _handler()
     handler._queue_items = AsyncMock()
     container = SimpleNamespace(name="Mix", uri="library://playlist/5", item_id=5, album=None)
 
-    async def _items(*_args: Any) -> AsyncIterator[SimpleNamespace]:
-        for number in (1, 2):
-            yield _track(name=f"E{number}")
+    async def _items(*_args: Any, limit: int | None = 500) -> list[SimpleNamespace]:
+        assert limit == 2000
+        return [_track(name=f"E{number}") for number in (1, 2)]
 
     handler.mass.music.playlists.get_library_item = AsyncMock(return_value=container)
     handler.mass.music.playlists.tracks = _items

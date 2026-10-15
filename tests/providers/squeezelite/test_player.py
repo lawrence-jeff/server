@@ -697,7 +697,7 @@ async def _connected_with_volume(
     player, mass = _connecting_player(set())
     mass.cache.get = AsyncMock(side_effect=lambda key, **_k: saved if key == "p1" else None)
     await player.setup()
-    player.update_state = MagicMock()  # type: ignore[method-assign]
+    player.update_state = MagicMock()  # type: ignore[method-assign,misc]
 
     async def set_level(level: int) -> None:
         player.client.volume_level = level
@@ -772,7 +772,7 @@ async def test_the_reported_volume_is_the_real_one_while_muted() -> None:
         player.client.volume_level = 20
         player.update_attributes()
         assert player._attr_volume_muted is False
-        assert player._attr_volume_level == 20
+        assert player._attr_volume_level == 20  # type: ignore[unreachable]
     finally:
         patch.stopall()
 
