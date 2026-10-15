@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -161,17 +160,22 @@ async def test_the_other_lists_use_their_own_icon_ids_and_actions(
     assert page["base"]["actions"]["more"]["cmd"] == more_cmd
 
 
-async def _generator(count: int) -> AsyncIterator[SimpleNamespace]:
-    for i in range(count):
-        yield _item(f"E{i}", i, uri=f"library://episode/{i}")
+def _page_of(count: int) -> Any:
+    """Return a controller call that gives a page of at most `limit` items, as Music Assistant does."""
+
+    async def fetch(*_args: Any, limit: int | None = 500, **_kwargs: Any) -> list[SimpleNamespace]:
+        fetch.limits.append(limit)  # type: ignore[attr-defined]
+        items = [_item(f"E{i}", i, uri=f"library://episode/{i}") for i in range(count)]
+        return items if limit is None else items[:limit]
+
+    fetch.limits = []  # type: ignore[attr-defined]
+    return fetch
 
 
 @pytest.mark.parametrize("which", ["playlist", "podcast"])
 async def test_playlist_tracks_and_episodes_are_played_by_uri(which: str) -> None:
     """Items that may not be library items carry their uri, paged after collecting them."""
-    controller = SimpleNamespace(
-        tracks=lambda *_a: _generator(6), episodes=lambda *_a: _generator(6)
-    )
+    controller = SimpleNamespace(tracks=_page_of(6), episodes=_page_of(6))
     mass = _mass(playlists=controller, podcasts=controller)
     function = bl.get_playlist_tracks if which == "playlist" else bl.get_podcast_episodes
     page = await function(mass, "5", KWARGS, index=2, quantity=3)
@@ -182,16 +186,16 @@ async def test_playlist_tracks_and_episodes_are_played_by_uri(which: str) -> Non
 
 
 async def test_a_huge_playlist_or_podcast_is_capped_defensively() -> None:
-    """No more than 2000 items are collected, whatever the list holds."""
-    controller = SimpleNamespace(
-        tracks=lambda *_a: _generator(2500), episodes=lambda *_a: _generator(2500)
-    )
+    """The 2000-item cap is asked for (the default page is 500), whatever the list holds."""
+    controller = SimpleNamespace(tracks=_page_of(2500), episodes=_page_of(2500))
     mass = _mass(playlists=controller, podcasts=controller)
     for function in (bl.get_playlist_tracks, bl.get_podcast_episodes):
         page = await function(mass, "5", KWARGS, 0, 10)
         assert page["count"] == 2000
         empty = await function(mass, None, KWARGS)
         assert empty["item_loop"] == []
+    assert controller.tracks.limits == [2000]
+    assert controller.episodes.limits == [2000]
 
 
 async def test_an_artists_view_lists_albums_then_other_tracks_then_matching_radio() -> None:

@@ -115,6 +115,8 @@ def _menu_icon(name: str) -> str:
 
 
 _ROW_ACTIONS = ("go", "play", "add", "add-hold", "more")
+# The most items of a playlist or podcast that are collected before they are paginated here
+_COLLECT_LIMIT = 2000
 
 
 def _paginate(
@@ -981,16 +983,15 @@ async def get_playlist_tracks(
     :param index: Offset of the first row asked for.
     :param quantity: Number of rows asked for, or None for all.
     """
-    # Unlike album tracks, PlaylistController.tracks() is an async generator, so it is consumed into
-    # a list before paginating (the 2000-item cap is defensive). Items may be provider-native rather
+    # PlaylistController.tracks() returns a page of at most `limit` items (500 by default), so the
+    # 2000-item cap is asked for here and paginated locally. Items may be provider-native rather
     # than library items, so commonParams uses "uri" (preferred by _handle_playlistcontrol) instead
     # of "track_id".
-    items = []
-    if playlist_id is not None:
-        async for item in mass.music.playlists.tracks(playlist_id, "library"):
-            items.append(item)
-            if len(items) >= 2000:  # defensive cap
-                break
+    items = (
+        await mass.music.playlists.tracks(playlist_id, "library", limit=_COLLECT_LIMIT)
+        if playlist_id is not None
+        else []
+    )
     window, total, offset = _paginate(items, index, quantity)
     item_loop = []
     for i, item in enumerate(window):
@@ -1188,15 +1189,14 @@ async def get_podcast_episodes(
     :param index: Offset of the first row asked for.
     :param quantity: Number of rows asked for, or None for all.
     """
-    # PodcastsController.episodes() is an async generator, so it is consumed into a list before
-    # paginating (the 2000-item cap is defensive). Playback uses the episode's "uri" rather than
-    # "track_id", since episodes may not be library items.
-    items = []
-    if podcast_id is not None:
-        async for item in mass.music.podcasts.episodes(podcast_id, "library"):
-            items.append(item)
-            if len(items) >= 2000:  # defensive cap
-                break
+    # PodcastsController.episodes() returns a page of at most `limit` items (500 by default), so the
+    # 2000-item cap is asked for here and paginated locally. Playback uses the episode's "uri"
+    # rather than "track_id", since episodes may not be library items.
+    items = (
+        await mass.music.podcasts.episodes(podcast_id, "library", limit=_COLLECT_LIMIT)
+        if podcast_id is not None
+        else []
+    )
     window, total, offset = _paginate(items, index, quantity)
     item_loop = []
     for i, item in enumerate(window):
@@ -2067,16 +2067,17 @@ class BrowseLibraryHandler:
     ) -> None:
         """Queue a whole playlist or podcast per queue_option, starting at play_index."""
         container: Playlist | Podcast
+        items: list[Any]
         if kind == "playlist":
             container = await self.mass.music.playlists.get_library_item(container_id)
-            items = [
-                item async for item in self.mass.music.playlists.tracks(container_id, "library")
-            ]
+            items = await self.mass.music.playlists.tracks(
+                container_id, "library", limit=_COLLECT_LIMIT
+            )
         else:
             container = await self.mass.music.podcasts.get_library_item(container_id)
-            items = [
-                item async for item in self.mass.music.podcasts.episodes(container_id, "library")
-            ]
+            items = await self.mass.music.podcasts.episodes(
+                container_id, "library", limit=_COLLECT_LIMIT
+            )
         await self._queue_items(
             player_id,
             queue_option,
