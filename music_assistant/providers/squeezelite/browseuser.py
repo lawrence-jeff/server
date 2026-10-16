@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from music_assistant_models.auth import UserRole
 from music_assistant_models.config_entries import ConfigEntry, ConfigValueOption
@@ -102,3 +102,24 @@ def acting_as(user: User | None) -> Iterator[None]:
         yield
     finally:
         set_impersonated_user(previous)
+
+
+async def menu_item(mass: MusicAssistant, player_id: str) -> dict[str, Any]:
+    """
+    Return the Settings > Advanced row that shows who the device browses as.
+
+    The menu is read when the device connects, so a changed setting shows after the next reconnect.
+
+    :param mass: The Music Assistant instance.
+    :param player_id: The player the menu is for.
+    """
+    user = await user_for_player(mass, player_id)
+    who = "Anonymous" if user is None else (user.display_name or user.username)
+    return {
+        "node": "advancedSettings",
+        "id": "settingsBrowseUser",
+        "text": f"Browse as: {who}",
+        "weight": 200,  # after the built-in rows, next to the platform and build lines
+        # a row that only informs: choosing it does nothing
+        "actions": {"go": {"player": 0, "cmd": ["jiveblankcommand"]}},
+    }
