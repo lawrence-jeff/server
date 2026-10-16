@@ -60,7 +60,7 @@ from music_assistant.controllers.player_queues.helpers import committed_index
 from music_assistant.controllers.webserver.helpers.auth_middleware import get_current_user
 from music_assistant.helpers import datetime as mass_datetime
 
-from . import browseuser, haextras  # HA-EXTRAS
+from . import applets, browseuser, haextras  # HA-EXTRAS
 
 if TYPE_CHECKING:
     from aioslimproto import SlimServer
@@ -1739,6 +1739,10 @@ class BrowseLibraryHandler:
             menu["item_loop"] += browse_user_items
             menu["count"] += len(browse_user_items)
             return menu
+
+        if command == "jiveapplets":
+            # the device's Applet Installer asks which applets this server offers
+            return applets.reply()
 
         haextras_reply = await haextras.handle(self.mass, slim_command)  # HA-EXTRAS
         if haextras_reply is not None:  # HA-EXTRAS

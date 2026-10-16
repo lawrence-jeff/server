@@ -18,7 +18,7 @@ from music_assistant.helpers.audio import get_mime_type
 from music_assistant.helpers.util import is_port_in_use
 from music_assistant.models.player_provider import PlayerProvider
 
-from . import haextras  # HA-EXTRAS
+from . import applets, haextras  # HA-EXTRAS
 from .browselibrary import BrowseLibraryHandler, handle_root_redirect, make_icon_routes
 from .constants import (
     CONF_CLI_JSON_PORT,
@@ -103,6 +103,8 @@ class SqueezelitePlayerProvider(PlayerProvider):
                 "/": handle_root_redirect,
                 "/html/images/{filename}": icon_handler,
                 "/music/{icon_id}/{filename}": icon_handler,
+                # the zip files of the applets offered to the devices' Applet Installer
+                applets.APPLET_ROUTE: applets.serve,
                 **haextras.routes(self.mass),  # HA-EXTRAS
                 # Lowest priority - only reached if nothing above matches.
                 # See handle_unmatched's own docstring (in browselibrary.py,
