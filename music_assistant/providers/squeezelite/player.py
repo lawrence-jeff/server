@@ -214,7 +214,7 @@ class SqueezelitePlayer(Player):
             CONF_ENTRY_HTTP_PROFILE_FORCED_2,
             CONF_ENTRY_PREFER_WAV_FOR_LIVE_SOURCES_DEFAULT_ENABLED,
             haextras.CONFIG_ENTRY,  # HA-EXTRAS
-            await browseuser.config_entry(self.mass),
+            await browseuser.config_entry(self.mass, self.player_id),
         ]
 
     async def volume_set(self, volume_level: int) -> None:

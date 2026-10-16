@@ -46,7 +46,7 @@ async def test_the_setting_offers_anonymous_first_then_every_usable_user() -> No
         _user("3", "old", enabled=False),
         _user("4", "hass", role=UserRole.SERVICE),
     ]
-    entry = await browseuser.config_entry(_mass(users))
+    entry = await browseuser.config_entry(_mass(users), "p1")
     assert entry.key == browseuser.CONF_BROWSE_USER
     assert entry.default_value == browseuser.ANONYMOUS
     assert [(o.title, o.value) for o in entry.options] == [
@@ -58,7 +58,7 @@ async def test_the_setting_offers_anonymous_first_then_every_usable_user() -> No
 
 async def test_with_a_single_user_the_setting_has_two_choices() -> None:
     """One user (the administrator) gives two choices: Anonymous and that user."""
-    entry = await browseuser.config_entry(_mass([_user("1", "admin", role=UserRole.ADMIN)]))
+    entry = await browseuser.config_entry(_mass([_user("1", "admin", role=UserRole.ADMIN)]), "p1")
     assert [o.title for o in entry.options] == ["Browse as Anonymous", "Browse as admin"]
 
 
@@ -150,3 +150,29 @@ async def test_the_advanced_settings_row_says_who_the_device_browses_as() -> Non
     assert named["text"] == "Browse as: Kim"
     plain = await browseuser.menu_item(_mass([_user("3", "lee")], "3"), "p1")
     assert plain["text"] == "Browse as: lee"
+
+
+async def test_a_user_limited_to_other_players_is_not_offered_for_this_player() -> None:
+    """A user's player filter applies: user2 limited to the kitchen radio is offered there but not on the other players."""
+    limited = _user("2", "user2")
+    limited.player_filter = ["kitchen"]
+    users = [_user("1", "admin", role=UserRole.ADMIN), limited]
+    kitchen = await browseuser.config_entry(_mass(users), "kitchen")
+    other = await browseuser.config_entry(_mass(users), "den")
+    assert [o.title for o in kitchen.options] == [
+        "Browse as Anonymous",
+        "Browse as admin",
+        "Browse as user2",
+    ]
+    assert [o.title for o in other.options] == ["Browse as Anonymous", "Browse as admin"]
+
+
+async def test_a_setting_that_names_a_user_who_may_no_longer_use_the_player_means_anonymous() -> (
+    None
+):
+    """The user was limited to other players after the setting was made: the request runs as nobody."""
+    limited = _user("2", "user2")
+    limited.player_filter = ["kitchen"]
+    mass = _mass([limited], "2")
+    assert await browseuser.user_for_player(mass, "kitchen") == limited
+    assert await browseuser.user_for_player(mass, "den") is None
