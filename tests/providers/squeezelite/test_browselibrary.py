@@ -158,7 +158,11 @@ def test_the_favorites_menu_of_an_anonymous_player_says_where_to_choose_a_user()
     anonymous = bl._favorites_category_menu(anonymous=True)
     assert anonymous["count"] == with_user["count"] + 1
     assert "Browse as" in anonymous["item_loop"][0]["text"]
-    assert anonymous["item_loop"][0]["actions"]["go"]["cmd"] == ["jiveblankcommand"]
+    assert anonymous["item_loop"][0]["actions"]["go"] == {
+        "player": 0,
+        "cmd": ["jiveblankcommand"],
+        "nextWindow": "parent",
+    }
     assert anonymous["item_loop"][1:] == with_user["item_loop"]
     assert all("Browse as" not in r["text"] for r in with_user["item_loop"])
 
@@ -168,6 +172,10 @@ def test_the_favorites_hint_alone_when_asked() -> None:
     only = bl._favorites_category_menu(anonymous=True, hint_only=True)
     assert only["count"] == 1
     assert "Browse as" in only["item_loop"][0]["text"]
+    assert (
+        only["window"]["windowStyle"] == "text_list"
+    )  # a line of text, not a tile with an empty icon
+    assert bl._favorites_category_menu(anonymous=True)["window"]["windowStyle"] == "icon_list"
     assert (
         bl._favorites_category_menu(hint_only=True)["count"]
         == bl._favorites_category_menu()["count"]

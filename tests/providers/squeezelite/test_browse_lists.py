@@ -649,7 +649,7 @@ async def test_an_anonymous_player_with_no_favorites_of_any_type_gets_only_the_h
     handler = _handler(_favorite_counts())
     menu = await handler._browse_library(_browse(0, 10, mode="favorites"))
     assert [row["text"] for row in menu["item_loop"]] == [
-        'No user chosen\nSet "Browse as" in this player\'s settings'
+        'No user chosen - set "Browse as" in this player\'s settings'
     ]
     assert menu["count"] == 1
     with browseuser.acting_as(SimpleNamespace(user_id="2")):  # type: ignore[arg-type]
