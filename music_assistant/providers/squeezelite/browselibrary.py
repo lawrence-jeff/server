@@ -1487,16 +1487,20 @@ def _favorites_category_menu(*, anonymous: bool = False, hint_only: bool = False
         item_loop.insert(
             0,
             {
-                "text": 'No user chosen\nSet "Browse as" in this player\'s settings',
-                "actions": {"go": _no_op()},
+                "text": 'No user chosen - set "Browse as" in this player\'s settings',
+                # closes the window, as the alarm message does (a row with no action cannot be left)
+                "actions": {"go": _no_op("parent")},
             },
         )
+    window_style = "icon_list"
     if anonymous and hint_only:
+        # one line of text, like the alarm message, not a tile with an empty icon
         item_loop = item_loop[:1]
+        window_style = "text_list"
     return {
         "count": len(item_loop),
         "offset": 0,
-        "window": {"windowStyle": "icon_list"},
+        "window": {"windowStyle": window_style},
         "item_loop": item_loop,
     }
 
