@@ -57,9 +57,10 @@ from music_assistant_models.enums import ImageType, MediaType, PlaybackState, Qu
 from music_assistant_models.errors import MediaNotFoundError, MusicAssistantError
 
 from music_assistant.controllers.player_queues.helpers import committed_index
+from music_assistant.controllers.webserver.helpers.auth_middleware import get_current_user
 from music_assistant.helpers import datetime as mass_datetime
 
-from . import haextras  # HA-EXTRAS
+from . import browseuser, haextras  # HA-EXTRAS
 
 if TYPE_CHECKING:
     from aioslimproto import SlimServer
@@ -1432,8 +1433,12 @@ def _search_category_menu(search: str) -> dict[str, Any]:
     }
 
 
-def _favorites_category_menu() -> dict[str, Any]:
-    """Return the favorites menu: All Favorites, then one entry per type."""
+def _favorites_category_menu(*, anonymous: bool = False) -> dict[str, Any]:
+    """
+    Return the favorites menu: All Favorites, then one entry per type.
+
+    :param anonymous: The player browses as nobody, which has no favorites: a first row says where to choose a user.
+    """
     # Like _search_category_menu, with favorite_only threaded through instead of search. Category
     # rows reuse the My Music tile icons. The player's presets are not listed here: they are items
     # of My Music.
@@ -1461,6 +1466,15 @@ def _favorites_category_menu() -> dict[str, Any]:
         }
         for label, submode, icon in categories
     ]
+    if anonymous:
+        # favorites belong to a Music Assistant user and an anonymous player has none: say how to fix it
+        item_loop.insert(
+            0,
+            {
+                "text": 'No user chosen\nSet "Browse as" in this player\'s settings',
+                "actions": {"go": _no_op()},
+            },
+        )
     return {
         "count": len(item_loop),
         "offset": 0,
@@ -1668,7 +1682,10 @@ class BrowseLibraryHandler:
         """Dispatch a slim command to its handler."""
         # Async because the listings await mass.music.* calls. NotImplementedError from _dispatch is
         # the intentional "let aioslimproto's built-in handle this" signal, not an error.
-        return await self._dispatch(slim_command)
+        # The request runs as the user the player is set to browse as (none unless its setting says so).
+        user = await browseuser.user_for_player(self.mass, slim_command.player_id)
+        with browseuser.acting_as(user):
+            return await self._dispatch(slim_command)
 
     @property
     def _slimproto(self) -> SlimServer:
@@ -1758,7 +1775,7 @@ class BrowseLibraryHandler:
         if mode == "favorites":
             # The Favorites home item: a category menu like "search"; see
             # _favorites_category_menu().
-            return _favorites_category_menu()
+            return _favorites_category_menu(anonymous=get_current_user() is None)
         if mode == "favorites_all":
             return await get_favorites_all(self.mass, kwargs, index, quantity)
         if mode == "artists":

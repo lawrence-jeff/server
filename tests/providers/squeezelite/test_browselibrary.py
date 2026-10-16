@@ -152,6 +152,17 @@ def test_category_menus_list_every_type_once() -> None:
     assert all(r["actions"]["go"]["params"]["favorite_only"] == 1 for r in favorites)
 
 
+def test_the_favorites_menu_of_an_anonymous_player_says_where_to_choose_a_user() -> None:
+    """Favorites need a user: an anonymous player gets a first row that does nothing but explain, a player with a user does not."""
+    with_user = bl._favorites_category_menu()
+    anonymous = bl._favorites_category_menu(anonymous=True)
+    assert anonymous["count"] == with_user["count"] + 1
+    assert "Browse as" in anonymous["item_loop"][0]["text"]
+    assert anonymous["item_loop"][0]["actions"]["go"]["cmd"] == ["jiveblankcommand"]
+    assert anonymous["item_loop"][1:] == with_user["item_loop"]
+    assert all("Browse as" not in r["text"] for r in with_user["item_loop"])
+
+
 def test_requested_cover_size_uses_the_larger_side() -> None:
     """The size suffix on an image path says how big the device wants it."""
     assert bl._requested_cover_size("cover_225x225_m") == 225

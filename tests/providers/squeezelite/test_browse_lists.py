@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from music_assistant.providers.squeezelite import browselibrary as bl
-from music_assistant.providers.squeezelite import haextras
+from music_assistant.providers.squeezelite import browseuser, haextras
 
 
 def _item(name: str, item_id: int = 1, **extra: Any) -> SimpleNamespace:
@@ -401,7 +401,12 @@ async def test_the_category_menus_and_what_cannot_be_browsed() -> None:
     search = await handler._browse_library(_browse(0, 10, mode="search", search="abc"))
     assert search["item_loop"][0]["text"] == "Search All"
     favorites = await handler._browse_library(_browse(0, 10, mode="favorites"))
-    assert favorites["item_loop"][0]["text"] == "All Favorites"
+    # no user is acting here, so a first row says where to choose one
+    assert "Browse as" in favorites["item_loop"][0]["text"]
+    assert favorites["item_loop"][1]["text"] == "All Favorites"
+    with browseuser.acting_as(SimpleNamespace(user_id="2")):  # type: ignore[arg-type]
+        as_user = await handler._browse_library(_browse(0, 10, mode="favorites"))
+    assert as_user["item_loop"][0]["text"] == "All Favorites"
     with pytest.raises(NotImplementedError):
         await handler._browse_library(_browse(0, 10, mode="bogus"))
     bad = SimpleNamespace(command="browselibrary", player_id="p1", args=["other"], kwargs={})
@@ -455,7 +460,10 @@ async def test_a_play_control_menu_for_a_playlist_or_podcast_row_is_a_flat_menu(
 
 
 def _dispatch_handler(*, known_player: bool = True) -> Any:
-    handler = _handler(SimpleNamespace())
+    # a player set to browse as nobody: the setting is read for every command
+    handler = _handler(
+        SimpleNamespace(config=SimpleNamespace(get_raw_player_config_value=lambda *_: "anonymous"))
+    )
     cli = MagicMock()
     cli._handle_menu = AsyncMock(return_value={"item_loop": [{"id": "preset1", "text": "Preset"}]})
     handler.provider = SimpleNamespace(
