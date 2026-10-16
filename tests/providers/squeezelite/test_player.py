@@ -41,6 +41,7 @@ async def test_squeezelite_prefers_wav_for_live_sources_by_default() -> None:
     player.mass = mass = MagicMock()
     mass.music.playlists.iter_library_items = _no_library_items
     mass.music.radio.iter_library_items = _no_library_items
+    mass.webserver.auth.list_users = AsyncMock(return_value=[])
 
     entries = await player.get_config_entries()
     entry = next(entry for entry in entries if entry.key == CONF_PREFER_WAV_FOR_LIVE_SOURCES)
