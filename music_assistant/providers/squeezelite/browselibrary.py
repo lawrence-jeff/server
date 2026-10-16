@@ -1735,8 +1735,9 @@ class BrowseLibraryHandler:
             )  # HA-EXTRAS
             menu["item_loop"] += haextras_items  # HA-EXTRAS
             menu["count"] += len(haextras_items)  # HA-EXTRAS
-            menu["item_loop"].append(await browseuser.menu_item(self.mass, slim_command.player_id))
-            menu["count"] += 1
+            browse_user_items = await browseuser.menu_items(self.mass, slim_command.player_id)
+            menu["item_loop"] += browse_user_items
+            menu["count"] += len(browse_user_items)
             return menu
 
         haextras_reply = await haextras.handle(self.mass, slim_command)  # HA-EXTRAS

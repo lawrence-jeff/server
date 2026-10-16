@@ -140,16 +140,23 @@ async def test_a_request_runs_as_the_user_of_its_own_player_only() -> None:
     assert get_current_user() is None  # nothing is left behind
 
 
-async def test_the_advanced_settings_row_says_who_the_device_browses_as() -> None:
-    """A row for Settings > Advanced that only informs: Anonymous, or the user's name (display name first)."""
-    anonymous = await browseuser.menu_item(_mass([_user("2", "kim", name="Kim")]), "p1")
-    assert anonymous["node"] == "advancedSettings"
-    assert anonymous["text"] == "Browse as: Anonymous"
-    assert anonymous["actions"]["go"]["cmd"] == ["jiveblankcommand"]
-    named = await browseuser.menu_item(_mass([_user("2", "kim", name="Kim")], "2"), "p1")
-    assert named["text"] == "Browse as: Kim"
-    plain = await browseuser.menu_item(_mass([_user("3", "lee")], "3"), "p1")
-    assert plain["text"] == "Browse as: lee"
+async def test_the_advanced_settings_row_says_who_the_device_browses_as_and_where_to_change_it() -> (
+    None
+):
+    """A node row for Settings > Advanced (Anonymous, or the user's name) that opens one line saying where to change it."""
+    row, hint = await browseuser.menu_items(_mass([_user("2", "kim", name="Kim")]), "p1")
+    assert row["node"] == "advancedSettings"
+    assert row["text"] == "Browse as: Anonymous"
+    assert row["isANode"] == 1
+    assert row["windowStyle"] == "text_list"
+    assert hint["node"] == row["id"]
+    assert hint["text"] == browseuser.CHANGE_HINT
+    assert "Music Assistant" in hint["text"]
+    assert hint["actions"]["go"]["nextWindow"] == "parent"
+    named = await browseuser.menu_items(_mass([_user("2", "kim", name="Kim")], "2"), "p1")
+    assert named[0]["text"] == "Browse as: Kim"
+    plain = await browseuser.menu_items(_mass([_user("3", "lee")], "3"), "p1")
+    assert plain[0]["text"] == "Browse as: lee"
 
 
 async def test_a_user_limited_to_other_players_is_not_offered_for_this_player() -> None:
