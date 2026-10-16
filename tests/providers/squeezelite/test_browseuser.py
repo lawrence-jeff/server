@@ -138,3 +138,15 @@ async def test_a_request_runs_as_the_user_of_its_own_player_only() -> None:
     assert await _run_as_seen(mass, "kims-player") == users[1]
     assert await _run_as_seen(mass, "other-player") is None
     assert get_current_user() is None  # nothing is left behind
+
+
+async def test_the_advanced_settings_row_says_who_the_device_browses_as() -> None:
+    """A row for Settings > Advanced that only informs: Anonymous, or the user's name (display name first)."""
+    anonymous = await browseuser.menu_item(_mass([_user("2", "kim", name="Kim")]), "p1")
+    assert anonymous["node"] == "advancedSettings"
+    assert anonymous["text"] == "Browse as: Anonymous"
+    assert anonymous["actions"]["go"]["cmd"] == ["jiveblankcommand"]
+    named = await browseuser.menu_item(_mass([_user("2", "kim", name="Kim")], "2"), "p1")
+    assert named["text"] == "Browse as: Kim"
+    plain = await browseuser.menu_item(_mass([_user("3", "lee")], "3"), "p1")
+    assert plain["text"] == "Browse as: lee"
