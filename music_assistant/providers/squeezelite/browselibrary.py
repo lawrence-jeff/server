@@ -3032,7 +3032,8 @@ def _resolve_static_icon_path(filename: str) -> Path | None:
         smaller = []
         for f in STATIC_DIR.glob(f"{base}_*x*_{m.group('mode')}{ext}"):
             sm = _STATIC_ICON_SUFFIX_RE.match(f.name)
-            if sm and int(sm.group("w")) < requested:
+            # base comes from the request and may hold "../": only files inside static/ count
+            if sm and int(sm.group("w")) < requested and STATIC_DIR in f.resolve().parents:
                 smaller.append((int(sm.group("w")), f.resolve()))
         if smaller:
             return max(smaller)[1]
@@ -3063,13 +3064,15 @@ def _requested_cover_size(path: str) -> int:
     return _DEFAULT_COVER_SIZE
 
 
-def _artist_no_art_response(request_path: str) -> web.Response | None:
+def _artist_no_art_response(request_path: str, *, temporary: bool = False) -> web.Response | None:
     """
     Return the generic Artists icon for an artist with no photo, as LMS does.
 
     Returns None if that icon file is missing, and the caller falls through to the placeholder.
 
     :param request_path: The requested path, which carries the size.
+    :param temporary: The artist has a photo that could not be fetched just now, so the device must
+        not keep this icon.
     """
     # Falls back to AllArtists_*.png (see _resolve_static_icon_path), using the requested size
     # suffix, else 225.
@@ -3082,7 +3085,7 @@ def _artist_no_art_response(request_path: str) -> web.Response | None:
     return web.Response(
         body=static_path.read_bytes(),
         content_type=content_type,
-        headers={"Cache-Control": "max-age=86400"},
+        headers={"Cache-Control": "no-store" if temporary else "max-age=86400"},
     )
 
 
@@ -3131,12 +3134,36 @@ def _pick_best_image(images: list[Any], img_type: ImageType) -> Any:
     return candidates[0]
 
 
+# Schemes a "uri-" icon id must not have: Music Assistant's builtin provider turns these into an item
+# by opening the address
+_ART_URI_SCHEMES_REFUSED = frozenset({"builtin", "http", "https", "rtsp", "rtmp", "file"})
+
+
+class _ArtFetchFailed(Exception):
+    """The item has an image, but fetching or resizing it failed (the failure may be temporary)."""
+
+
+async def _real_art(mass: MusicAssistant, icon_id: str, size: int) -> tuple[bytes | None, bool]:
+    """
+    Return (art bytes or None, whether a missing picture may be only temporary).
+
+    :param mass: The Music Assistant instance.
+    :param icon_id: The icon id from the request.
+    :param size: The size in pixels the device asked for.
+    """
+    try:
+        return await _fetch_real_item_art(mass, icon_id, size), False
+    except _ArtFetchFailed:
+        return None, True
+
+
 async def _fetch_real_item_art(mass: MusicAssistant, icon_id: str, size: int) -> bytes | None:
     """
     Resolve icon_id to a real MA library item and return its art bytes.
 
-    Returns None whenever the art cannot be had (unknown id, item not found, no image, fetch error),
-    which means "fall back to the placeholder"; this never raises.
+    Returns None when there is no art to be had (unknown id, item not found, no image), which means
+    "fall back to the placeholder". Raises _ArtFetchFailed when the item has an image that could not
+    be fetched, since the fallback must then not be cached by the device.
 
     :param mass: The Music Assistant instance.
     :param icon_id: The icon id from the request.
@@ -3154,6 +3181,11 @@ async def _fetch_real_item_art(mass: MusicAssistant, icon_id: str, size: int) ->
         encoded = icon_id[len("uri-") :]
         try:
             uri = base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)).decode()
+            # The id comes from the request. Only "<provider>://<type>/<id>" uris of a music
+            # provider are looked up: a plain url, a local path or the builtin provider would make
+            # Music Assistant open an address of the requester's choosing.
+            if "://" not in uri or urllib.parse.urlsplit(uri).scheme in _ART_URI_SCHEMES_REFUSED:
+                return None
             item = await mass.music.get_item_by_uri(uri)
         except MusicAssistantError, ValueError:
             return None
@@ -3199,8 +3231,8 @@ async def _fetch_real_item_art(mass: MusicAssistant, icon_id: str, size: int) ->
                 flatten_transparency=True,
             ),
         )
-    except MediaNotFoundError:
-        return None
+    except Exception as err:
+        raise _ArtFetchFailed from err
 
 
 def _make_placeholder_png(rgb: tuple[int, int, int], size: int = 64) -> bytes:
@@ -3297,7 +3329,7 @@ def make_icon_routes(
         if "/cover" in path:
             icon_id = request.match_info.get("icon_id")
             size = _requested_cover_size(path)
-            real = await _fetch_real_item_art(mass, icon_id, size) if icon_id else None
+            real, temporary = await _real_art(mass, icon_id, size) if icon_id else (None, False)
             if real is not None:
                 return web.Response(
                     body=real,
@@ -3305,7 +3337,7 @@ def make_icon_routes(
                     headers={"Cache-Control": "max-age=86400"},
                 )
             if icon_id and icon_id.startswith("artist-"):
-                fallback = _artist_no_art_response(path)
+                fallback = _artist_no_art_response(path, temporary=temporary)
                 if fallback is not None:
                     return fallback
             return _placeholder_response("cover")
@@ -3345,7 +3377,7 @@ def make_icon_routes(
         bare = request.path.lstrip("/")
         if "/" not in bare and bare:
             size = _requested_cover_size(request.path)
-            real = await _fetch_real_item_art(mass, bare, size)
+            real, temporary = await _real_art(mass, bare, size)
             if real is not None:
                 return web.Response(
                     body=real,
@@ -3353,7 +3385,7 @@ def make_icon_routes(
                     headers={"Cache-Control": "max-age=86400"},
                 )
             if bare.startswith("artist-"):
-                fallback = _artist_no_art_response(request.path)
+                fallback = _artist_no_art_response(request.path, temporary=temporary)
                 if fallback is not None:
                     return fallback
             return _placeholder_response("cover")
