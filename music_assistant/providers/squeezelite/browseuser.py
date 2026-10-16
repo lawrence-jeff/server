@@ -34,6 +34,8 @@ LOGGER = logging.getLogger(f"{__package__}.browseuser")
 CONF_BROWSE_USER = "browse_as_user"
 # the value of the default choice: no user
 ANONYMOUS = "anonymous"
+# what the Settings row says when it is chosen
+CHANGE_HINT = 'Set "Browse as" in this player\'s settings in Music Assistant'
 
 
 async def _choosable_users(mass: MusicAssistant, player_id: str) -> list[User]:
@@ -116,22 +118,35 @@ def acting_as(user: User | None) -> Iterator[None]:
         set_impersonated_user(previous)
 
 
-async def menu_item(mass: MusicAssistant, player_id: str) -> dict[str, Any]:
+async def menu_items(mass: MusicAssistant, player_id: str) -> list[dict[str, Any]]:
     """
-    Return the Settings > Advanced row that shows who the device browses as.
+    Return the Settings > Advanced row that shows who the device browses as, and the message it opens.
 
-    The menu is read when the device connects, so a changed setting shows after the next reconnect.
+    The row is a node, as the alarm entry is: choosing it lists one line that says where to change the user, which is in
+    Music Assistant's settings for the player (a device cannot log in or pick a user itself). The menu is read when the device
+    connects, so a changed setting shows after the next reconnect.
 
     :param mass: The Music Assistant instance.
     :param player_id: The player the menu is for.
     """
     user = await user_for_player(mass, player_id)
     who = "Anonymous" if user is None else (user.display_name or user.username)
-    return {
-        "node": "advancedSettings",
-        "id": "settingsBrowseUser",
-        "text": f"Browse as: {who}",
-        "weight": 200,  # after the built-in rows, next to the platform and build lines
-        # a row that only informs: choosing it does nothing
-        "actions": {"go": {"player": 0, "cmd": ["jiveblankcommand"]}},
-    }
+    return [
+        {
+            "node": "advancedSettings",
+            "id": "settingsBrowseUser",
+            "text": f"Browse as: {who}",
+            "weight": 200,  # after the built-in rows, next to the platform and build lines
+            "isANode": 1,
+            # a text list, not the tiles a node opens by default
+            "windowStyle": "text_list",
+        },
+        {
+            "node": "settingsBrowseUser",
+            "id": "settingsBrowseUserHelp",
+            "text": CHANGE_HINT,
+            "weight": 1,
+            # closes the window, as the alarm message does (a row with no action cannot be left)
+            "actions": {"go": {"player": 0, "cmd": ["jiveblankcommand"], "nextWindow": "parent"}},
+        },
+    ]

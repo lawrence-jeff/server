@@ -500,7 +500,7 @@ async def test_the_menu_command_adds_the_presets_and_the_ha_extras_entry(
     menu = await handler(_command("menu", 0, 100))
     ids = [item["id"] for item in menu["item_loop"]]
     assert ids[0] == "appletNowPlaying"
-    assert ids[-3:] == ["preset1", "haextras", "settingsBrowseUser"]
+    assert ids[-4:] == ["preset1", "haextras", "settingsBrowseUser", "settingsBrowseUserHelp"]
     assert menu["count"] == len(ids)
     handler.provider.slimproto.cli._handle_menu.assert_awaited_once_with("p1")
 
