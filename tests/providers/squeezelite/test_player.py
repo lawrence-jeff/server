@@ -38,6 +38,7 @@ async def test_squeezelite_prefers_wav_for_live_sources_by_default() -> None:
         yield  # pragma: no cover - makes this an async generator
 
     player = SqueezelitePlayer.__new__(SqueezelitePlayer)
+    player._player_id = "p1"
     player.mass = mass = MagicMock()
     mass.music.playlists.iter_library_items = _no_library_items
     mass.music.radio.iter_library_items = _no_library_items

@@ -20,6 +20,7 @@ from music_assistant_models.enums import ConfigEntryType
 
 from music_assistant.controllers.webserver.helpers.auth_middleware import (
     get_impersonated_user,
+    has_player_access,
     set_impersonated_user,
 )
 
@@ -35,20 +36,29 @@ CONF_BROWSE_USER = "browse_as_user"
 ANONYMOUS = "anonymous"
 
 
-async def _choosable_users(mass: MusicAssistant) -> list[User]:
-    """Return the users a device can browse as: enabled accounts, not the system user Home Assistant uses."""
+async def _choosable_users(mass: MusicAssistant, player_id: str) -> list[User]:
+    """
+    Return the users the player can browse as.
+
+    Enabled accounts that may use this player (a user can be limited to certain players), not the system user Home Assistant uses.
+    """
     users = await mass.webserver.auth.list_users()
-    return [user for user in users if user.enabled and user.role != UserRole.SERVICE]
+    return [
+        user
+        for user in users
+        if user.enabled and user.role != UserRole.SERVICE and has_player_access(user, player_id)
+    ]
 
 
-async def config_entry(mass: MusicAssistant) -> ConfigEntry:
+async def config_entry(mass: MusicAssistant, player_id: str) -> ConfigEntry:
     """
     Return the player setting that picks the user, listing the users as they are now.
 
     :param mass: The Music Assistant instance.
+    :param player_id: The player the setting is for: users who may not use it are not offered.
     """
     options = [ConfigValueOption(ANONYMOUS, title="Browse as Anonymous")]
-    for user in await _choosable_users(mass):
+    for user in await _choosable_users(mass, player_id):
         options.append(
             ConfigValueOption(user.user_id, title=f"Browse as {user.display_name or user.username}")
         )
@@ -65,7 +75,7 @@ async def user_for_player(mass: MusicAssistant, player_id: str) -> User | None:
     """
     Return the user this player's requests run as, or None for Anonymous.
 
-    A player whose setting is missing, set to Anonymous, or names a user that no longer exists (or is disabled) is anonymous.
+    A player whose setting is missing, set to Anonymous, or names a user that no longer exists, is disabled or may not use the player is anonymous.
 
     :param mass: The Music Assistant instance.
     :param player_id: The player the request came from.
@@ -74,12 +84,14 @@ async def user_for_player(mass: MusicAssistant, player_id: str) -> User | None:
     if not user_id or user_id == ANONYMOUS:
         return None
     user = await mass.webserver.auth.get_user(str(user_id))
-    if user is None:
+    if user is None or not has_player_access(user, player_id):
+        # the user was removed, disabled, or limited to other players after the setting was made
         LOGGER.warning(
-            "Player %s is set to browse as a user that is not available (%s): browsing anonymously",
+            "Player %s is set to browse as a user that is not available to it (%s): browsing anonymously",
             player_id,
             user_id,
         )
+        return None
     return user
 
 
