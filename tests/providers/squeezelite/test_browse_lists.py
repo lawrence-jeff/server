@@ -395,13 +395,24 @@ async def test_each_browse_mode_goes_to_its_list(
     mock.assert_awaited_once()
 
 
+def _favorite_counts(**counts: int) -> SimpleNamespace:
+    """Return a mass whose music controllers report these favorite counts (artists=2 and so on; the rest 0)."""
+    names = ("artists", "albums", "tracks", "playlists", "audiobooks", "podcasts", "radio")
+    controllers = {
+        name: SimpleNamespace(library_count=AsyncMock(return_value=counts.get(name, 0)))
+        for name in names
+    }
+    return SimpleNamespace(music=SimpleNamespace(**controllers))
+
+
 async def test_the_category_menus_and_what_cannot_be_browsed() -> None:
     """Search and favorites open their category menus; anything else is the built-in's."""
-    handler = _handler(SimpleNamespace())
+    handler = _handler(_favorite_counts(artists=2))
     search = await handler._browse_library(_browse(0, 10, mode="search", search="abc"))
     assert search["item_loop"][0]["text"] == "Search All"
     favorites = await handler._browse_library(_browse(0, 10, mode="favorites"))
-    # no user is acting here, so a first row says where to choose one
+    # no user is acting here, so a first row says where to choose one (the types follow because
+    # the counts say something is there)
     assert "Browse as" in favorites["item_loop"][0]["text"]
     assert favorites["item_loop"][1]["text"] == "All Favorites"
     with browseuser.acting_as(SimpleNamespace(user_id="2")):  # type: ignore[arg-type]
@@ -631,3 +642,16 @@ def test_the_handler_keeps_its_provider_and_reaches_the_server_late() -> None:
         _ = handler._slimproto
     provider.slimproto = object()
     assert handler._slimproto is provider.slimproto
+
+
+async def test_an_anonymous_player_with_no_favorites_of_any_type_gets_only_the_hint() -> None:
+    """Counted, not assumed: when every type is empty one explanation row replaces the eight empty types."""
+    handler = _handler(_favorite_counts())
+    menu = await handler._browse_library(_browse(0, 10, mode="favorites"))
+    assert [row["text"] for row in menu["item_loop"]] == [
+        'No user chosen\nSet "Browse as" in this player\'s settings'
+    ]
+    assert menu["count"] == 1
+    with browseuser.acting_as(SimpleNamespace(user_id="2")):  # type: ignore[arg-type]
+        as_user = await handler._browse_library(_browse(0, 10, mode="favorites"))
+    assert as_user["count"] == 8  # a user keeps the full menu, even with nothing favorited yet

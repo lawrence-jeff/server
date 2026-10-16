@@ -1433,11 +1433,27 @@ def _search_category_menu(search: str) -> dict[str, Any]:
     }
 
 
-def _favorites_category_menu(*, anonymous: bool = False) -> dict[str, Any]:
+async def _has_favorites(mass: MusicAssistant) -> bool:
+    """Return whether the current user (or nobody) has a favorite of any type."""
+    controllers = (
+        mass.music.artists,
+        mass.music.albums,
+        mass.music.tracks,
+        mass.music.playlists,
+        mass.music.audiobooks,
+        mass.music.podcasts,
+        mass.music.radio,
+    )
+    counts = await asyncio.gather(*(c.library_count(favorite_only=True) for c in controllers))
+    return any(counts)
+
+
+def _favorites_category_menu(*, anonymous: bool = False, hint_only: bool = False) -> dict[str, Any]:
     """
     Return the favorites menu: All Favorites, then one entry per type.
 
     :param anonymous: The player browses as nobody, which has no favorites: a first row says where to choose a user.
+    :param hint_only: Leave out the type entries, which are all empty (only used with anonymous).
     """
     # Like _search_category_menu, with favorite_only threaded through instead of search. Category
     # rows reuse the My Music tile icons. The player's presets are not listed here: they are items
@@ -1475,6 +1491,8 @@ def _favorites_category_menu(*, anonymous: bool = False) -> dict[str, Any]:
                 "actions": {"go": _no_op()},
             },
         )
+    if anonymous and hint_only:
+        item_loop = item_loop[:1]
     return {
         "count": len(item_loop),
         "offset": 0,
@@ -1777,7 +1795,14 @@ class BrowseLibraryHandler:
         if mode == "favorites":
             # The Favorites home item: a category menu like "search"; see
             # _favorites_category_menu().
-            return _favorites_category_menu(anonymous=get_current_user() is None)
+            anonymous = get_current_user() is None
+            # an anonymous player has no favorites to list: when every type is empty, say so once
+            # instead of listing eight empty types (counted, not assumed, in case Music Assistant
+            # ever gives a call without a user some favorites)
+            return _favorites_category_menu(
+                anonymous=anonymous,
+                hint_only=anonymous and not await _has_favorites(self.mass),
+            )
         if mode == "favorites_all":
             return await get_favorites_all(self.mass, kwargs, index, quantity)
         if mode == "artists":

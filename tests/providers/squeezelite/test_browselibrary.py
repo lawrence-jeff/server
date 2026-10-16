@@ -163,6 +163,17 @@ def test_the_favorites_menu_of_an_anonymous_player_says_where_to_choose_a_user()
     assert all("Browse as" not in r["text"] for r in with_user["item_loop"])
 
 
+def test_the_favorites_hint_alone_when_asked() -> None:
+    """hint_only keeps just the explanation row of an anonymous player and is ignored for a player with a user."""
+    only = bl._favorites_category_menu(anonymous=True, hint_only=True)
+    assert only["count"] == 1
+    assert "Browse as" in only["item_loop"][0]["text"]
+    assert (
+        bl._favorites_category_menu(hint_only=True)["count"]
+        == bl._favorites_category_menu()["count"]
+    )
+
+
 def test_requested_cover_size_uses_the_larger_side() -> None:
     """The size suffix on an image path says how big the device wants it."""
     assert bl._requested_cover_size("cover_225x225_m") == 225
