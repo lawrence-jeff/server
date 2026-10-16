@@ -95,6 +95,39 @@ def test_a_menu_icon_request_cannot_reach_files_outside_static(
     assert bl._resolve_static_icon_path("../secret.png") is None
 
 
+def test_the_next_smaller_size_fallback_cannot_reach_files_outside_static(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The size fallback globs with a name from the request: "../" in it must not find a file outside."""
+    static = tmp_path / "static"
+    static.mkdir()
+    (static / "icon_50x50_m.png").write_bytes(b"png")
+    (tmp_path / "secret_50x50_m.png").write_bytes(b"secret")
+    monkeypatch.setattr(bl, "STATIC_DIR", static.resolve())
+    found = bl._resolve_static_icon_path("icon_99x99_m.png")
+    assert found is not None
+    assert found.name == "icon_50x50_m.png"
+    assert bl._resolve_static_icon_path("../secret_99x99_m.png") is None
+
+
+@pytest.mark.parametrize(
+    "uri",
+    [
+        "http://192.168.0.1/x.mp3",
+        "https://host/x",
+        "builtin://track/http://h/x",
+        "file:///etc/hosts",
+        "/config/x.mp3",
+        "nonsense",
+    ],
+)
+async def test_an_icon_id_cannot_make_the_server_open_an_address(uri: str) -> None:
+    """A uri that is not a music provider's is never looked up."""
+    mass = _mass_with_art(_item(metadata=SimpleNamespace(images=[])))
+    assert await bl._fetch_real_item_art(mass, bl._uri_ref(uri), 100) is None
+    mass.music.get_item_by_uri.assert_not_called()
+
+
 def test_a_placeholder_is_a_valid_png_of_the_given_colour_and_cached() -> None:
     """Built with the standard library alone, and reused for the same colour and size."""
     png = bl._make_placeholder_png((10, 20, 30), 8)
@@ -179,10 +212,10 @@ async def test_an_item_known_by_uri_is_found_through_the_uri() -> None:
 
 @pytest.mark.parametrize(
     "failure",
-    ["bad uri", "not found", "no image", "no thumbnail"],
+    ["bad uri", "not found", "no image"],
 )
-async def test_art_that_cannot_be_had_is_none_and_never_an_error(failure: str) -> None:
-    """Every failure means "use the placeholder"; nothing is raised."""
+async def test_art_that_does_not_exist_is_none_and_never_an_error(failure: str) -> None:
+    """No art to be had means "use the placeholder"; nothing is raised."""
     item = _item(metadata=SimpleNamespace(images=[]))
     mass = _mass_with_art(item)
     icon_id = "42"
@@ -191,11 +224,21 @@ async def test_art_that_cannot_be_had_is_none_and_never_an_error(failure: str) -
         mass.music.get_item_by_uri.side_effect = MusicAssistantError("x")
     elif failure == "not found":
         mass.music.albums.get_library_item.side_effect = MediaNotFoundError("x")
-    elif failure == "no image":
-        mass.metadata.get_image_url_for_item.return_value = None
     else:
-        mass.metadata.get_thumbnail.side_effect = MediaNotFoundError("x")
+        mass.metadata.get_image_url_for_item.return_value = None
     assert await bl._fetch_real_item_art(mass, icon_id, 100) is None
+
+
+@pytest.mark.parametrize("error", [MediaNotFoundError("x"), FileNotFoundError("x"), OSError("x")])
+async def test_an_image_that_cannot_be_fetched_is_reported_as_a_failed_fetch(
+    error: Exception,
+) -> None:
+    """The item has an image, so the missing picture may be temporary; the caller must not cache it."""
+    mass = _mass_with_art(_item(metadata=SimpleNamespace(images=[])))
+    mass.metadata.get_thumbnail.side_effect = error
+    with pytest.raises(bl._ArtFetchFailed):
+        await bl._fetch_real_item_art(mass, "42", 100)
+    assert await bl._real_art(mass, "42", 100) == (None, True)
 
 
 async def test_an_id_that_is_not_a_library_id_is_not_found_quietly() -> None:
@@ -263,6 +306,20 @@ async def test_an_artist_without_art_gets_the_artists_icon_not_a_placeholder() -
     response = await handle_icon(_request("/music/artist-7/cover_225x225_m", icon_id="artist-7"))
     assert response.content_type == "image/png"
     assert response.headers["Cache-Control"] == "max-age=86400"
+
+
+async def test_an_artist_whose_photo_could_not_be_fetched_gets_an_icon_the_device_must_not_keep() -> (
+    None
+):
+    """After a restart the first fetches can fail: a device that kept the icon would show it for good."""
+    mass = _mass_with_art(_item(metadata=SimpleNamespace(images=[])))
+    mass.metadata.get_thumbnail.side_effect = FileNotFoundError("not yet")
+    handle_icon, handle_unmatched = _routes(mass)
+    response = await handle_icon(_request("/music/artist-7/cover_225x225_m", icon_id="artist-7"))
+    assert response.content_type == "image/png"
+    assert response.headers["Cache-Control"] == "no-store"
+    bare = await handle_unmatched(_request("/artist-7"))
+    assert bare.headers["Cache-Control"] == "no-store"
 
 
 async def test_a_menu_icon_is_served_from_static_with_a_year_of_caching() -> None:
