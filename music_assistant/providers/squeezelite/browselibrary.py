@@ -60,7 +60,7 @@ from music_assistant.controllers.player_queues.helpers import committed_index
 from music_assistant.controllers.webserver.helpers.auth_middleware import get_current_user
 from music_assistant.helpers import datetime as mass_datetime
 
-from . import applets, browseuser, haextras  # HA-EXTRAS
+from . import alarmclock, applets, browseuser, haextras  # HA-EXTRAS
 
 if TYPE_CHECKING:
     from aioslimproto import SlimServer
@@ -1678,6 +1678,21 @@ ALARM_NOT_SUPPORTED = [
 ]
 
 
+# Settings > Alarm Clock of a device with its own alarm timer (the alarm button opens this entry too): the same entry
+# and command a Logitech Media Server uses, answered by alarmclock.
+ALARM_CLOCK_ITEM: dict[str, Any] = {
+    "node": "settings",
+    "id": "settingsAlarm",
+    "text": "Alarm Clock",
+    "weight": 29,
+    "actions": {"go": {"player": 0, "cmd": ["alarmsettings"]}},
+}
+# the commands of those menus and of the device's alarm handling
+ALARM_COMMANDS = frozenset(
+    {"alarmsettings", "alarm", "alarms", "jiveupdatealarm", "jiveupdatealarmdays", "jivealarm"}
+)
+
+
 def get_menu(index: int = 0, quantity: int = 100) -> dict[str, Any]:
     """Return the home menu: the Now Playing shortcut, the My Music node and the alarm entry."""
     item_loop = [NOW_PLAYING_ITEM, *MY_MUSIC_NODE, *ALARM_NOT_SUPPORTED]
@@ -1743,11 +1758,23 @@ class BrowseLibraryHandler:
             browse_user_items = await browseuser.menu_items(self.mass, slim_command.player_id)
             menu["item_loop"] += browse_user_items
             menu["count"] += len(browse_user_items)
+            if self._has_alarm_clock(slim_command.player_id):
+                # a device with the AlarmSnooze applet gets the real alarm menus, not the "not supported" line
+                menu["item_loop"] = [
+                    row
+                    for row in menu["item_loop"]
+                    if row.get("id") not in ("settingsAlarm", "settingsAlarmNotSupported")
+                ]
+                menu["item_loop"].append(ALARM_CLOCK_ITEM)
+                menu["count"] = len(menu["item_loop"])
             return menu
 
         if command == "jiveapplets":
             # the device's Applet Installer asks which applets this server offers
             return applets.reply()
+
+        if command in ALARM_COMMANDS and self._has_alarm_clock(slim_command.player_id):
+            return await self._handle_alarm(slim_command)
 
         haextras_reply = await haextras.handle(self.mass, slim_command)  # HA-EXTRAS
         if haextras_reply is not None:  # HA-EXTRAS
@@ -2258,6 +2285,40 @@ class BrowseLibraryHandler:
                 ],
                 icon_id=f"artist-{artist.item_id}",
             )
+
+    def _has_alarm_clock(self, player_id: str | None) -> bool:
+        """Return whether the player is a device that keeps its own alarm timer (Radio, Touch, Controller, Boom)."""
+        player = self._slimproto.get_player(player_id) if player_id else None
+        capabilities = getattr(player, "_capabilities", None) or {}
+        return alarmclock.supports_alarms(capabilities.get("Model"))
+
+    async def _handle_alarm(self, slim_command: SlimCLICommand) -> Any:
+        """
+        Answer the alarm menus and commands of a device with its own alarm timer.
+
+        :param slim_command: The command the device sent.
+        """
+        player_id = str(slim_command.player_id)
+        command = slim_command.command
+        kwargs = slim_command.kwargs
+        now = alarmclock.now_local()
+        book = alarmclock.AlarmBook.load(self.mass, player_id)
+        if command == "alarmsettings":
+            return alarmclock.settings_menu(book)
+        if command == "alarms":
+            return alarmclock.alarms_query(book, str(kwargs.get("filter", "all")))
+        if command == "jivealarm":
+            return {}  # stop and snooze: the device handles both itself
+        alarm = book.get(str(kwargs.get("id")))
+        if command == "jiveupdatealarm":
+            return alarmclock.update_menu(alarm) if alarm else alarmclock.settings_menu(book)
+        if command == "jiveupdatealarmdays":
+            return alarmclock.days_menu(alarm) if alarm else alarmclock.settings_menu(book)
+        answer = alarmclock.alarm_command(book, list(slim_command.args), dict(kwargs), now)
+        book.save(self.mass, player_id)
+        # the device takes the new time of its next alarm from its status: send it now
+        await self._push_queue_update(player_id)
+        return answer
 
     async def _push_queue_update(self, player_id: str) -> None:
         """
@@ -2799,6 +2860,9 @@ class BrowseLibraryHandler:
         # player returns to, negated, tells the client it is muted.
         if muted_level := self._muted_level(slim_command.player_id):
             result["mixer volume"] = muted_level
+        if self._has_alarm_clock(slim_command.player_id):
+            # the time of the next alarm: the device keeps it and rings by itself when it is due
+            result.update(alarmclock.status_fields(self.mass, slim_command.player_id))
         return result
 
     def _muted_level(self, player_id: str | None) -> int:
