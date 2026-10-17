@@ -599,6 +599,11 @@ async def _library_page(
         total = len(items)
     else:
         total = await controller.library_count(favorite_only=favorite_only)
+        if len(items) < limit:
+            # A page that is not full is the end of the list, whatever the count says: Music Assistant counts
+            # some items its listing leaves out (artists, albums and radio stations here), and a device
+            # that is told of more rows than it ever gets cannot scroll past the last one.
+            total = index + len(items)
     return {
         "count": total,
         "offset": index,

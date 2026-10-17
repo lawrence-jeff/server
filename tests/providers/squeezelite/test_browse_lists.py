@@ -79,6 +79,22 @@ async def test_a_search_or_favorite_filter_reaches_the_controller() -> None:
     assert page["offset"] == 2
 
 
+async def test_a_page_that_is_not_full_is_the_end_of_the_list_whatever_the_count_says() -> None:
+    """Music Assistant counts items its listing leaves out; a device told of more rows than it gets cannot scroll past the last."""
+    artists = _Controller([_item("Band", 4), _item("Other", 5)], count=22)
+    page = await bl.get_artists(_mass(artists=artists), index=0, quantity=200)
+    assert page["count"] == 2
+    later = await bl.get_artists(_mass(artists=artists), index=10, quantity=200)
+    assert later["count"] == 12  # the offset plus the rows it got
+
+
+async def test_a_full_page_keeps_the_count_so_the_device_asks_for_the_next_one() -> None:
+    """When the page is full there may be more, so the count of the controller is used."""
+    artists = _Controller([_item("Band", 4), _item("Other", 5)], count=22)
+    page = await bl.get_artists(_mass(artists=artists), index=0, quantity=2)
+    assert page["count"] == 22
+
+
 async def test_all_albums_show_the_artist_and_can_be_favorited() -> None:
     """The mixed list is two lines per row, an icon list, and marks offline albums."""
     albums = _Controller([_item("Hits", 3, artist_str="Band"), _item("Old", 4, available=False)])
