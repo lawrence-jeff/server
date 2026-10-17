@@ -266,13 +266,13 @@ class _FakeController:
 
 
 async def test_library_page_counts_from_the_library_without_a_search() -> None:
-    """The total comes from library_count(); the favorite filter reaches both calls."""
-    controller = _FakeController([_item("A")], count=42)
+    """The total comes from library_count() for a full page; the favorite filter reaches both calls."""
+    controller = _FakeController([_item("A"), _item("B")], count=42)
     page = await bl._library_page(
         controller,
         lambda items, index: [{"text": i.name, "index": index} for i in items],
         index=5,
-        quantity=10,
+        quantity=2,
         search=None,
         favorite_only=True,
         window_style="icon_list",
@@ -282,9 +282,9 @@ async def test_library_page_counts_from_the_library_without_a_search() -> None:
     assert page["offset"] == 5
     assert page["window"] == {"windowStyle": "icon_list"}
     assert page["base"] == {"actions": {"go": {}}}
-    assert page["item_loop"] == [{"text": "A", "index": 5}]
+    assert page["item_loop"] == [{"text": "A", "index": 5}, {"text": "B", "index": 5}]
     assert controller.calls[0] == {
-        "limit": 10,
+        "limit": 2,
         "offset": 5,
         "search": None,
         "summary": False,
