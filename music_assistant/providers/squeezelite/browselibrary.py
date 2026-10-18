@@ -1025,6 +1025,11 @@ async def get_playlist_tracks(
     }
 
 
+def _is_radio_uri(uri: Any) -> bool:
+    """Return whether uri names a radio station ("<provider>://radio/<id>")."""
+    return isinstance(uri, str) and urllib.parse.urlsplit(uri).netloc == "radio"
+
+
 def _radio_row(item: Any) -> dict[str, Any]:
     """Return the row of a radio station, played directly."""
     return {
@@ -1983,6 +1988,11 @@ class BrowseLibraryHandler:
         queue_option = queue_options.get(cmd)
         if queue_option is None or player_id is None:
             raise NotImplementedError
+        if queue_option in (QueueOption.ADD, QueueOption.PLAY) and _is_radio_uri(kwargs.get("uri")):
+            # A station never ends and a Pandora one fills its queue as it plays, so a station added
+            # behind the queue would start after everything already in it. Picking one replaces the
+            # queue and starts it, as Music Assistant's own interface does.
+            queue_option = QueueOption.REPLACE
 
         # Captured before any play_media call: ADD/NEXT/REPLACE_NEXT stage items without starting
         # playback, so a single tap on a track (always cmd "add") on an idle queue would otherwise
@@ -2927,6 +2937,11 @@ class BrowseLibraryHandler:
         # playlist after a boot.
         result["playlist_tracks"] = queue.items
         result["playlist_cur_index"] = queue.current_index or 0
+        # The Now Playing audio line ("aac • 64kbps • 2/8") reads its position from the first track in
+        # this list. The built-in numbers that track 0, so the line always started at 1. Number the
+        # two tracks (the current one, then the next) from the queue's current index instead.
+        for slot, loop_item in enumerate(result.get("playlist_loop") or []):
+            loop_item["playlist index"] = result["playlist_cur_index"] + slot
 
         if kwargs.get("menu") != "menu":
             # Plain polling status (the frequent "-", 1 heartbeat): the patch above is enough.
