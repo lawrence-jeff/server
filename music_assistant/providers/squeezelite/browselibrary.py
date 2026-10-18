@@ -2997,6 +2997,7 @@ class BrowseLibraryHandler:
         # the list.
         queue_items = self.mass.player_queues.items(queue.queue_id, limit=limit, offset=offset)
 
+        station_image = _station_image(queue)
         item_loop = []
         for i, queue_item in enumerate(queue_items):
             track = queue_item.media_item
@@ -3009,6 +3010,11 @@ class BrowseLibraryHandler:
             # "/imageproxy/<url>/..." request this server doesn't serve, leaving some queue rows
             # without art.
             art_ref = art_ref_for_item(track) if track is not None else ""
+            if queue_item.image is not None:
+                art_ref = queue_item_art_ref(queue.queue_id, queue_item.queue_item_id)
+            elif station_image is not None:
+                # an item with no picture of its own (a station's message or advert) shows the station's
+                art_ref = queue_item_art_ref(queue.queue_id)
             icon_path = f"music/{art_ref}/cover" if art_ref else ""
             media_details = MediaDetails(
                 url=uri,
@@ -3094,6 +3100,25 @@ _ART_PREFIX = {
 def _uri_ref(uri: str) -> str:
     """Return the icon id for an item identified by its uri (see _fetch_real_item_art)."""
     return "uri-" + base64.urlsafe_b64encode(uri.encode()).decode().rstrip("=")
+
+
+def queue_item_art_ref(queue_id: str, queue_item_id: str = "") -> str:
+    """
+    Return the icon id for the picture of a queue item, or of the queue's station when no item is given.
+
+    A queue item keeps its own picture from when it was added, which outlives what the provider
+    can still look up (a Pandora station track's album has no picture of its own and is soon gone).
+    """
+    return "queue-" + base64.urlsafe_b64encode(
+        f"{queue_id}|{queue_item_id}".encode()
+    ).decode().rstrip("=")
+
+
+def _station_image(queue: Any) -> Any:
+    """Return the picture of the station a dynamic queue plays from, or None."""
+    if not queue.is_dynamic:
+        return None
+    return next((source.image for source in queue.sources if source.image is not None), None)
 
 
 def art_ref_for_item(item: Any) -> str:
@@ -3265,6 +3290,22 @@ class _ArtFetchFailed(Exception):
     """The item has an image, but fetching or resizing it failed (the failure may be temporary)."""
 
 
+class _StandInArt(Exception):
+    """The item's own picture could not be had in time; the data is the station's picture instead."""
+
+    def __init__(self, data: bytes) -> None:
+        """Keep the stand-in picture."""
+        super().__init__("stand-in picture")
+        self.data = data
+
+
+# How long a device's request waits for a queue item's own picture. A device fetches its pictures one
+# after another and gives up on a slow one with its generic icon, so a picture that Pandora's image
+# server is slow to give is replaced by the station's for now (the download carries on in MA, and the
+# next request finds it).
+_QUEUE_ART_WAIT = 5.0
+
+
 async def _real_art(mass: MusicAssistant, icon_id: str, size: int) -> tuple[bytes | None, bool]:
     """
     Return (art bytes or None, whether a missing picture may be only temporary).
@@ -3275,6 +3316,8 @@ async def _real_art(mass: MusicAssistant, icon_id: str, size: int) -> tuple[byte
     """
     try:
         return await _fetch_real_item_art(mass, icon_id, size), False
+    except _StandInArt as stand_in:
+        return stand_in.data, True
     except _ArtFetchFailed:
         return None, True
 
@@ -3298,6 +3341,8 @@ async def _fetch_real_item_art(mass: MusicAssistant, icon_id: str, size: int) ->
     # get_library_item does int(item_id), which also rejects a non-numeric id such as a chrome-icon
     # path that reached here via handle_unmatched.
     item: Any
+    if icon_id.startswith("queue-"):
+        return await _queue_item_art(mass, icon_id, size)
     if icon_id.startswith("uri-"):
         # An item identified by its uri (podcast episodes, items without a library id).
         encoded = icon_id[len("uri-") :]
@@ -3341,20 +3386,98 @@ async def _fetch_real_item_art(mass: MusicAssistant, icon_id: str, size: int) ->
         img_path = await mass.metadata.get_image_url_for_item(item)
     if not img_path:
         return None
+    return await _thumbnail(
+        mass, img_path, size, chosen.provider if chosen is not None else "builtin"
+    )
+
+
+async def _thumbnail(
+    mass: MusicAssistant, img_path: str, size: int, provider: str = "builtin"
+) -> bytes:
+    """
+    Return the picture at img_path as a jpeg of the given size, or raise _ArtFetchFailed.
+
+    :param mass: The Music Assistant instance.
+    :param img_path: The picture's path or address.
+    :param size: The size in pixels.
+    :param provider: The provider the picture belongs to.
+    """
+    # MA caches a downloaded picture under the provider and path together, so the picture's own
+    # provider finds the copy MA's own views already fetched, where "builtin" downloads it again.
     try:
         # base64 is off, so the thumbnail is bytes
         return cast(
             "bytes",
             await mass.metadata.get_thumbnail(
                 img_path,
-                provider="builtin",
+                provider=provider,
                 size=size,
                 image_format="jpeg",
                 flatten_transparency=True,
             ),
         )
     except Exception as err:
+        logger.debug(
+            "Picture %s of provider %s (size %s) failed: %r", img_path, provider, size, err
+        )
         raise _ArtFetchFailed from err
+
+
+async def _queue_item_art(mass: MusicAssistant, icon_id: str, size: int) -> bytes | None:
+    """Return the picture a queue item holds (see queue_item_art_ref), or None if it has none."""
+    encoded = icon_id[len("queue-") :]
+    try:
+        queue_id, queue_item_id = (
+            base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)).decode().split("|", 1)
+        )
+    except ValueError:
+        return None
+    image: Any = None
+    queue = mass.player_queues.get(queue_id)
+    if queue_item_id:
+        queue_item = mass.player_queues.get_item(queue_id, queue_item_id)
+        image = queue_item.image if queue_item is not None else None
+    elif queue is not None:
+        image = _station_image(queue)
+    if image is None:
+        return None
+    try:
+        return await _picture_within(mass, image, size, _QUEUE_ART_WAIT)
+    except (_ArtFetchFailed, TimeoutError) as err:
+        station = _station_image(queue) if queue is not None else None
+        logger.debug(
+            "Queue %s item %s: its picture %s is not to be had (%r), %s",
+            queue_id,
+            queue_item_id or "(station)",
+            image.path,
+            err,
+            "using the station's"
+            if queue_item_id and station not in (None, image)
+            else "no stand-in",
+        )
+        if not queue_item_id or station is None or station is image:
+            raise _ArtFetchFailed from None
+    # the item's own picture is not to be had now: show the station's, which the device must not keep
+    raise _StandInArt(await _picture_within(mass, station, size, _QUEUE_ART_WAIT)) from None
+
+
+async def _picture_within(mass: MusicAssistant, image: Any, size: int, seconds: float) -> bytes:
+    """
+    Return a picture as a jpeg, waiting at most the given time for it.
+
+    The download is not cancelled when the wait ends: MA caches it, so a later request gets it.
+    """
+    task = asyncio.ensure_future(
+        _thumbnail(
+            mass,
+            mass.metadata.get_image_url(image, prefer_proxy=not image.remotely_accessible),
+            size,
+            image.provider,
+        )
+    )
+    # a download left running after the wait must not report its failure as never retrieved
+    task.add_done_callback(lambda done: done.cancelled() or done.exception())
+    return await asyncio.wait_for(asyncio.shield(task), seconds)
 
 
 def _make_placeholder_png(rgb: tuple[int, int, int], size: int = 64) -> bytes:
@@ -3456,7 +3579,7 @@ def make_icon_routes(
                 return web.Response(
                     body=real,
                     content_type="image/jpeg",
-                    headers={"Cache-Control": "max-age=86400"},
+                    headers={"Cache-Control": "no-store" if temporary else "max-age=86400"},
                 )
             if icon_id and icon_id.startswith("artist-"):
                 fallback = _artist_no_art_response(path, temporary=temporary)
