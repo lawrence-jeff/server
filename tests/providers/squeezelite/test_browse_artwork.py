@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 from pathlib import Path
 from types import SimpleNamespace
@@ -139,7 +140,7 @@ def test_a_placeholder_is_a_valid_png_of_the_given_colour_and_cached() -> None:
 
 
 def _image(kind: ImageType, path: str, *, remote: bool) -> SimpleNamespace:
-    return SimpleNamespace(type=kind, path=path, remotely_accessible=remote)
+    return SimpleNamespace(type=kind, path=path, remotely_accessible=remote, provider="pandora1")
 
 
 def test_the_best_image_is_remote_then_standalone_then_embedded() -> None:
@@ -379,3 +380,128 @@ async def test_the_root_page_sends_the_browser_to_the_web_ui_on_the_same_host(ho
     with pytest.raises(web.HTTPFound) as redirect:
         await bl.handle_root_redirect(request)
     assert redirect.value.location == f"http://{host}:8095/"
+
+
+def _queue_mass(queue_item: Any, image_url: str = "img://x") -> Any:
+    mass = MagicMock()
+    mass.player_queues.get_item = MagicMock(return_value=queue_item)
+    mass.metadata.get_image_url = MagicMock(return_value=image_url)
+    mass.metadata.get_thumbnail = AsyncMock(return_value=b"JPEG")
+    return mass
+
+
+async def test_a_queue_item_icon_serves_the_picture_the_queue_item_holds() -> None:
+    """The picture is read from the queue item, not looked up again through the provider."""
+    image = _image(ImageType.THUMB, "https://x/cover.jpg", remote=True)
+    mass = _queue_mass(_item(image=image))
+    ref = bl.queue_item_art_ref("b8:27:eb:15:a5:1f", "abc123")
+    assert await bl._fetch_real_item_art(mass, ref, 100) == b"JPEG"
+    mass.player_queues.get_item.assert_called_once_with("b8:27:eb:15:a5:1f", "abc123")
+    mass.metadata.get_image_url.assert_called_once_with(image, prefer_proxy=False)
+    mass.music.get_item_by_uri.assert_not_called()
+    # the picture's own provider, so the copy MA's own views cached is found
+    assert mass.metadata.get_thumbnail.await_args.kwargs["provider"] == "pandora1"
+
+
+async def test_a_local_queue_item_picture_goes_through_the_proxy() -> None:
+    """A local file is not remotely accessible, so it is served through MA's proxy."""
+    image = _image(ImageType.THUMB, "/m/Folder.jpg", remote=False)
+    mass = _queue_mass(_item(image=image))
+    await bl._fetch_real_item_art(mass, bl.queue_item_art_ref("q", "i"), 100)
+    mass.metadata.get_image_url.assert_called_once_with(image, prefer_proxy=True)
+
+
+@pytest.mark.parametrize("queue_item", [None, _item(image=None)])
+async def test_a_queue_item_that_is_gone_or_has_no_picture_gives_no_art(queue_item: Any) -> None:
+    """The placeholder is served; nothing is raised."""
+    mass = _queue_mass(queue_item)
+    assert await bl._fetch_real_item_art(mass, bl.queue_item_art_ref("q", "i"), 100) is None
+
+
+async def test_a_malformed_queue_item_icon_gives_no_art() -> None:
+    """The id comes from the request: anything that does not decode to two parts is refused."""
+    mass = _queue_mass(None)
+    for icon_id in ("queue-!!!", "queue-" + base64.urlsafe_b64encode(b"nobar").decode()):
+        assert await bl._fetch_real_item_art(mass, icon_id, 100) is None
+    mass.player_queues.get_item.assert_not_called()
+
+
+async def test_a_queue_item_picture_that_cannot_be_fetched_is_a_failed_fetch() -> None:
+    """The caller must not let the device cache the placeholder."""
+    image = _image(ImageType.THUMB, "https://x/cover.jpg", remote=True)
+    mass = _queue_mass(_item(image=image))
+    mass.metadata.get_thumbnail.side_effect = OSError("down")
+    with pytest.raises(bl._ArtFetchFailed):
+        await bl._fetch_real_item_art(mass, bl.queue_item_art_ref("q", "i"), 100)
+
+
+async def test_the_station_icon_serves_the_picture_of_the_queues_station() -> None:
+    """With no queue item named, the picture is the first dynamic source that has one."""
+    image = _image(ImageType.THUMB, "https://x/station.jpg", remote=True)
+    mass = _queue_mass(None)
+    mass.player_queues.get = MagicMock(
+        return_value=_item(is_dynamic=True, sources=[_item(image=None), _item(image=image)])
+    )
+    assert await bl._fetch_real_item_art(mass, bl.queue_item_art_ref("q"), 100) == b"JPEG"
+    mass.player_queues.get.assert_called_once_with("q")
+    mass.metadata.get_image_url.assert_called_once_with(image, prefer_proxy=False)
+    mass.player_queues.get.return_value = _item(is_dynamic=False, sources=[_item(image=image)])
+    assert await bl._fetch_real_item_art(mass, bl.queue_item_art_ref("q"), 100) is None
+
+
+def _station_mass(own: Any, station_image: Any) -> Any:
+    mass = _queue_mass(_item(image=own))
+    mass.player_queues.get = MagicMock(
+        return_value=_item(is_dynamic=True, sources=[_item(image=station_image)])
+    )
+    return mass
+
+
+async def test_a_queue_item_picture_that_is_slow_is_replaced_by_the_stations_for_now(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A device gives up on a slow picture, so the station's goes to it, not to be kept."""
+    monkeypatch.setattr(bl, "_QUEUE_ART_WAIT", 0.05)
+    own = _image(ImageType.THUMB, "https://x/own.jpg", remote=True)
+    station = _image(ImageType.THUMB, "https://x/station.jpg", remote=True)
+    mass = _station_mass(own, station)
+    finished = asyncio.Event()
+
+    async def thumbnail(path: str, **_: Any) -> bytes:
+        if path == "https://x/own.jpg":
+            await asyncio.sleep(0.3)
+            finished.set()
+            return b"OWN"
+        return b"STATION"
+
+    mass.metadata.get_thumbnail = AsyncMock(side_effect=thumbnail)
+    mass.metadata.get_image_url = MagicMock(side_effect=lambda image, **_: image.path)
+    art, temporary = await bl._real_art(mass, bl.queue_item_art_ref("q", "i"), 100)
+    assert (art, temporary) == (b"STATION", True)
+    # the slow download is left to finish, so MA has it for the next request
+    await asyncio.wait_for(finished.wait(), 1)
+
+
+async def test_a_failed_queue_item_picture_is_replaced_by_the_stations_and_never_kept() -> None:
+    """The failure is temporary too: the device asks again later."""
+    own = _image(ImageType.THUMB, "https://x/own.jpg", remote=True)
+    station = _image(ImageType.THUMB, "https://x/station.jpg", remote=True)
+    mass = _station_mass(own, station)
+
+    async def thumbnail(path: str, **_: Any) -> bytes:
+        if path == "https://x/own.jpg":
+            raise OSError("down")
+        return b"STATION"
+
+    mass.metadata.get_thumbnail = AsyncMock(side_effect=thumbnail)
+    mass.metadata.get_image_url = MagicMock(side_effect=lambda image, **_: image.path)
+    assert await bl._real_art(mass, bl.queue_item_art_ref("q", "i"), 100) == (b"STATION", True)
+
+
+async def test_a_failed_queue_item_picture_with_no_station_is_a_failed_fetch() -> None:
+    """Nothing to stand in: the placeholder is served and not kept."""
+    own = _image(ImageType.THUMB, "https://x/own.jpg", remote=True)
+    mass = _queue_mass(_item(image=own))
+    mass.player_queues.get = MagicMock(return_value=_item(is_dynamic=False, sources=[]))
+    mass.metadata.get_thumbnail.side_effect = OSError("down")
+    assert await bl._real_art(mass, bl.queue_item_art_ref("q", "i"), 100) == (None, True)
