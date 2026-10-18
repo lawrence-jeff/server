@@ -76,9 +76,9 @@ def _command(**kwargs: Any) -> SimpleNamespace:
 async def test_each_command_becomes_its_queue_option(cmd: str, option: QueueOption) -> None:
     """An item identified by its uri is queued with the option its command stands for."""
     handler = _handler()
-    await handler._playlistcontrol(_command(cmd=cmd, uri="library://radio/7"))
+    await handler._playlistcontrol(_command(cmd=cmd, uri="library://playlist/7"))
     handler.mass.player_queues.play_media.assert_awaited_once_with(
-        queue_id=PLAYER, media="library://radio/7", option=option
+        queue_id=PLAYER, media="library://playlist/7", option=option
     )
 
 
@@ -114,7 +114,7 @@ async def test_what_it_cannot_handle_falls_through_to_the_built_in(
 async def test_a_load_pushes_the_song_popup_and_the_play_icon() -> None:
     """A load announces the track with the popup and the icon, and needs no queue push."""
     handler = _handler()
-    await handler._playlistcontrol(_command(cmd="load", uri="library://radio/7"))
+    await handler._playlistcontrol(_command(cmd="load", uri="library://playlist/7"))
     handler.cli.push_show_briefly.assert_called_once_with(
         PLAYER,
         text=["Now Playing", "Station"],
@@ -135,7 +135,7 @@ async def test_a_load_pushes_the_song_popup_and_the_play_icon() -> None:
 async def test_staging_an_item_refreshes_the_queue_view_and_says_so(cmd: str, label: str) -> None:
     """Adding or inserting pushes the queue view and a confirmation popup."""
     handler = _handler()
-    await handler._playlistcontrol(_command(cmd=cmd, uri="library://radio/7"))
+    await handler._playlistcontrol(_command(cmd=cmd, uri="library://playlist/7"))
     handler._push_queue_update.assert_awaited_once_with(PLAYER)
     handler.cli.push_show_briefly.assert_called_once_with(
         PLAYER, text=[label, "Station"], icon_id="radio-7"
@@ -161,7 +161,7 @@ async def test_an_idle_queue_starts_playing_what_was_added(
 ) -> None:
     """ADD and NEXT only stage items, so an idle queue is told to start the new one."""
     handler = _handler(state=state, items=items)
-    await handler._playlistcontrol(_command(cmd=cmd, uri="library://radio/7"))
+    await handler._playlistcontrol(_command(cmd=cmd, uri="library://playlist/7"))
     play_index = handler.mass.player_queues.play_index
     if start_index is None:
         play_index.assert_not_awaited()
@@ -172,7 +172,7 @@ async def test_an_idle_queue_starts_playing_what_was_added(
 async def test_no_queue_yet_counts_as_idle() -> None:
     """A player that has no queue is treated as idle with nothing in it."""
     handler = _handler(queue=False)
-    await handler._playlistcontrol(_command(cmd="add", uri="library://radio/7"))
+    await handler._playlistcontrol(_command(cmd="add", uri="library://playlist/7"))
     handler.mass.player_queues.play_index.assert_awaited_once_with(queue_id=PLAYER, index=0)
 
 
@@ -211,7 +211,7 @@ async def test_an_item_that_cannot_be_played_tells_the_device() -> None:
     """A Music Assistant error shows a "Can't play" popup with the item's name."""
     handler = _handler()
     handler.mass.player_queues.play_media.side_effect = MediaNotFoundError("gone")
-    await handler._handle_playlistcontrol(_command(cmd="load", uri="library://radio/7"))
+    await handler._handle_playlistcontrol(_command(cmd="load", uri="library://playlist/7"))
     handler.cli.push_show_briefly.assert_called_once_with(
         PLAYER, text=["Can't play", "Station"], icon_id="radio-7", duration_ms=5000
     )
@@ -222,7 +222,7 @@ async def test_the_error_text_is_shown_when_the_item_cannot_be_described() -> No
     handler = _handler()
     handler.mass.player_queues.play_media.side_effect = MusicAssistantError("no provider")
     handler.mass.music.get_item_by_uri.side_effect = RuntimeError("boom")
-    await handler._handle_playlistcontrol(_command(cmd="load", uri="library://radio/7"))
+    await handler._handle_playlistcontrol(_command(cmd="load", uri="library://playlist/7"))
     call = handler.cli.push_show_briefly.call_args
     assert call.kwargs["text"] == ["Can't play", "no provider"]
     assert call.kwargs["icon_id"] == "html/images/browselibrary.png"
@@ -235,7 +235,7 @@ async def test_other_errors_and_unhandled_commands_are_not_swallowed() -> None:
         await handler._handle_playlistcontrol(_command(cmd="bogus"))
     handler.mass.player_queues.play_media.side_effect = RuntimeError("bug")
     with pytest.raises(RuntimeError):
-        await handler._handle_playlistcontrol(_command(cmd="load", uri="library://radio/7"))
+        await handler._handle_playlistcontrol(_command(cmd="load", uri="library://playlist/7"))
     handler.cli.push_show_briefly.assert_not_called()
 
 
@@ -243,7 +243,7 @@ async def test_popup_details_for_a_track_a_known_uri_and_an_unknown_one() -> Non
     """The title and icon come from the track, the looked-up item, or the uri itself."""
     handler = _handler()
     assert await handler._popup_details(None, _track()) == ("Song", "42")
-    assert await handler._popup_details("library://radio/7", None) == (
+    assert await handler._popup_details("library://playlist/7", None) == (
         "Station",
         "radio-7",
     )
@@ -424,9 +424,10 @@ async def test_a_track_menu_offers_the_five_options_for_that_track() -> None:
     menu = await handler._handle_trackinfo(_cmd("trackinfo", track_id=9))
     assert len(menu["item_loop"]) == 5
     assert all(row["actions"]["go"]["params"]["track_id"] == 9 for row in menu["item_loop"])
-    by_uri = await handler._handle_trackinfo(_cmd("trackinfo", uri="library://radio/7"))
+    by_uri = await handler._handle_trackinfo(_cmd("trackinfo", uri="library://playlist/7"))
     assert all(
-        row["actions"]["go"]["params"]["uri"] == "library://radio/7" for row in by_uri["item_loop"]
+        row["actions"]["go"]["params"]["uri"] == "library://playlist/7"
+        for row in by_uri["item_loop"]
     )
 
 
@@ -782,6 +783,19 @@ async def test_a_plain_status_only_patches_the_queue_size_and_position() -> None
     assert "item_loop" not in result
 
 
+async def test_the_status_slots_carry_the_queue_position_of_the_current_and_next_item() -> None:
+    """The Now Playing audio line shows the first slot's index, so it must be the queue position."""
+    built_in = {
+        "player_name": "Kitchen",
+        "mode": "play",
+        "playlist_loop": [{"playlist index": 0}, {"playlist index": 1}],
+    }
+    handler = _status_handler(_queue(items=8, current_index=1), built_in)
+    result = await handler._queue_status(_status_cmd("-", 1, tags="x"))
+    assert [item["playlist index"] for item in result["playlist_loop"]] == [1, 2]
+    assert result["playlist_tracks"] == 8
+
+
 async def test_a_menu_status_lists_the_queue_from_the_current_item_with_a_clear_row() -> None:
     """The queue screen gets the rows, a count that includes the clear row, and the offset."""
     handler = _status_handler(_queue(items=3, current_index=1))
@@ -844,3 +858,25 @@ async def test_the_status_of_an_unknown_player_keeps_its_volume() -> None:
     handler.mass.players.get_player.return_value = None
     result = await handler._handle_queue_status(_status_cmd("-", 1))
     assert result["mixer volume"] == 40
+
+
+@pytest.mark.parametrize("cmd", ["load", "add"])
+async def test_picking_a_radio_station_replaces_the_queue_and_plays(cmd: str) -> None:
+    """A station never ends, so it is not queued behind what is there: it replaces the queue."""
+    handler = _handler(items=4)
+    await handler._playlistcontrol(_command(cmd=cmd, uri="library://radio/7"))
+    handler.mass.player_queues.play_media.assert_awaited_once_with(
+        queue_id=PLAYER, media="library://radio/7", option=QueueOption.REPLACE
+    )
+
+
+@pytest.mark.parametrize(
+    ("cmd", "option"), [("insert", QueueOption.NEXT), ("replace_next", QueueOption.REPLACE_NEXT)]
+)
+async def test_the_play_next_commands_leave_a_radio_station_alone(
+    cmd: str, option: QueueOption
+) -> None:
+    """Only a plain tap or add is turned into a replace; the explicit play-next commands stay."""
+    handler = _handler(items=4)
+    await handler._playlistcontrol(_command(cmd=cmd, uri="library://radio/7"))
+    assert handler.mass.player_queues.play_media.await_args.kwargs["option"] == option
