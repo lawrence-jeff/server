@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Self
 from unittest.mock import MagicMock
+
+import pytest
 
 from music_assistant.providers.squeezelite import haextras
 
@@ -127,3 +129,59 @@ async def test_labeled_entities_are_looked_up_once_within_the_cache_time() -> No
     await haextras._labeled_entities(ha)
     assert len(ha.hass.commands) == 4
     haextras._label_cache.clear()
+
+
+class _Reply:
+    """A Home Assistant reply that streams its body in chunks."""
+
+    def __init__(self, body: bytes, content_type: str = "image/jpeg") -> None:
+        self.content_type = content_type
+        self._chunks = [body[i : i + 4] for i in range(0, len(body), 4)] + [b""]
+        self.content = SimpleNamespace(read=self._read)
+        self.raise_for_status = MagicMock()
+
+    async def _read(self, _size: int) -> bytes:
+        return self._chunks.pop(0)
+
+    async def __aenter__(self) -> Self:
+        return self
+
+    async def __aexit__(self, *_: object) -> None:
+        return None
+
+
+def _ha(reply: _Reply) -> Any:
+    session = MagicMock()
+    session.get.return_value = reply
+    ha = MagicMock()
+    ha._get_ha_http.return_value = ("http://ha:8123", {"Authorization": "Bearer t"}, session)
+    return ha
+
+
+async def test_a_camera_frame_is_fetched_from_home_assistant_with_the_plugin_login() -> None:
+    """The plugin's own image fetch refuses a camera path, so the frame is fetched here."""
+    ha = _ha(_Reply(b"\xff\xd8frame-bytes"))
+    assert await haextras._camera_frame(ha, "camera.doorbell") == b"\xff\xd8frame-bytes"
+    session = ha._get_ha_http.return_value[2]
+    assert session.get.call_args.args == ("http://ha:8123/api/camera_proxy/camera.doorbell",)
+    assert session.get.call_args.kwargs["headers"] == {"Authorization": "Bearer t"}
+
+
+@pytest.mark.parametrize("entity", ["light.porch", "camera.", "camera.a/../b", "camera.Door"])
+async def test_only_a_camera_entity_id_is_fetched(entity: str) -> None:
+    """Whatever the key table holds, nothing but a camera id becomes a Home Assistant path."""
+    ha = _ha(_Reply(b"x"))
+    with pytest.raises(ValueError, match="not a camera"):
+        await haextras._camera_frame(ha, entity)
+    ha._get_ha_http.return_value[2].get.assert_not_called()
+
+
+async def test_a_camera_reply_that_is_not_an_image_or_too_large_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A login page or an endless body is not served as a picture."""
+    with pytest.raises(ValueError, match="image"):
+        await haextras._camera_frame(_ha(_Reply(b"<html>", "text/html")), "camera.doorbell")
+    monkeypatch.setattr(haextras, "CAMERA_MAX_BYTES", 8)
+    with pytest.raises(ValueError, match="too large"):
+        await haextras._camera_frame(_ha(_Reply(b"0123456789abcdef")), "camera.doorbell")

@@ -545,6 +545,35 @@ async def handle(mass: MusicAssistant, slim_command: SlimCLICommand) -> dict[str
 
 # -- the picture, served on the CLI web port ------------------------------------------------------
 
+_CAMERA_ENTITY = re.compile(r"^camera\.[a-z0-9_]+$")
+CAMERA_MAX_BYTES = 10 * 1024 * 1024
+
+
+async def _camera_frame(ha: Any, entity: str) -> bytes:
+    """
+    Return the current frame of a Home Assistant camera.
+
+    :param ha: Music Assistant's Home Assistant plugin, whose login is used.
+    :param entity: The camera's entity id.
+    """
+    # The plugin's resolve_image only serves media player and image paths, not a camera's.
+    if not _CAMERA_ENTITY.match(entity):
+        raise ValueError(f"not a camera: {entity}")
+    ha_url, headers, session = ha._get_ha_http()
+    async with session.get(
+        f"{ha_url}/api/camera_proxy/{entity}", headers=headers, timeout=aiohttp.ClientTimeout(30)
+    ) as reply:
+        reply.raise_for_status()
+        if not reply.content_type.startswith("image/"):
+            raise ValueError(f"{entity} did not answer with an image")
+        frame = bytearray()
+        while chunk := await reply.content.read(64 * 1024):
+            frame.extend(chunk)
+            if len(frame) > CAMERA_MAX_BYTES:
+                raise ValueError(f"{entity} sent too large a frame")
+        return bytes(frame)
+
+
 _NAME = re.compile(r"^(?P<key>[0-9a-f]+)(?:_(?P<w>\d+)x(?P<h>\d+)(?:_[mcf])?)?\.jpg$")
 
 
@@ -573,7 +602,7 @@ def routes(
                     reply.raise_for_status()
                     frame = await reply.read()
             else:
-                frame = await ha.resolve_image(f"/api/camera_proxy/{entry[0]}")
+                frame = await _camera_frame(ha, entry[0])
         except Exception as err:  # the camera, dashboard picture or Home Assistant is not answering
             LOGGER.warning("HA Extras could not get the picture for %s", entry[0], exc_info=True)
             raise web.HTTPBadGateway from err
