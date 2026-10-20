@@ -312,8 +312,15 @@ def test_the_alarms_query_lists_what_is_stored_and_can_leave_out_what_is_off() -
         "dow": "1,2,3,4,5",
         "enabled": "1",
         "repeat": "1",
+        "volume": "43",
+        "url": "",
     }
     assert ac.alarms_query(book, "enabled")["count"] == 1
+    # the keys Home Assistant's Squeezebox integration (pysqueezebox) reads from every alarm
+    for alarm in everything["alarms_loop"]:
+        for key in ("id", "time", "dow", "enabled", "repeat", "volume", "url"):
+            assert key in alarm
+        int(alarm["time"]), int(alarm["volume"])
 
 
 def test_only_the_devices_with_the_alarm_applet_are_given_alarms() -> None:
@@ -413,3 +420,33 @@ async def test_the_status_of_a_radio_carries_its_next_alarm_and_a_squeezelite_pl
         handler._muted_level = lambda _id: None
         result = await handler._handle_queue_status(_command("status", "-", 1))
         assert result.get("alarm_state") == (expected or "none")
+
+
+async def test_a_player_with_no_alarm_timer_answers_the_alarm_queries_with_none() -> None:
+    """Home Assistant asks every player on each poll; an error answer filled its log."""
+    pcp = _handler("squeezelite")
+    assert await pcp(_command("alarms", "0", "99", filter="all")) == {
+        "count": 0,
+        "fade": "0",
+    }
+    assert await pcp(_command("playerpref", "alarmsEnabled", "?")) == {"_p2": "0"}
+
+
+async def test_a_radio_reports_and_changes_its_all_alarms_switch_as_the_alarms_enabled_setting() -> (
+    None
+):
+    """The same switch as Settings > Alarm Clock > All Alarms."""
+    radio = _handler("baby")
+    assert await radio(_command("playerpref", "alarmsEnabled", "?")) == {"_p2": "1"}
+    assert await radio(_command("playerpref", "alarmsEnabled", "0")) == {}
+    assert await radio(_command("playerpref", "alarmsEnabled", "?")) == {"_p2": "0"}
+    assert json.loads(radio.mass._store[("p1", "alarms")])["enabled"] is False
+    radio._push_queue_update.assert_awaited_once_with("p1")
+    assert await radio(_command("playerpref", "alarmsEnabled", "1")) == {}
+    assert await radio(_command("playerpref", "alarmsEnabled", "?")) == {"_p2": "1"}
+
+
+async def test_other_player_settings_are_left_to_the_built_in() -> None:
+    """Only alarmsEnabled is answered here."""
+    with pytest.raises(NotImplementedError):
+        await _handler("baby")(_command("playerpref", "volume", "?"))
