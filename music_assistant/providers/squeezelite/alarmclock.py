@@ -27,6 +27,8 @@ if TYPE_CHECKING:
     from music_assistant import MusicAssistant
 
 CONF_ALARMS = "alarms"
+# the volume a device rings its own alarm sound at
+ALARM_VOLUME = 43
 # the Model of the devices that have the AlarmSnooze applet (Squeezebox Radio, Touch, Controller and Boom)
 ALARM_MODELS = frozenset({"baby", "fab4", "controller", "boom"})
 DAY_NAMES = ("Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday")
@@ -347,6 +349,11 @@ def alarms_query(book: AlarmBook, alarm_filter: str = "all") -> dict[str, Any]:
                 "dow": _days_list(alarm.days),
                 "enabled": str(int(alarm.enabled)),
                 "repeat": str(int(alarm.repeat)),
+                # Home Assistant's Squeezebox integration reads both for every alarm. The device rings
+                # its own sound at its own volume, so these only stand in for the playlist and volume
+                # of a server alarm.
+                "volume": str(ALARM_VOLUME),
+                "url": "",
             }
             for alarm in chosen
         ],

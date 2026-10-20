@@ -880,3 +880,26 @@ async def test_the_play_next_commands_leave_a_radio_station_alone(
     handler = _handler(items=4)
     await handler._playlistcontrol(_command(cmd=cmd, uri="library://radio/7"))
     assert handler.mass.player_queues.play_media.await_args.kwargs["option"] == option
+
+
+async def test_a_button_the_built_in_hands_on_as_an_event_is_published_and_answered_without_error() -> (
+    None
+):
+    """A preset or repeat button works through the event, so the client must not be told it failed."""
+    handler = _handler()
+    handler.cli._handle_button = AsyncMock(side_effect=NotImplementedError)
+    handler.cli._publish_unhandled_command = MagicMock()
+    command = _cmd("button", "preset_1.single")
+    assert await handler._dispatch(command) == {}
+    handler.cli._publish_unhandled_command.assert_called_once_with(command)
+
+
+async def test_a_button_the_built_in_handles_is_not_published_again() -> None:
+    """Volume and power buttons are done by the built-in, with no event."""
+    handler = _handler()
+    handler.cli._handle_button = AsyncMock(return_value=None)
+    handler.cli._publish_unhandled_command = MagicMock()
+    command = _cmd("button", "volup")
+    assert await handler._dispatch(command) == {}
+    handler.cli._handle_button.assert_awaited_once_with(PLAYER, "volup")
+    handler.cli._publish_unhandled_command.assert_not_called()

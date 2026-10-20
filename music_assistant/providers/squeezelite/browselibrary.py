@@ -1781,6 +1781,26 @@ class BrowseLibraryHandler:
         if command in ALARM_COMMANDS and self._has_alarm_clock(slim_command.player_id):
             return await self._handle_alarm(slim_command)
 
+        if command == "button" and slim_command.args:
+            # The built-in answers "Invalid command" for a button it hands on as an event (a preset of
+            # Music Assistant, repeat, shuffle), so a client such as Home Assistant reports a failure
+            # for a button that worked. The button is handled exactly as before; only the answer changes.
+            cli = self._slimproto.cli
+            try:
+                await cli._handle_button(
+                    str(slim_command.player_id), *slim_command.args, **slim_command.kwargs
+                )
+            except NotImplementedError:
+                cli._publish_unhandled_command(slim_command)
+            return {}
+
+        # Home Assistant's Squeezebox integration asks every player for its alarms and its
+        # "alarms enabled" setting on each poll; a player with no alarm timer answers with none.
+        if command == "alarms":
+            return {"count": 0, "fade": "0"}
+        if command == "playerpref" and list(slim_command.args[:1]) == ["alarmsEnabled"]:
+            return await self._handle_alarms_enabled(slim_command)
+
         haextras_reply = await haextras.handle(self.mass, slim_command)  # HA-EXTRAS
         if haextras_reply is not None:  # HA-EXTRAS
             return haextras_reply  # HA-EXTRAS
@@ -2329,6 +2349,24 @@ class BrowseLibraryHandler:
         # the device takes the new time of its next alarm from its status: send it now
         await self._push_queue_update(player_id)
         return answer
+
+    async def _handle_alarms_enabled(self, slim_command: SlimCLICommand) -> dict[str, Any]:
+        """
+        Answer the "alarmsEnabled" player setting: the "All Alarms" switch of a device with alarms.
+
+        :param slim_command: The query ("?") or the new value ("0" or "1").
+        """
+        player_id = str(slim_command.player_id)
+        if not self._has_alarm_clock(player_id):
+            return {"_p2": "0"}
+        book = alarmclock.AlarmBook.load(self.mass, player_id)
+        value = str(slim_command.args[1]) if len(slim_command.args) > 1 else "?"
+        if value == "?":
+            return {"_p2": str(int(book.enabled))}
+        book.enabled = value == "1"
+        book.save(self.mass, player_id)
+        await self._push_queue_update(player_id)
+        return {}
 
     async def _push_queue_update(self, player_id: str) -> None:
         """
