@@ -265,8 +265,14 @@ class _FakeController:
         return self.count
 
 
+@pytest.fixture(autouse=True)
+def _no_remembered_list_lengths() -> None:
+    """Each test starts without the list lengths an earlier one found."""
+    bl._LIST_TOTALS.clear()
+
+
 async def test_library_page_counts_from_the_library_without_a_search() -> None:
-    """The total comes from library_count() for a full page; the favorite filter reaches both calls."""
+    """The total is the length of the list, measured once; the favorite filter reaches the calls."""
     controller = _FakeController([_item("A"), _item("B")], count=42)
     page = await bl._library_page(
         controller,
@@ -278,7 +284,7 @@ async def test_library_page_counts_from_the_library_without_a_search() -> None:
         window_style="icon_list",
         base_actions={"go": {}},
     )
-    assert page["count"] == 42
+    assert page["count"] == 2  # what the list holds, not what library_count() said
     assert page["offset"] == 5
     assert page["window"] == {"windowStyle": "icon_list"}
     assert page["base"] == {"actions": {"go": {}}}
@@ -291,6 +297,7 @@ async def test_library_page_counts_from_the_library_without_a_search() -> None:
         "favorite": True,
     }
     assert controller.calls[1] == {"count_favorite_only": True}
+    assert controller.calls[2] == {"limit": 43, "offset": 0, "summary": True, "favorite": True}
 
 
 async def test_library_page_counts_what_was_fetched_for_a_search() -> None:

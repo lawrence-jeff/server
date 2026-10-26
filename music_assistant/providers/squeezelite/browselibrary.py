@@ -562,6 +562,11 @@ def _flat_menu_for_row(page: dict[str, Any]) -> dict[str, Any]:
 # -- Library lists ---------------------------------------------------------------------------------
 
 
+# The length each library list really has, keyed by the list and kept with the library_count() it was measured against; see
+# _library_page() for why the count can not be used as it is.
+_LIST_TOTALS: dict[tuple[str, bool, tuple[Any, ...]], tuple[int, int]] = {}
+
+
 async def _library_page(
     controller: Any,
     rows_for: Callable[[list[Any], int], list[dict[str, Any]]],
@@ -572,6 +577,8 @@ async def _library_page(
     favorite_only: bool,
     window_style: str,
     base_actions: dict[str, Any],
+    filters: dict[str, Any] | None = None,
+    title: str | None = None,
 ) -> dict[str, Any]:
     """
     Return one page of a library list: fetch the items, count them and build the rows.
@@ -584,30 +591,61 @@ async def _library_page(
     :param favorite_only: Only list favorites.
     :param window_style: The window style the device shows the list in.
     :param base_actions: The base-level action template for the rows.
+    :param filters: Extra filters the controller's library_items() and library_count() both take.
+    :param title: Title bar text to override the one the device takes from the menu entry, or None to keep it.
     """
     limit = quantity if quantity is not None else 500
+    filters = filters or {}
     items = await controller.library_items(
         limit=limit,
         offset=index,
         search=search,
         summary=False,
         favorite=True if favorite_only else None,
+        **filters,
     )
     if search:
         # library_count() has no search param, so the count is what was fetched; a match set larger
         # than `limit` is undercounted.
         total = len(items)
     else:
-        total = await controller.library_count(favorite_only=favorite_only)
-        if len(items) < limit:
-            # A page that is not full is the end of the list, whatever the count says: Music Assistant counts
-            # some items its listing leaves out (artists, albums and radio stations here), and a device
-            # that is told of more rows than it ever gets cannot scroll past the last one.
+        counted = await controller.library_count(favorite_only=favorite_only, **filters)
+        key = (type(controller).__name__, favorite_only, tuple(sorted(filters.items())))
+        if (known := _LIST_TOTALS.get(key)) is None or known[0] != counted:
+            # Why the list is measured instead of trusting library_count(): Music Assistant's count includes rows its own
+            # listing leaves out (apparently items that are only matched to another provider and are in no provider's
+            # library), so the count is larger than the number of rows the list returns, and the gap changes as background
+            # tasks add and remove those rows.
+            #
+            # That breaks the devices. They load a list in chunks of 200 rows, and every chunk's reply carries "count". If a
+            # later chunk reports a different count than the first, the device throws its copy of the list away ("store
+            # invalid, different count" in the JiveLite log) and starts over, and it can end up never re-fetching the first
+            # chunk. The result is a list of blank rows at the start, or an endless refetch loop with a blank screen. Telling
+            # the device the count only on the last, short page is not enough, because the first chunks were already sent
+            # with the larger count.
+            #
+            # So the real length is measured once with a slim listing, remembered with the count it belongs to, and sent on
+            # every page. A new count means the library changed, so it is measured again.
+            listed = await controller.library_items(
+                limit=counted + 1,
+                offset=0,
+                summary=True,
+                favorite=True if favorite_only else None,
+                **filters,
+            )
+            known = _LIST_TOTALS[key] = (counted, len(listed))
+        total = known[1]
+        if items and len(items) < limit and index + len(items) != total:
+            # the list changed since it was counted: its end is where this page stops
             total = index + len(items)
+            _LIST_TOTALS[key] = (counted, total)
+    window: dict[str, Any] = {"windowStyle": window_style}
+    if title:
+        window["text"] = title
     return {
         "count": total,
         "offset": index,
-        "window": {"windowStyle": window_style},
+        "window": window,
         "base": {"actions": base_actions},
         "item_loop": rows_for(items, index),
     }
@@ -643,6 +681,22 @@ def _artist_row(item: Any) -> dict[str, Any]:
     }
 
 
+# The preference Music Assistant's web UI keeps the Artists page's filters under, per user.
+_ARTISTS_LISTING_PREFERENCE = "itemsListing.libraryartists.artists"
+
+
+ARTISTS_FILTERED_TITLE = "Artists (Album Filter)"
+
+
+def _artists_filters() -> dict[str, Any]:
+    """Return the Artists list's filters: only album artists, when the user the player browses as has that filter on."""
+    user = get_current_user()
+    listing = (user.preferences if user else None) or {}
+    if (listing.get(_ARTISTS_LISTING_PREFERENCE) or {}).get("albumArtistsFilter"):
+        return {"album_artists_only": True}
+    return {}
+
+
 async def get_artists(
     mass: MusicAssistant,
     index: int = 0,
@@ -661,6 +715,7 @@ async def get_artists(
     """
     # icon_id is "artist-<item_id>", not the bare id albums use: the two id spaces share the
     # /music/{icon_id}/cover route (see _fetch_real_item_art).
+    filters = _artists_filters()
     return await _library_page(
         mass.music.artists,
         partial(_rows, _artist_row, mark_unavailable=False),
@@ -670,6 +725,9 @@ async def get_artists(
         favorite_only=favorite_only,
         window_style="home_menu",
         base_actions=ARTIST_LIST_BASE_ACTIONS,
+        filters=filters,
+        # say so on the title bar when the list is cut down, but only on the plain list: a search or favorites list has its own title
+        title=ARTISTS_FILTERED_TITLE if filters and not search and not favorite_only else None,
     )
 
 
