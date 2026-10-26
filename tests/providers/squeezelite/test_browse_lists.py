@@ -36,8 +36,8 @@ class _Controller:
         self.calls.append(kwargs)
         return self.items
 
-    async def library_count(self, *, favorite_only: bool) -> int:
-        self.calls.append({"count_favorite_only": favorite_only})
+    async def library_count(self, *, favorite_only: bool, **filters: Any) -> int:
+        self.calls.append({"count_favorite_only": favorite_only, **filters})
         return self.count
 
 
@@ -46,6 +46,12 @@ def _mass(**controllers: Any) -> Any:
 
 
 KWARGS: dict[str, Any] = {}
+
+
+@pytest.fixture(autouse=True)
+def _no_remembered_list_lengths() -> None:
+    """Each test starts without the list lengths an earlier one found."""
+    bl._LIST_TOTALS.clear()
 
 
 async def test_the_artists_list_is_a_home_menu_of_artist_rows() -> None:
@@ -60,6 +66,76 @@ async def test_the_artists_list_is_a_home_menu_of_artist_rows() -> None:
     assert first["textkey"] == "B"
     assert second["text"] == "Gone"
     assert page["base"]["actions"] == bl.ARTIST_LIST_BASE_ACTIONS
+
+
+@pytest.mark.parametrize(
+    ("user", "expected"),
+    [
+        (None, {}),
+        (SimpleNamespace(preferences={}), {}),
+        (
+            SimpleNamespace(
+                preferences={"itemsListing.libraryartists.artists": {"albumArtistsFilter": False}}
+            ),
+            {},
+        ),
+        (
+            SimpleNamespace(
+                preferences={"itemsListing.libraryartists.artists": {"albumArtistsFilter": True}}
+            ),
+            {"album_artists_only": True},
+        ),
+    ],
+)
+async def test_the_artists_list_follows_the_users_album_artists_filter(
+    monkeypatch: pytest.MonkeyPatch, user: Any, expected: dict[str, Any]
+) -> None:
+    """The list and its count both carry the album-artists-only filter the player's user has switched on."""
+    monkeypatch.setattr(bl, "get_current_user", lambda: user)
+    artists = _Controller([_item("Band", 4)], count=9)
+    page = await bl.get_artists(_mass(artists=artists))
+    assert page["count"] == 1
+    assert page["window"].get("text") == (bl.ARTISTS_FILTERED_TITLE if expected else None)
+    items_call, count_call, measured_call = artists.calls
+    assert {k: v for k, v in items_call.items() if k == "album_artists_only"} == expected
+    assert {k: v for k, v in count_call.items() if k == "album_artists_only"} == expected
+    assert {k: v for k, v in measured_call.items() if k == "album_artists_only"} == expected
+
+
+async def test_a_filtered_artists_search_keeps_its_own_title(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A search or favorites list is not retitled, even with the album-artists filter on."""
+    user = SimpleNamespace(
+        preferences={"itemsListing.libraryartists.artists": {"albumArtistsFilter": True}}
+    )
+    monkeypatch.setattr(bl, "get_current_user", lambda: user)
+    page = await bl.get_artists(_mass(artists=_Controller([_item("Band")])), search="ba")
+    assert "text" not in page["window"]
+
+
+async def test_every_page_reports_the_same_length_for_as_long_as_the_count_is_the_same() -> None:
+    """A count that is longer than the list must not change between pages, or the device refetches for ever."""
+    items = [_item(f"A{i}", i) for i in range(5)]
+
+    class _Paged(_Controller):
+        async def library_items(self, **kwargs: Any) -> list[Any]:
+            self.calls.append(kwargs)
+            return items[kwargs["offset"] : kwargs["offset"] + kwargs["limit"]]
+
+    artists = _Paged(items, count=7)
+    totals = [
+        (await bl.get_artists(_mass(artists=artists), index=i, quantity=2))["count"]
+        for i in (4, 0, 2, 10)
+    ]
+    assert totals == [5, 5, 5, 5]
+    listed = [c for c in artists.calls if c.get("summary") is True]
+    assert len(listed) == 1  # the list was measured once
+    artists.count = 8
+    assert (await bl.get_artists(_mass(artists=artists), index=0, quantity=2))["count"] == 5
+    assert (
+        len([c for c in artists.calls if c.get("summary") is True]) == 2
+    )  # a new count measures again
 
 
 async def test_a_search_or_favorite_filter_reaches_the_controller() -> None:
@@ -88,11 +164,18 @@ async def test_a_page_that_is_not_full_is_the_end_of_the_list_whatever_the_count
     assert later["count"] == 12  # the offset plus the rows it got
 
 
-async def test_a_full_page_keeps_the_count_so_the_device_asks_for_the_next_one() -> None:
-    """When the page is full there may be more, so the count of the controller is used."""
-    artists = _Controller([_item("Band", 4), _item("Other", 5)], count=22)
+async def test_a_full_page_reports_the_length_of_the_list_not_the_count_of_the_controller() -> None:
+    """The count of the controller can include items its list leaves out, so every page says how long the list is."""
+    items = [_item(f"A{i}", i) for i in range(5)]
+
+    class _Paged(_Controller):
+        async def library_items(self, **kwargs: Any) -> list[Any]:
+            self.calls.append(kwargs)
+            return items[kwargs["offset"] : kwargs["offset"] + kwargs["limit"]]
+
+    artists = _Paged(items, count=7)
     page = await bl.get_artists(_mass(artists=artists), index=0, quantity=2)
-    assert page["count"] == 22
+    assert page["count"] == 5
 
 
 async def test_all_albums_show_the_artist_and_can_be_favorited() -> None:
