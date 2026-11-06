@@ -50,7 +50,11 @@ from aiohttp import web
 
 # Reuses aioslimproto's menu_item_from_media_details; its MediaDetails input (url, metadata) is
 # built in player.py.
-from aioslimproto.cli import menu_item_from_media_details, playlist_item_from_media_details
+from aioslimproto.cli import (
+    SEEK_PENDING_SECONDS,
+    menu_item_from_media_details,
+    playlist_item_from_media_details,
+)
 from aioslimproto.models import EventType, MediaDetails, PlayerState, SlimEvent
 from music_assistant_models.enums import ImageType, MediaType, PlaybackState, QueueOption
 from music_assistant_models.errors import MediaNotFoundError, MusicAssistantError
@@ -3075,6 +3079,27 @@ class BrowseLibraryHandler:
             return 0
         return -int(mass_player.volume_level or 0)
 
+    def _pending_seek_target(self, player_id: str | None) -> int | None:
+        """
+        Return the position a seek in flight is going to, or None when there is none.
+
+        :param player_id: The player to look up.
+        """
+        # The same record aioslimproto reads to show the target as the position: it ends when the
+        # player's media changes or after SEEK_PENDING_SECONDS.
+        cli = self._slimproto.cli
+        player = self._slimproto.get_player(player_id) if player_id else None
+        pending = cli._pending_seeks.get(player_id) if player_id else None
+        if player is None or pending is None:
+            return None
+        target, media_at_seek, started = pending
+        if (
+            player.current_media is media_at_seek
+            and time.monotonic() - started < SEEK_PENDING_SECONDS
+        ):
+            return int(target)
+        return None
+
     async def _queue_status(self, slim_command: SlimCLICommand) -> dict[str, Any]:
         """
         Override aioslimproto's built-in _handle_status for every status call.
@@ -3110,6 +3135,17 @@ class BrowseLibraryHandler:
         result: dict[str, Any] | None = await cli._handle_status(player_id, *args, **kwargs)
         if result is None:
             raise NotImplementedError  # unknown player: let the built-in reject it
+
+        # While a seek is in flight the old stream can run out before the new one starts, which
+        # the device reports as stopped: the client would show the stopped message and drop the
+        # progress bar for that moment. LMS seeks inside the stream and never stops, so the seek's
+        # target is reported as playing until the new stream has started.
+        if (
+            result.get("mode") == "stop"
+            and (target := self._pending_seek_target(player_id)) is not None
+        ):
+            result["mode"] = "play"
+            result["time"] = target
 
         # LMS reports the playlist timestamp as a float, and Home Assistant's Squeezebox integration
         # only loads the playlist (titles, durations, artwork) when it is one; aioslimproto

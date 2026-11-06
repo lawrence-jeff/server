@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -778,6 +779,8 @@ def _status_handler(queue: SimpleNamespace | None, built_in: dict[str, Any] | No
     handler = _context_handler(queue)
     base = {"player_name": "Kitchen", "mode": "play"} if built_in is None else built_in
     handler.cli._handle_status = AsyncMock(return_value=base)
+    handler.cli._pending_seeks = {}
+    handler.provider.slimproto.get_player = lambda _id: SimpleNamespace(current_media="old")
     handler.mass.player_queues.items.return_value = _queue_rows(3)
     handler.mass.players.get_player.return_value = SimpleNamespace(
         volume_muted=False, volume_level=40
@@ -797,6 +800,32 @@ async def test_a_plain_status_only_patches_the_queue_size_and_position() -> None
     assert result["playlist_cur_index"] == 4
     assert result["player_name"] == "Kitchen"
     assert "item_loop" not in result
+
+
+@pytest.mark.parametrize(
+    ("pending", "mode", "expected"),
+    [
+        ((90, "old", 0.0), "stop", ("play", 90)),
+        ((90, "old", 0.0), "play", ("play", None)),
+        ((90, "new", 0.0), "stop", ("stop", None)),
+        ((90, "old", -1000.0), "stop", ("stop", None)),
+        (None, "stop", ("stop", None)),
+    ],
+)
+async def test_a_seek_in_flight_is_reported_as_playing_at_its_target(
+    pending: tuple[int, str, float] | None, mode: str, expected: tuple[str, int | None]
+) -> None:
+    """The old stream can run out before the new one starts; the client must not see a stop."""
+    handler = _status_handler(
+        _queue(), {"player_name": "Kitchen", "mode": mode, "time": 0, "playlist_timestamp": 1}
+    )
+    if pending is not None:
+        target, media, started = pending
+        handler.cli._pending_seeks = {PLAYER: (target, media, time.monotonic() + started)}
+    result = await handler._queue_status(_status_cmd("-", 1, tags="x"))
+    assert result["mode"] == expected[0]
+    if expected[1] is not None:
+        assert result["time"] == expected[1]
 
 
 async def test_the_playlist_timestamp_is_a_float_as_on_lms() -> None:
