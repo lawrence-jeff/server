@@ -14,6 +14,7 @@ import pytest
 from music_assistant.providers.squeezelite import alarmclock as ac
 from music_assistant.providers.squeezelite import browselibrary as bl
 from music_assistant.providers.squeezelite import haextras
+from music_assistant.providers.squeezelite.devicestatus import DeviceReports
 
 CHICAGO = zoneinfo.ZoneInfo("America/Chicago")
 # Wednesday 14 October 2026, 10:00 in Chicago
@@ -332,6 +333,7 @@ def test_only_the_devices_with_the_alarm_applet_are_given_alarms() -> None:
 
 def _handler(model: str | None, stored: dict[Any, Any] | None = None) -> Any:
     handler: Any = bl.BrowseLibraryHandler.__new__(bl.BrowseLibraryHandler)
+    handler._device_reports = DeviceReports()
     handler.mass = _mass(stored)
     capabilities = {"Model": model} if model else {}
     player = SimpleNamespace(_capabilities=capabilities)

@@ -33,7 +33,18 @@ APPLETS: dict[str, dict[str, str]] = {
             "home menu; the device restarts. On a piCorePlayer the fonts are kept in its settings backup. A Squeezebox Radio, Touch "
             "or Controller has little free memory: use at your own risk."
         ),
-    }
+    },
+    "MaDeviceStatus.zip": {
+        "name": "MaDeviceStatus",
+        "title": "Device status for Music Assistant",
+        "version": "1.0",
+        "creator": "Music Assistant",
+        "desc": (
+            "Reports the memory in use, the uptime and (on a Squeezebox Radio) the battery of the device to Music Assistant once a "
+            "minute. Music Assistant adds them to the player's status as ma_* fields. It runs in the background after the "
+            "device restarts and has no menu."
+        ),
+    },
 }
 
 

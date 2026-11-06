@@ -46,6 +46,16 @@ def test_the_reply_lists_each_applet_with_its_zip_address_and_checksum(
     assert entry["sha"] == hashlib.sha1((folder / "FontReplacer.zip").read_bytes()).hexdigest()
 
 
+def test_the_device_status_applet_is_offered_with_its_zip(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """It is listed by its own name, next to the other applets."""
+    _folder_with(monkeypatch, tmp_path, "FontReplacer.zip", "MaDeviceStatus.zip")
+    entries = {entry["name"]: entry for entry in applets.reply()["item_loop"]}
+    assert set(entries) == {"FontReplacer", "MaDeviceStatus"}
+    assert entries["MaDeviceStatus"]["relurl"] == "/applets/MaDeviceStatus.zip"
+
+
 def test_an_applet_whose_zip_is_missing_is_not_offered(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

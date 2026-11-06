@@ -12,6 +12,7 @@ from music_assistant_models.enums import MediaType, PlaybackState, QueueOption
 from music_assistant_models.errors import MediaNotFoundError, MusicAssistantError
 
 from music_assistant.providers.squeezelite import browselibrary as bl
+from music_assistant.providers.squeezelite.devicestatus import DeviceReports
 
 PLAYER = "p1"
 
@@ -42,6 +43,7 @@ def _handler(
 ) -> Any:
     """Return a handler whose Music Assistant and CLI are mocks."""
     handler: Any = bl.BrowseLibraryHandler.__new__(bl.BrowseLibraryHandler)
+    handler._device_reports = DeviceReports()
     mass = MagicMock()
     mass.player_queues.get.return_value = (
         SimpleNamespace(state=state, items=items, current_index=None) if queue else None

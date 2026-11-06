@@ -57,7 +57,7 @@ from music_assistant.controllers.player_queues.helpers import committed_index
 from music_assistant.controllers.webserver.helpers.auth_middleware import get_current_user
 from music_assistant.helpers import datetime as mass_datetime
 
-from . import alarmclock, alarmring, applets, browseuser, haextras  # HA-EXTRAS
+from . import alarmclock, alarmring, applets, browseuser, devicestatus, haextras  # HA-EXTRAS
 
 if TYPE_CHECKING:
     from aioslimproto import SlimServer
@@ -1699,6 +1699,7 @@ class BrowseLibraryHandler:
         self.provider = provider
         self.mass = provider.mass
         self._alarm_volume_before: dict[str, int] = {}
+        self._device_reports = devicestatus.DeviceReports()
         self._alarm_ringer = alarmring.AlarmRinger(
             self.mass,
             self._alarm_player_ids,
@@ -1759,6 +1760,11 @@ class BrowseLibraryHandler:
         if command == "jiveapplets":
             # the device's Applet Installer asks which applets this server offers
             return applets.reply()
+
+        if command == "madevice":
+            # the MaDeviceStatus applet of a device reports its memory, uptime and battery
+            self._device_reports.record(str(slim_command.player_id), dict(slim_command.kwargs))
+            return {}
 
         if command in ALARM_COMMANDS and self._has_alarm_clock(slim_command.player_id):
             return await self._handle_alarm(slim_command)
@@ -2966,6 +2972,7 @@ class BrowseLibraryHandler:
         # player returns to, negated, tells the client it is muted.
         if muted_level := self._muted_level(slim_command.player_id):
             result["mixer volume"] = muted_level
+        result.update(self._device_reports.status_fields(slim_command.player_id))
         if self._has_alarm_clock(slim_command.player_id):
             # the time of the next alarm: the device keeps it and rings by itself when it is due
             result.update(
