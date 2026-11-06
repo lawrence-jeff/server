@@ -253,7 +253,7 @@ async def test_the_other_lists_use_their_own_icon_ids_and_actions(
     page = await function(_mass(**{controller: _Controller([_item("One", 6)])}), KWARGS)
     row = page["item_loop"][0]
     assert row["icon-id"] == f"{icon_prefix}-6"
-    assert row["icon"] == f"music/{icon_prefix}-6/cover"
+    assert row["icon"] == f"music/{icon_prefix}-6/cover.jpg"
     assert row.get("goAction") == go_action
     assert page["window"] == {"windowStyle": "icon_list"}
     assert page["base"]["actions"]["more"]["cmd"] == more_cmd

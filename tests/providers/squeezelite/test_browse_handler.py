@@ -738,7 +738,7 @@ async def test_queue_rows_have_two_lines_a_track_id_and_their_queue_position() -
         assert "actions" not in row
         assert "type" not in row
         assert "nextWindow" not in row
-    assert rows[0]["icon"] == "music/42/cover"
+    assert rows[0]["icon"] == "music/42/cover.jpg"
 
 
 async def test_a_queue_row_with_a_picture_of_its_own_gets_the_queue_item_icon() -> None:
@@ -748,8 +748,10 @@ async def test_a_queue_row_with_a_picture_of_its_own_gets_the_queue_item_icon() 
     rows_in[0].image = SimpleNamespace(path="https://x/a.jpg", remotely_accessible=True)
     handler.mass.player_queues.items.return_value = rows_in
     rows = await handler._build_queue_item_loop(_queue(), offset=0, limit=2)
-    assert rows[0]["icon"] == f"music/{bl.queue_item_art_ref(PLAYER, 'item0')}/cover"
-    assert rows[1]["icon"] == "music/42/cover"  # no picture of its own: the track's id as before
+    assert rows[0]["icon"] == bl.cover_icon(bl.queue_item_art_ref(PLAYER, "item0"))
+    assert (
+        rows[1]["icon"] == "music/42/cover.jpg"
+    )  # no picture of its own: the track's id as before
 
 
 async def test_a_queue_row_without_a_picture_shows_the_picture_of_the_station() -> None:
@@ -760,10 +762,10 @@ async def test_a_queue_row_without_a_picture_shows_the_picture_of_the_station() 
     queue = _queue()
     queue.is_dynamic, queue.sources = True, [station]
     rows = await handler._build_queue_item_loop(queue, offset=0, limit=2)
-    assert {row["icon"] for row in rows} == {f"music/{bl.queue_item_art_ref(PLAYER)}/cover"}
+    assert {row["icon"] for row in rows} == {bl.cover_icon(bl.queue_item_art_ref(PLAYER))}
     queue.is_dynamic = False
     rows = await handler._build_queue_item_loop(queue, offset=0, limit=2)
-    assert rows[0]["icon"] == "music/42/cover"
+    assert rows[0]["icon"] == "music/42/cover.jpg"
 
 
 async def test_a_queue_row_without_an_artist_shows_only_the_title() -> None:

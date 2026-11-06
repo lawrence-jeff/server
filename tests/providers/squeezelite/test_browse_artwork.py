@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import re
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -62,6 +63,9 @@ def test_the_uri_reference_is_url_safe_and_reversible() -> None:
         ("/music/4/cover_100x300_m", 300),
         ("/music/4/cover", bl._DEFAULT_COVER_SIZE),
         ("/music/4/cover_1080x1080_f", 1080),
+        ("/music/4/cover_154x154_m.jpg", 154),
+        ("/music/queue-abc/cover_759x759_m.jpg", 759),
+        ("/music/4/cover.jpg", bl._DEFAULT_COVER_SIZE),
     ],
 )
 def test_the_requested_size_is_read_from_the_path(path: str, size: int) -> None:
@@ -278,6 +282,32 @@ def _request(path: str, **match_info: str) -> web.Request:
 
 def _routes(mass: Any) -> Any:
     return bl.make_icon_routes(mass)
+
+
+@pytest.mark.parametrize("size", [41, 154, 240, 759])
+def test_a_client_asks_for_the_size_it_needs_from_the_icon_it_was_given(size: int) -> None:
+    """A client asks for the size it needs only when the icon has an extension (its fetchArtwork rule)."""
+    # The client puts "_<w>x<h>_m" before the extension, and sends an icon with none as it is.
+    icon = bl.cover_icon(bl.queue_item_art_ref("p1", "item0"))
+    requested = re.sub(r"(.+)(\.[A-Za-z]+)", rf"\1_{size}x{size}_m\2", icon, count=1)
+    assert requested != icon
+    assert bl._requested_cover_size("/" + requested) == size
+
+
+def test_every_cover_icon_has_an_extension_and_names_the_picture() -> None:
+    """The path is music/<picture>/cover.jpg for an album, an artist, a queue item and so on."""
+    assert bl.cover_icon("42") == "music/42/cover.jpg"
+    assert bl.cover_icon("artist-7") == "music/artist-7/cover.jpg"
+
+
+async def test_cover_art_is_served_at_the_size_the_client_asked_for() -> None:
+    """The size before the extension is the size the picture is fetched and resized to."""
+    mass = _mass_with_art(_item(metadata=SimpleNamespace(images=[])))
+    handle_icon, _ = _routes(mass)
+    response = await handle_icon(_request("/music/42/cover_154x154_m.jpg", icon_id="42"))
+    assert response.status == 200
+    assert response.body == b"JPEG"
+    assert mass.metadata.get_thumbnail.await_args.kwargs["size"] == 154
 
 
 async def test_cover_art_is_served_as_a_cached_jpeg() -> None:

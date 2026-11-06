@@ -45,7 +45,7 @@ from music_assistant.models.player import (
 )
 
 from . import browseuser, haextras  # HA-EXTRAS
-from .browselibrary import art_ref_for_item
+from .browselibrary import art_ref_for_item, cover_icon
 from .constants import (
     CONF_ENTRY_DISPLAY,
     CONF_ENTRY_VISUALIZATION,
@@ -889,7 +889,7 @@ class SqueezelitePlayer(Player):
                         SlimPreset(
                             uri=media_item.uri,
                             text=media_item.name,
-                            icon=f"music/{art_ref}/cover" if art_ref else "",
+                            icon=cover_icon(art_ref) if art_ref else "",
                         )
                     )
                 except MusicAssistantError:

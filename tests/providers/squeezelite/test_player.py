@@ -262,11 +262,11 @@ async def test_grouped_play_media_passes_per_member_mime_type() -> None:
 @pytest.mark.parametrize(
     ("media_type", "item_id", "has_album", "expected_icon"),
     [
-        (MediaType.RADIO, "7", False, "music/radio-7/cover"),
-        (MediaType.PLAYLIST, "5", False, "music/playlist-5/cover"),
-        (MediaType.ALBUM, "42", False, "music/42/cover"),
+        (MediaType.RADIO, "7", False, "music/radio-7/cover.jpg"),
+        (MediaType.PLAYLIST, "5", False, "music/playlist-5/cover.jpg"),
+        (MediaType.ALBUM, "42", False, "music/42/cover.jpg"),
         # a track shows the art of its album, which has a library id
-        (MediaType.TRACK, "9", True, "music/42/cover"),
+        (MediaType.TRACK, "9", True, "music/42/cover.jpg"),
         # an episode has no library album, so it is identified by its uri
         (MediaType.PODCAST_EPISODE, "3", False, None),
     ],
@@ -290,7 +290,7 @@ async def test_presets_get_an_icon_for_every_kind_of_item(
     icon = player.client.presets[0].icon
     if expected_icon is None:
         assert icon.startswith("music/uri-")
-        assert icon.endswith("/cover")
+        assert icon.endswith("/cover.jpg")
     else:
         assert icon == expected_icon
 

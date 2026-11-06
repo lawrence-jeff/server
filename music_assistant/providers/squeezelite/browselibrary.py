@@ -670,13 +670,13 @@ def _artist_row(item: Any) -> dict[str, Any]:
         "type": "playlist",
         "commonParams": {"artist_id": str(item.item_id)},
         "textkey": item.name[0].upper() if item.name else "",
-        "icon": f"music/artist-{item.item_id}/cover",
+        "icon": cover_icon(f"artist-{item.item_id}"),
         "icon-id": f"artist-{item.item_id}",
         "presetParams": {
             "favorites_type": "playlist",
             "favorites_title": item.name,
             "favorites_url": f"db:contributor.name={item.name.replace(' ', '%20')}",
-            "icon": f"music/artist-{item.item_id}/cover",
+            "icon": cover_icon(f"artist-{item.item_id}"),
         },
     }
 
@@ -742,7 +742,7 @@ def _album_row(album: Any, *, mixed: bool) -> dict[str, Any]:
         "text": album.name,
         "type": "playlist",
         "commonParams": {"album_id": str(album.item_id), "performance": ""},
-        "icon": f"music/{album.item_id}/cover",
+        "icon": cover_icon(album.item_id),
         "icon-id": str(album.item_id),
     }
     if mixed:
@@ -885,7 +885,7 @@ def _all_track_rows(items: list[Any], index: int = 0) -> list[dict[str, Any]]:
             # No goAction override: the base "go" action already adds to the queue.
         }
         if item.album is not None:
-            row["icon"] = f"music/{item.album.item_id}/cover"
+            row["icon"] = cover_icon(item.album.item_id)
             row["icon-id"] = str(item.album.item_id)
         item_loop.append(row)
     return _disable_unavailable(item_loop, items)
@@ -989,13 +989,13 @@ def _playlist_row(item: Any) -> dict[str, Any]:
         "type": "playlist",
         "commonParams": {"playlist_id": str(item.item_id)},
         "textkey": item.name[0].upper() if item.name else "",
-        "icon": f"music/playlist-{item.item_id}/cover",
+        "icon": cover_icon(f"playlist-{item.item_id}"),
         "icon-id": f"playlist-{item.item_id}",
         "presetParams": {
             "favorites_type": "playlist",
             "favorites_title": item.name,
             "favorites_url": item.uri,
-            "icon": f"music/playlist-{item.item_id}/cover",
+            "icon": cover_icon(f"playlist-{item.item_id}"),
         },
     }
 
@@ -1096,7 +1096,7 @@ def _radio_row(item: Any) -> dict[str, Any]:
         "style": "itemplay",
         "goAction": "play",
         "commonParams": {"uri": item.uri},
-        "icon": f"music/radio-{item.item_id}/cover",
+        "icon": cover_icon(f"radio-{item.item_id}"),
         "icon-id": f"radio-{item.item_id}",
         "presetParams": {
             "favorites_type": "audio",
@@ -1148,7 +1148,7 @@ def _audiobook_row(item: Any) -> dict[str, Any]:
         "style": "itemplay",
         "goAction": "play",
         "commonParams": {"uri": item.uri},
-        "icon": f"music/audiobook-{item.item_id}/cover",
+        "icon": cover_icon(f"audiobook-{item.item_id}"),
         "icon-id": f"audiobook-{item.item_id}",
         "presetParams": {
             "favorites_type": "audio",
@@ -1200,13 +1200,13 @@ def _podcast_row(item: Any) -> dict[str, Any]:
         "type": "playlist",
         "commonParams": {"podcast_id": str(item.item_id)},
         "textkey": item.name[0].upper() if item.name else "",
-        "icon": f"music/podcast-{item.item_id}/cover",
+        "icon": cover_icon(f"podcast-{item.item_id}"),
         "icon-id": f"podcast-{item.item_id}",
         "presetParams": {
             "favorites_type": "playlist",
             "favorites_title": item.name,
             "favorites_url": item.uri,
-            "icon": f"music/podcast-{item.item_id}/cover",
+            "icon": cover_icon(f"podcast-{item.item_id}"),
         },
     }
 
@@ -3297,7 +3297,7 @@ class BrowseLibraryHandler:
 # Icon / cover art serving
 #
 # The client is never handed a real or proxy image URL. Every "icon"/image_url it gets is a local
-# identifier in this server's namespace (f"music/{id}/cover", "artist-{id}", menu icon filenames)
+# identifier in this server's namespace (cover_icon(id), "artist-{id}", menu icon filenames)
 # that this code resolves on request via _fetch_real_item_art. That keeps this server in the middle
 # of every image fetch (for example to serve a smaller image to a low-power device).
 #
@@ -3357,15 +3357,28 @@ def _station_image(queue: Any) -> Any:
     return next((source.image for source in queue.sources if source.image is not None), None)
 
 
+def cover_icon(art_ref: str) -> str:
+    """
+    Return the icon path of a picture: a local reference the icon route turns into the real art.
+
+    The file extension is what makes a client ask for the size it needs: it puts "_<w>x<h>_m" before an
+    extension ("cover_154x154_m.jpg"), as it does for LMS, and sends the path unchanged when there is
+    none, so the server could only guess the size.
+
+    :param art_ref: The reference of the picture, e.g. "42", "artist-7" or "queue-<id>".
+    """
+    return f"music/{art_ref}/cover.jpg"
+
+
 def _queue_item_icon_path(queue: PlayerQueue, queue_item: QueueItem, station_image: Any) -> str:
     """
-    Return the local "music/{id}/cover" path of a queue item's picture, or "" when it has none.
+    Return the local "music/{id}/cover.jpg" path of a queue item's picture, or "" when it has none.
 
     :param queue: The queue the item is in.
     :param queue_item: The queue item.
     :param station_image: The image of the station the queue plays, if any.
     """
-    # Icons are local "music/{id}/cover" identifiers resolved server-side by handle_icon,
+    # Icons are local "music/{id}/cover.jpg" identifiers resolved server-side by handle_icon,
     # never a resolved image URL: a remote image reached the device as an
     # "/imageproxy/<url>/..." request this server doesn't serve, leaving some queue rows
     # without art.
@@ -3376,7 +3389,7 @@ def _queue_item_icon_path(queue: PlayerQueue, queue_item: QueueItem, station_ima
     elif station_image is not None:
         # an item with no picture of its own (a station's message or advert) shows the station's
         art_ref = queue_item_art_ref(queue.queue_id)
-    return f"music/{art_ref}/cover" if art_ref else ""
+    return cover_icon(art_ref) if art_ref else ""
 
 
 def art_ref_for_item(item: Any) -> str:
@@ -3447,7 +3460,7 @@ def _resolve_static_icon_path(filename: str) -> Path | None:
 
 # The size suffix JiveLite puts on every image path (e.g. '.../cover_225x225_m'), used
 # to request a suitably sized thumbnail from MA.
-_COVER_SIZE_RE = re.compile(r"_(?P<w>\d+)x(?P<h>\d+)_[a-zA-Z]$")
+_COVER_SIZE_RE = re.compile(r"_(?P<w>\d+)x(?P<h>\d+)_[a-zA-Z](?:\.[a-zA-Z0-9]+)?$")
 
 
 # Used when a request has no size suffix, mainly the bare-icon_id fallback in handle_unmatched; a
@@ -3459,7 +3472,7 @@ def _requested_cover_size(path: str) -> int:
     """
     Extract the requested pixel size from a JiveLite icon path suffix.
 
-    For example '.../cover_225x225_m' gives 225.
+    For example '.../cover_225x225_m' or '.../cover_225x225_m.jpg' gives 225.
 
     :param path: The requested image path.
     """
@@ -3819,7 +3832,7 @@ def make_icon_routes(
         """
         Serve cover art and menu icons.
 
-        Cover art is served for '/music/<icon-id>/cover_<size>' and menu icon files from static/ for
+        Cover art is served for '/music/<icon-id>/cover_<size>[.jpg]' and menu icon files from static/ for
         '/html/images/<name>_<size>.png'.
 
         :param request: The web request.
