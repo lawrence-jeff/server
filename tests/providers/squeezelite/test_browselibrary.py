@@ -364,6 +364,14 @@ async def test_pause_only_starts_again_through_the_queue() -> None:
         handler.mass.player_queues.play.assert_awaited_once_with(queue_id="p1")
 
 
+async def test_a_seek_drops_the_next_track_queued_for_the_stream_it_replaces() -> None:
+    """The old stream's decoder-ready report must not start it: its session is gone by then."""
+    handler, _cli, player = _handler()
+    player._next_media = SimpleNamespace(url="http://old-session/next")
+    await handler._handle_time(_command("time", 90))
+    assert player._next_media is None
+
+
 async def test_seek_shows_the_target_and_asks_the_queue_to_seek() -> None:
     """The target is reported from the moment the command arrives, absolute or relative."""
     handler, cli, _player = _handler()
@@ -400,8 +408,7 @@ async def test_a_refused_seek_stops_showing_its_target() -> None:
     ("value", "target"),
     [
         (90, 90),
-        ("12.5", 12),
-        ("+2.5", 32),
+        ("+2", 32),
         ("-5", 25),
         # before the start of the track, and after the end of it
         ("-100", 0),
@@ -410,10 +417,8 @@ async def test_a_refused_seek_stops_showing_its_target() -> None:
         (200, 200),
     ],
 )
-async def test_a_seek_is_in_whole_seconds_and_stays_inside_the_track(
-    value: Any, target: int
-) -> None:
-    """Decimals are cut, and the target is kept between the start and the end of the track."""
+async def test_a_seek_stays_inside_the_track(value: Any, target: int) -> None:
+    """The target is kept between the start and the end of the track."""
     handler, cli, player = _handler()
     player.current_media = SimpleNamespace(metadata={"duration": 200})
     await handler._handle_time(_command("time", value))
@@ -428,11 +433,13 @@ async def test_a_seek_in_a_track_of_unknown_length_is_not_cut_at_the_end() -> No
     handler.mass.player_queues.seek.assert_awaited_once_with(queue_id="p1", position=5000)
 
 
-@pytest.mark.parametrize("value", ["abc", "", "  ", "nan", "inf", "-inf", "1e999"])
-async def test_a_seek_that_is_not_a_number_is_the_built_ins_and_seeks_nothing(
+@pytest.mark.parametrize(
+    "value", ["abc", "", "  ", "nan", "inf", "-inf", "1e999", "12.5", "+2.5", "--5", "+"]
+)
+async def test_a_seek_that_is_not_a_whole_number_is_the_built_ins_and_seeks_nothing(
     value: str,
 ) -> None:
-    """Anything that is not a finite number is passed on, not turned into a position."""
+    """Anything but whole seconds is passed on, as in the built-in handling, not made a position."""
     handler, cli, _player = _handler()
     with pytest.raises(NotImplementedError):
         await handler._handle_time(_command("time", value))

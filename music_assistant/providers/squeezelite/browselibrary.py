@@ -35,7 +35,6 @@ import base64
 import dataclasses
 import inspect
 import logging
-import math
 import re
 import struct
 import time
@@ -2902,21 +2901,23 @@ class BrowseLibraryHandler:
             raise NotImplementedError
         cli = self._slimproto.cli
         text = str(args[0]).strip()
-        try:
-            amount = float(text)
-        except ValueError:
-            raise NotImplementedError from None
-        if not math.isfinite(amount):
+        # Whole seconds, as the built-in handling of a seek takes them: anything else is left to it
+        if not (text[1:] if text[:1] in "+-" else text).isdecimal():
             raise NotImplementedError
+        amount = int(text)
         if text[0] in "+-":
             # relative to the position being shown, since the player's own is relative to the
             # stream it is playing, which restarts at zero after a seek
             amount += cli._corrected_elapsed_seconds(player)
-        # Whole seconds within the track: Music Assistant takes the start as 0 and refuses a
-        # position after the end, so a drag or a skip past either end lands on it.
+        # Within the track: Music Assistant takes the start as 0 and refuses a position after the
+        # end, so a drag or a skip past either end lands on it.
         target = max(0, int(amount))
         if player.current_media and (duration := player.current_media.metadata.get("duration")):
             target = min(target, int(duration))
+        # The next track already queued on the device belongs to the stream the seek replaces. Left
+        # in place, the device's decoder-ready report for the old stream would start it, the server
+        # would refuse its session, and the player would show as stopped until the new stream starts.
+        player._next_media = None
         cli.set_pending_position(player_id, target)
         try:
             await self.mass.player_queues.seek(queue_id=control[0], position=target)
