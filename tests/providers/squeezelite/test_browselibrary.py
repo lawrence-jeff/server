@@ -131,11 +131,12 @@ def test_all_track_rows_are_two_line_with_album_art() -> None:
         _item("No album", item_id=4),
         _item("Gone", item_id=5, available=False),
     ]
-    rows = bl._all_track_rows(items, index=10)
+    rows = bl._all_track_rows(items)
     assert rows[0]["text"] == "Song\nBand"
     assert rows[0]["icon-id"] == "42"
     assert rows[0]["commonParams"] == {"track_id": "3"}
-    assert rows[0]["playallParams"] == {"play_index": 10}
+    # the base actions of this list never use playallParams, so the rows do not carry it
+    assert "playallParams" not in rows[0]
     assert rows[1]["text"] == "No album"
     assert "icon" not in rows[1]
     assert rows[2]["text"].startswith("(offline) ")

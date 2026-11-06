@@ -830,20 +830,18 @@ async def get_artist_all(
     }
 
 
-def _all_track_rows(items: list[Any], index: int = 0) -> list[dict[str, Any]]:
+def _all_track_rows(items: list[Any], _index: int = 0) -> list[dict[str, Any]]:
     """Return the two-line rows (title, then artist) of get_all_tracks() for the given tracks."""
     item_loop = []
-    for i, item in enumerate(items):
+    for item in items:
         text = item.name
         if item.artist_str:
             text = f"{item.name}\n{item.artist_str}"
-        play_index = index + i
         row = {
             "text": text,
             "type": "audio",
             "style": "itemplay",
             "commonParams": {"track_id": str(item.item_id)},
-            "playallParams": {"play_index": play_index},
             # No goAction override: the base "go" action already adds to the queue.
         }
         if item.album is not None:
@@ -1015,7 +1013,6 @@ async def get_playlist_tracks(
             "type": "audio",
             "style": "itemplay",
             "commonParams": {"uri": item.uri, "play_index": play_index},
-            "playallParams": {"play_index": play_index},
         }
         item_loop.append(row)
     return {
@@ -1201,7 +1198,6 @@ async def get_podcast_episodes(
             "type": "audio",
             "style": "itemplay",
             "commonParams": {"uri": item.uri, "play_index": play_index},
-            "playallParams": {"play_index": play_index},
         }
         item_loop.append(row)
     return {
