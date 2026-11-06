@@ -742,16 +742,27 @@ async def test_queue_rows_have_two_lines_a_track_id_and_their_queue_position() -
 
 
 async def test_a_queue_row_with_a_picture_of_its_own_gets_the_queue_item_icon() -> None:
-    """The queue item keeps the picture from when it was added; the icon id names the queue item."""
+    """A station or episode keeps the picture its queue item holds; the icon id names the queue item."""
     handler = _handler()
     rows_in = _queue_rows(2)
     rows_in[0].image = SimpleNamespace(path="https://x/a.jpg", remotely_accessible=True)
+    rows_in[0].media_item = _station()
     handler.mass.player_queues.items.return_value = rows_in
     rows = await handler._build_queue_item_loop(_queue(), offset=0, limit=2)
     assert rows[0]["icon"] == bl.cover_icon(bl.queue_item_art_ref(PLAYER, "item0"))
     assert (
         rows[1]["icon"] == "music/42/cover.jpg"
     )  # no picture of its own: the track's id as before
+
+
+async def test_a_track_of_a_library_album_shows_the_albums_picture_not_its_queue_items() -> None:
+    """The queue item's picture is a local file's, often small; the album's best one is sharper."""
+    handler = _handler()
+    rows_in = _queue_rows(1)
+    rows_in[0].image = SimpleNamespace(path="Folder.jpg", remotely_accessible=False)
+    handler.mass.player_queues.items.return_value = rows_in
+    rows = await handler._build_queue_item_loop(_queue(), offset=0, limit=1)
+    assert rows[0]["icon"] == "music/42/cover.jpg"
 
 
 async def test_a_queue_row_without_a_picture_shows_the_picture_of_the_station() -> None:

@@ -3385,7 +3385,13 @@ def _queue_item_icon_path(queue: PlayerQueue, queue_item: QueueItem, station_ima
     track = queue_item.media_item
     art_ref = art_ref_for_item(track) if track is not None else ""
     if queue_item.image is not None:
-        art_ref = queue_item_art_ref(queue.queue_id, queue_item.queue_item_id)
+        # A track of a library album shows the album's best picture, as the album does in every
+        # list: the picture its queue item holds is the one Music Assistant chose when it was
+        # added, local files first, often a small embedded or folder image. A numeric reference is
+        # a library album. Anything else (a station, an episode) keeps the picture its queue item
+        # holds.
+        if not art_ref.isdigit():
+            art_ref = queue_item_art_ref(queue.queue_id, queue_item.queue_item_id)
     elif station_image is not None:
         # an item with no picture of its own (a station's message or advert) shows the station's
         art_ref = queue_item_art_ref(queue.queue_id)
