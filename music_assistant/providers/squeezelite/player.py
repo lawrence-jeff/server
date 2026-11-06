@@ -67,8 +67,6 @@ if TYPE_CHECKING:
     from .provider import SqueezelitePlayerProvider
 
 
-# a clip shorter than this many seconds starts on the small buffer: it would never fill the usual one
-SHORT_CLIP_SECONDS = 5
 CACHE_CATEGORY_PREV_STATE = (
     1  # category for caching previous player state (bumped to invalidate old format)
 )
@@ -570,18 +568,17 @@ class SqueezelitePlayer(Player):
         if media.source_id and (queue := self.mass.player_queues.get(media.source_id)):
             self.extra_data["playlist repeat"] = REPEATMODE_MAP[queue.repeat_mode]
             self.extra_data["playlist shuffle"] = int(queue.shuffle_enabled)
-        # A clip shorter than the output buffer (2 seconds of decoded audio, see below) never fills it, so the
-        # player never starts it: announcements, and tracks that are only a few seconds long, start on the
-        # smaller buffer too.
-        low_latency_stream = (
-            media.media_type in (MediaType.AUDIO_SOURCE, MediaType.RADIO, MediaType.ANNOUNCEMENT)
-            or 0 < real_duration < SHORT_CLIP_SECONDS
+        # live streams and announcements start on a smaller buffer (KB, tenths of a second) to cut
+        # latency; a short announcement would never fill the default 2 second output buffer
+        low_latency_stream = media.media_type in (
+            MediaType.AUDIO_SOURCE,
+            MediaType.RADIO,
+            MediaType.ANNOUNCEMENT,
         )
         if mime_type is None:
             # derive from the url extension (only reliable for plain file urls; sync
             # group member urls have no extension, so callers pass the codec mime)
             mime_type = get_mime_type(url.rsplit(".", maxsplit=1)[-1].split("?", maxsplit=1)[0])
-        # live streams and short clips start on a smaller buffer (KB, tenths of a second)
         stream_threshold, output_threshold = (64, 1) if low_latency_stream else (200, 20)
         if send_flush and not enqueue:
             if self._provider.slimproto:
