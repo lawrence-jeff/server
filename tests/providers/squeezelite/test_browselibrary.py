@@ -197,15 +197,6 @@ def test_static_icon_resolves_exact_size_then_master_and_misses_cleanly() -> Non
     assert bl._resolve_static_icon_path("NoSuchIcon_225x225_m.png") is None
 
 
-def test_preset_actions_cover_all_ten_keys() -> None:
-    """Every list can save a row as a preset on any of the ten keys."""
-    actions = bl._preset_actions()
-    assert list(actions) == [f"set-preset-{n}" for n in range(10)]
-    assert actions["set-preset-3"]["cmd"] == ["jivefavorites", "set_preset", "key:3"]
-    assert all(a["itemsParams"] == "presetParams" for a in actions.values())
-    assert set(actions) <= set(bl.ARTIST_LIST_BASE_ACTIONS)
-
-
 def test_album_and_playlist_templates_differ_only_in_the_info_command() -> None:
     """Both open the container's tracks and share every other action."""
     albums = bl.albums_base_actions({"artist_id": 4})
@@ -215,7 +206,7 @@ def test_album_and_playlist_templates_differ_only_in_the_info_command() -> None:
     assert albums["go"]["params"] == {"artist_id": "4", "mode": "tracks"}
     albums["more"]["cmd"] = playlists["more"]["cmd"]
     assert albums == playlists
-    assert {"go", "more", "play", "add", "add-hold", "set-preset-9"} <= set(albums)
+    assert {"go", "more", "play", "add", "add-hold"} <= set(albums)
 
 
 def test_rows_marks_unavailable_items_only_when_asked() -> None:
@@ -231,21 +222,16 @@ def test_rows_marks_unavailable_items_only_when_asked() -> None:
     assert [r["text"] for r in plain] == ["A", "B"]
 
 
-def test_album_row_adds_artist_and_favorite_data_only_in_the_mixed_list() -> None:
-    """The list of all albums shows the artist and can favorite; one artist's albums do not."""
+def test_album_row_adds_the_artist_only_in_the_mixed_list() -> None:
+    """The list of all albums shows the artist; one artist's albums do not."""
     album = _item("Great Hits", item_id=3, artist_str="The Band")
     mixed = bl._album_row(album, mixed=True)
     assert mixed["text"] == "Great Hits\nThe Band"
     assert mixed["textkey"] == "G"
-    assert (
-        mixed["presetParams"]["favorites_url"]
-        == "db:album.title=Great%20Hits&contributor.name=The%20Band"
-    )
     assert mixed["commonParams"] == {"album_id": "3", "performance": ""}
     single = bl._album_row(album, mixed=False)
     assert single["text"] == "Great Hits"
     assert "textkey" not in single
-    assert "presetParams" not in single
 
 
 class _FakeController:

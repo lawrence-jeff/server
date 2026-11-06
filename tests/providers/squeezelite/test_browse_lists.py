@@ -197,7 +197,6 @@ async def test_one_artists_albums_are_paged_here_and_not_mixed() -> None:
     assert page["window"] == {"windowStyle": "home_menu"}
     assert (page["count"], page["offset"]) == (5, 1)
     assert [r["text"] for r in page["item_loop"]] == ["A1", "A2"]
-    assert "presetParams" not in page["item_loop"][0]
 
 
 async def test_the_flat_track_list_shows_title_and_artist() -> None:
@@ -208,6 +207,9 @@ async def test_the_flat_track_list_shows_title_and_artist() -> None:
     assert row["text"] == "Song\nBand"
     assert row["icon-id"] == "42"
     assert row["commonParams"] == {"track_id": "9"}
+    # presets are set from Music Assistant's player settings, so rows carry no data for saving one
+    assert "presetParams" not in row
+    assert not any(name.startswith("set-preset") for name in page["base"]["actions"])
     assert page["window"] == {"windowStyle": "icon_list"}
 
 

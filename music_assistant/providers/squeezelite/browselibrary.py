@@ -24,8 +24,6 @@ Notes:
     here with _paginate().
   - item_id is handled as both str and int in MA, so every id handed to the client is str()-wrapped.
   - Playlist tracks may not be library items, so they are played by uri (see get_playlist_tracks()).
-  - The artist and album favorites_url values use LMS's "db:" convention; track favorites use MA's
-    own .uri.
   - Not implemented: Settings, Random Mix, genres, and queueing a whole playlist from its row by
     playlist_id.
 """
@@ -168,7 +166,7 @@ def _standalone_actions(base_actions: dict[str, Any], item: dict[str, Any]) -> d
     :param item: The row the actions are for; its params fields are baked into them.
     """
     # itemsParams only resolves in a response-level "base", not on an item's own "actions", so each
-    # action's referenced field (commonParams, addallParams or presetParams) is looked up on the
+    # action's referenced field (commonParams or addallParams) is looked up on the
     # item and baked into the params.
     if item.get("unavailable"):
         return {name: _no_op() for name in _ROW_ACTIONS}
@@ -193,18 +191,6 @@ def _text_list_menu(item_loop: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 # -- Action templates ------------------------------------------------------------------------------
-
-
-def _preset_actions() -> dict[str, Any]:
-    """Return the ten set-preset-N actions that save a row's presetParams as a player preset."""
-    return {
-        f"set-preset-{n}": {
-            "player": 0,
-            "itemsParams": "presetParams",
-            "cmd": ["jivefavorites", "set_preset", f"key:{n}"],
-        }
-        for n in range(10)
-    }
 
 
 ARTIST_LIST_BASE_ACTIONS = {
@@ -264,7 +250,6 @@ ARTIST_LIST_BASE_ACTIONS = {
         "cmd": ["artistinfo", "items"],
         "window": {"isContextMenu": 1},
     },
-    **_preset_actions(),
 }
 
 
@@ -279,7 +264,7 @@ def _container_base_actions(kwargs: dict[str, Any], info_cmd: str) -> dict[str, 
     """
     # Sparse without artist_id: role_id/menu_roles are only sent when browsing via an artist.
     ctx = _context(kwargs)
-    actions = {
+    return {
         "go": {
             "player": 0,
             "cmd": ["browselibrary", "items"],
@@ -313,8 +298,6 @@ def _container_base_actions(kwargs: dict[str, Any], info_cmd: str) -> dict[str, 
             "params": {"menu": ctx.get("menu", 1), "cmd": "insert"},
         },
     }
-    actions.update(_preset_actions())
-    return actions
 
 
 def albums_base_actions(kwargs: dict[str, Any]) -> dict[str, Any]:
@@ -371,7 +354,7 @@ def tracks_base_actions(
             if k in kwargs
         },
     }
-    actions = {
+    return {
         # playallParams: tapping a track inside an album loads the whole album from that position
         # (playlistcontrol album_id cmd:load play_index sort:albumtrack, no track_id). Only used
         # with an album context.
@@ -409,8 +392,6 @@ def tracks_base_actions(
             "params": dict(ctx),
         },
     }
-    actions.update(_preset_actions())
-    return actions
 
 
 # -- Long-press and play-control menus -------------------------------------------------------------
@@ -673,12 +654,6 @@ def _artist_row(item: Any) -> dict[str, Any]:
         # No "icon-id": a client prefers it to "icon", and one that is neither hex nor has an
         # extension (artist-29) is requested with no size, where "icon" is requested at its size.
         "icon": cover_icon(f"artist-{item.item_id}"),
-        "presetParams": {
-            "favorites_type": "playlist",
-            "favorites_title": item.name,
-            "favorites_url": f"db:contributor.name={item.name.replace(' ', '%20')}",
-            "icon": cover_icon(f"artist-{item.item_id}"),
-        },
     }
 
 
@@ -751,15 +726,6 @@ def _album_row(album: Any, *, mixed: bool) -> dict[str, Any]:
         if artist_str:
             item["text"] = f"{album.name}\n{artist_str}"
         item["textkey"] = album.name[0].upper() if album.name else ""
-        favorites_url = f"db:album.title={urllib.parse.quote(album.name)}"
-        if artist_str:
-            favorites_url += f"&contributor.name={urllib.parse.quote(artist_str)}"
-        item["presetParams"] = {
-            "icon": item["icon"],
-            "favorites_title": album.name,
-            "favorites_url": favorites_url,
-            "favorites_type": "playlist",
-        }
     return item
 
 
@@ -786,7 +752,7 @@ async def get_albums(
     # With artist_id the full list comes from ArtistsController.albums() and is paginated here;
     # otherwise library_items()/library_count() paginate server-side. The all-albums case adds what
     # a mixed-artist list needs: two-line text "Album\nArtist", a "textkey" (first letter, for the
-    # alphabet scroll bar) and "presetParams" so albums can be favorited from here.
+    # alphabet scroll bar).
     if artist_id is None:
         return await _library_page(
             mass.music.albums,
@@ -878,11 +844,6 @@ def _all_track_rows(items: list[Any], index: int = 0) -> list[dict[str, Any]]:
             "style": "itemplay",
             "commonParams": {"track_id": str(item.item_id)},
             "playallParams": {"play_index": play_index},
-            "presetParams": {
-                "favorites_type": "audio",
-                "favorites_title": item.name,
-                "favorites_url": item.uri,
-            },
             # No goAction override: the base "go" action already adds to the queue.
         }
         if item.album is not None:
@@ -943,8 +904,7 @@ async def get_tracks(
     # in_library_only=False because albums added to the library don't guarantee a local row per
     # track; it also queries the provider for tracks not mirrored locally, which can make those
     # albums slower to load. The list is sorted by (disc, track) and unpaginated, so it is paginated
-    # here. favorites_url is the track's MA-native .uri; artist and album favorites_url use LMS's
-    # "db:" convention.
+    # here.
     items = (
         await mass.music.albums.tracks(album_id, "library", in_library_only=False)
         if album_id is not None
@@ -962,11 +922,6 @@ async def get_tracks(
             # fetching the album again.
             "commonParams": {"track_id": str(item.item_id), "play_index": play_index},
             "playallParams": {"play_index": play_index},
-            "presetParams": {
-                "favorites_type": "audio",
-                "favorites_title": item.name,
-                "favorites_url": item.uri,
-            },
             # always "playControl", so the menu is chosen at tap time rather than from the queue
             # state when the listing was fetched
             "goAction": "playControl",
@@ -991,12 +946,6 @@ def _playlist_row(item: Any) -> dict[str, Any]:
         "commonParams": {"playlist_id": str(item.item_id)},
         "textkey": item.name[0].upper() if item.name else "",
         "icon": cover_icon(f"playlist-{item.item_id}"),
-        "presetParams": {
-            "favorites_type": "playlist",
-            "favorites_title": item.name,
-            "favorites_url": item.uri,
-            "icon": cover_icon(f"playlist-{item.item_id}"),
-        },
     }
 
 
@@ -1067,11 +1016,6 @@ async def get_playlist_tracks(
             "style": "itemplay",
             "commonParams": {"uri": item.uri, "play_index": play_index},
             "playallParams": {"play_index": play_index},
-            "presetParams": {
-                "favorites_type": "audio",
-                "favorites_title": item.name,
-                "favorites_url": item.uri,
-            },
         }
         item_loop.append(row)
     return {
@@ -1097,11 +1041,6 @@ def _radio_row(item: Any) -> dict[str, Any]:
         "goAction": "play",
         "commonParams": {"uri": item.uri},
         "icon": cover_icon(f"radio-{item.item_id}"),
-        "presetParams": {
-            "favorites_type": "audio",
-            "favorites_title": item.name,
-            "favorites_url": item.uri,
-        },
     }
 
 
@@ -1148,11 +1087,6 @@ def _audiobook_row(item: Any) -> dict[str, Any]:
         "goAction": "play",
         "commonParams": {"uri": item.uri},
         "icon": cover_icon(f"audiobook-{item.item_id}"),
-        "presetParams": {
-            "favorites_type": "audio",
-            "favorites_title": item.name,
-            "favorites_url": item.uri,
-        },
     }
 
 
@@ -1199,12 +1133,6 @@ def _podcast_row(item: Any) -> dict[str, Any]:
         "commonParams": {"podcast_id": str(item.item_id)},
         "textkey": item.name[0].upper() if item.name else "",
         "icon": cover_icon(f"podcast-{item.item_id}"),
-        "presetParams": {
-            "favorites_type": "playlist",
-            "favorites_title": item.name,
-            "favorites_url": item.uri,
-            "icon": cover_icon(f"podcast-{item.item_id}"),
-        },
     }
 
 
@@ -1274,11 +1202,6 @@ async def get_podcast_episodes(
             "style": "itemplay",
             "commonParams": {"uri": item.uri, "play_index": play_index},
             "playallParams": {"play_index": play_index},
-            "presetParams": {
-                "favorites_type": "audio",
-                "favorites_title": item.name,
-                "favorites_url": item.uri,
-            },
         }
         item_loop.append(row)
     return {
