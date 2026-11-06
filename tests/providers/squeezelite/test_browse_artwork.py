@@ -84,6 +84,24 @@ def test_a_menu_icon_is_found_at_its_size_else_the_next_smaller_else_not_at_all(
     assert bl._resolve_static_icon_path("AlbumArtists_10x10_m.png") is None
 
 
+def _png_size(path: Path) -> tuple[int, int]:
+    """Return the width and height from a PNG file's header."""
+    header = path.read_bytes()[:24]
+    return int.from_bytes(header[16:20], "big"), int.from_bytes(header[20:24], "big")
+
+
+def test_the_clear_queue_icon_is_small_whatever_size_is_asked() -> None:
+    """The row only ever shows in the queue list, so the file served for an odd size is small too."""
+    master = bl.STATIC_DIR / "playlistclear.png"
+    assert max(_png_size(master)) <= 100
+    # no file of these sizes exists, so the master is what a device gets (Now Playing preloads the
+    # row at the size of a track's picture)
+    for requested in (90, 120, 320, 759):
+        found = bl._resolve_static_icon_path(f"playlistclear_{requested}x{requested}_m.png")
+        assert found is not None
+        assert found.name == "playlistclear.png"
+
+
 def test_a_menu_icon_request_cannot_reach_files_outside_static(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
