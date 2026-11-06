@@ -783,6 +783,36 @@ async def test_a_plain_status_only_patches_the_queue_size_and_position() -> None
     assert "item_loop" not in result
 
 
+async def test_the_playlist_timestamp_is_a_float_as_on_lms() -> None:
+    """Home Assistant's Squeezebox integration ignores the playlist when it is a whole number."""
+    built_in = {"player_name": "Kitchen", "mode": "play", "playlist_timestamp": 1793944046}
+    handler = _status_handler(_queue(items=3, current_index=0), built_in)
+    result = await handler._queue_status(_status_cmd("-", 1, tags="x"))
+    assert isinstance(result["playlist_timestamp"], float)
+    assert result["playlist_timestamp"] == 1793944046.0
+
+
+async def test_a_status_for_a_window_of_the_playlist_lists_that_part_of_the_queue() -> None:
+    """Home Assistant asks "status 0 <tracks>" and reads the current track by its queue index."""
+    handler = _status_handler(_queue(items=3, current_index=2))
+    result = await handler._queue_status(_status_cmd("0", "3", tags="x"))
+    loop = result["playlist_loop"]
+    assert [item["playlist index"] for item in loop] == [0, 1, 2]
+    assert loop[2]["title"] == "T2"
+    assert loop[2]["artist"] == "Band"
+    assert loop[2]["duration"] == 180
+    handler.mass.player_queues.items.assert_called_with(PLAYER, limit=3, offset=0)
+
+
+async def test_the_polling_status_keeps_the_built_in_playlist_loop() -> None:
+    """The "-", 1 heartbeat is not a window request, so its current and next slots stay."""
+    built_in = {"mode": "play", "playlist_loop": [{"playlist index": 0}, {"playlist index": 1}]}
+    handler = _status_handler(_queue(items=8, current_index=3), built_in)
+    result = await handler._queue_status(_status_cmd("-", 1, tags="x"))
+    assert [item["playlist index"] for item in result["playlist_loop"]] == [3, 4]
+    handler.mass.player_queues.items.assert_not_called()
+
+
 async def test_the_status_slots_carry_the_queue_position_of_the_current_and_next_item() -> None:
     """The Now Playing audio line shows the first slot's index, so it must be the queue position."""
     built_in = {

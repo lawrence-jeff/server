@@ -51,7 +51,7 @@ from aiohttp import web
 
 # Reuses aioslimproto's menu_item_from_media_details; its MediaDetails input (url, metadata) is
 # built in player.py.
-from aioslimproto.cli import menu_item_from_media_details
+from aioslimproto.cli import menu_item_from_media_details, playlist_item_from_media_details
 from aioslimproto.models import EventType, MediaDetails, PlayerState, SlimEvent
 from music_assistant_models.enums import ImageType, MediaType, PlaybackState, QueueOption
 from music_assistant_models.errors import MediaNotFoundError, MusicAssistantError
@@ -67,6 +67,7 @@ if TYPE_CHECKING:
     from aioslimproto.cli import SlimCLICommand
     from music_assistant_models.media_items import Playlist, Podcast
     from music_assistant_models.player_queue import PlayerQueue
+    from music_assistant_models.queue_item import QueueItem
 
     from music_assistant.controllers.music.media.base import MediaControllerBase
     from music_assistant.mass import MusicAssistant
@@ -3105,6 +3106,12 @@ class BrowseLibraryHandler:
         if result is None:
             raise NotImplementedError  # unknown player: let the built-in reject it
 
+        # LMS reports the playlist timestamp as a float, and Home Assistant's Squeezebox integration
+        # only loads the playlist (titles, durations, artwork) when it is one; aioslimproto
+        # keeps whole seconds.
+        if "playlist_timestamp" in result:
+            result["playlist_timestamp"] = float(result["playlist_timestamp"])
+
         queue = self.mass.player_queues.get_active_queue(player_id)
         if queue is None:
             # No active queue: the built-in's own result stands untouched.
@@ -3124,7 +3131,12 @@ class BrowseLibraryHandler:
             loop_item["playlist index"] = result["playlist_cur_index"] + slot
 
         if kwargs.get("menu") != "menu":
-            # Plain polling status (the frequent "-", 1 heartbeat): the patch above is enough.
+            # Plain polling status (the frequent "-", 1 heartbeat): the patch above is enough,
+            # except for a request for a window of the playlist, which gets that part of the queue.
+            if args and str(args[0]) != "-":
+                result["playlist_loop"] = self._build_playlist_loop(
+                    queue, int(args[0]), int(args[1]) if len(args) > 1 else 1
+                )
             return result
 
         raw_offset = args[0] if len(args) > 0 else "-"
@@ -3174,6 +3186,40 @@ class BrowseLibraryHandler:
         # nothing at the row level shadows it.
         return result
 
+    def _build_playlist_loop(
+        self, queue: PlayerQueue, offset: int, limit: int
+    ) -> list[dict[str, Any]]:
+        """
+        Build the playlist_loop of a plain status request for a window of the MA queue.
+
+        LMS answers "status <offset> <count>" with that part of the playlist, numbered from the
+        offset, and Home Assistant's Squeezebox integration reads the current track (title,
+        duration, artwork) from this list by its position in the queue.
+
+        :param queue: The player's queue.
+        :param offset: Index of the first queue item.
+        :param limit: Number of items.
+        """
+        station_image = _station_image(queue)
+        playlist_loop = []
+        for i, queue_item in enumerate(
+            self.mass.player_queues.items(queue.queue_id, limit=limit, offset=offset)
+        ):
+            track = queue_item.media_item
+            album_obj = getattr(track, "album", None) if track else None
+            media_details = MediaDetails(
+                url=(getattr(track, "uri", None) or "") if track else "",
+                metadata={
+                    "title": queue_item.name,
+                    "artist": (getattr(track, "artist_str", "") or "") if track else "",
+                    "album": getattr(album_obj, "name", "") or "",
+                    "image_url": _queue_item_icon_path(queue, queue_item, station_image),
+                    "duration": queue_item.duration or 0,
+                },
+            )
+            playlist_loop.append(playlist_item_from_media_details(offset + i, media_details))
+        return playlist_loop
+
     async def _build_queue_item_loop(
         self, queue: PlayerQueue, offset: int, limit: int
     ) -> list[dict[str, Any]]:
@@ -3200,17 +3246,7 @@ class BrowseLibraryHandler:
             album_obj = getattr(track, "album", None) if track else None
             album = getattr(album_obj, "name", "") or ""
             uri = (getattr(track, "uri", None) or "") if track else ""
-            # Icons are local "music/{id}/cover" identifiers resolved server-side by handle_icon,
-            # never a resolved image URL: a remote image reached the device as an
-            # "/imageproxy/<url>/..." request this server doesn't serve, leaving some queue rows
-            # without art.
-            art_ref = art_ref_for_item(track) if track is not None else ""
-            if queue_item.image is not None:
-                art_ref = queue_item_art_ref(queue.queue_id, queue_item.queue_item_id)
-            elif station_image is not None:
-                # an item with no picture of its own (a station's message or advert) shows the station's
-                art_ref = queue_item_art_ref(queue.queue_id)
-            icon_path = f"music/{art_ref}/cover" if art_ref else ""
+            icon_path = _queue_item_icon_path(queue, queue_item, station_image)
             media_details = MediaDetails(
                 url=uri,
                 metadata={
@@ -3314,6 +3350,28 @@ def _station_image(queue: Any) -> Any:
     if not queue.is_dynamic:
         return None
     return next((source.image for source in queue.sources if source.image is not None), None)
+
+
+def _queue_item_icon_path(queue: PlayerQueue, queue_item: QueueItem, station_image: Any) -> str:
+    """
+    Return the local "music/{id}/cover" path of a queue item's picture, or "" when it has none.
+
+    :param queue: The queue the item is in.
+    :param queue_item: The queue item.
+    :param station_image: The image of the station the queue plays, if any.
+    """
+    # Icons are local "music/{id}/cover" identifiers resolved server-side by handle_icon,
+    # never a resolved image URL: a remote image reached the device as an
+    # "/imageproxy/<url>/..." request this server doesn't serve, leaving some queue rows
+    # without art.
+    track = queue_item.media_item
+    art_ref = art_ref_for_item(track) if track is not None else ""
+    if queue_item.image is not None:
+        art_ref = queue_item_art_ref(queue.queue_id, queue_item.queue_item_id)
+    elif station_image is not None:
+        # an item with no picture of its own (a station's message or advert) shows the station's
+        art_ref = queue_item_art_ref(queue.queue_id)
+    return f"music/{art_ref}/cover" if art_ref else ""
 
 
 def art_ref_for_item(item: Any) -> str:
