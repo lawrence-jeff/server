@@ -670,8 +670,9 @@ def _artist_row(item: Any) -> dict[str, Any]:
         "type": "playlist",
         "commonParams": {"artist_id": str(item.item_id)},
         "textkey": item.name[0].upper() if item.name else "",
+        # No "icon-id": a client prefers it to "icon", and one that is neither hex nor has an
+        # extension (artist-29) is requested with no size, where "icon" is requested at its size.
         "icon": cover_icon(f"artist-{item.item_id}"),
-        "icon-id": f"artist-{item.item_id}",
         "presetParams": {
             "favorites_type": "playlist",
             "favorites_title": item.name,
@@ -990,7 +991,6 @@ def _playlist_row(item: Any) -> dict[str, Any]:
         "commonParams": {"playlist_id": str(item.item_id)},
         "textkey": item.name[0].upper() if item.name else "",
         "icon": cover_icon(f"playlist-{item.item_id}"),
-        "icon-id": f"playlist-{item.item_id}",
         "presetParams": {
             "favorites_type": "playlist",
             "favorites_title": item.name,
@@ -1097,7 +1097,6 @@ def _radio_row(item: Any) -> dict[str, Any]:
         "goAction": "play",
         "commonParams": {"uri": item.uri},
         "icon": cover_icon(f"radio-{item.item_id}"),
-        "icon-id": f"radio-{item.item_id}",
         "presetParams": {
             "favorites_type": "audio",
             "favorites_title": item.name,
@@ -1149,7 +1148,6 @@ def _audiobook_row(item: Any) -> dict[str, Any]:
         "goAction": "play",
         "commonParams": {"uri": item.uri},
         "icon": cover_icon(f"audiobook-{item.item_id}"),
-        "icon-id": f"audiobook-{item.item_id}",
         "presetParams": {
             "favorites_type": "audio",
             "favorites_title": item.name,
@@ -1201,7 +1199,6 @@ def _podcast_row(item: Any) -> dict[str, Any]:
         "commonParams": {"podcast_id": str(item.item_id)},
         "textkey": item.name[0].upper() if item.name else "",
         "icon": cover_icon(f"podcast-{item.item_id}"),
-        "icon-id": f"podcast-{item.item_id}",
         "presetParams": {
             "favorites_type": "playlist",
             "favorites_title": item.name,

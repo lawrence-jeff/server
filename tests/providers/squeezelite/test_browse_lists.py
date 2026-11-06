@@ -62,7 +62,7 @@ async def test_the_artists_list_is_a_home_menu_of_artist_rows() -> None:
     assert page["count"] == 2
     first, second = page["item_loop"]
     assert first["commonParams"] == {"artist_id": "4"}
-    assert first["icon-id"] == "artist-4"
+    assert "icon-id" not in first  # the client asks for the size of "icon", not an unsized id
     assert first["textkey"] == "B"
     assert second["text"] == "Gone"
     assert page["base"]["actions"] == bl.ARTIST_LIST_BASE_ACTIONS
@@ -252,7 +252,7 @@ async def test_the_other_lists_use_their_own_icon_ids_and_actions(
     """Playlists and podcasts open their items; radio and audiobooks play directly."""
     page = await function(_mass(**{controller: _Controller([_item("One", 6)])}), KWARGS)
     row = page["item_loop"][0]
-    assert row["icon-id"] == f"{icon_prefix}-6"
+    assert "icon-id" not in row
     assert row["icon"] == f"music/{icon_prefix}-6/cover.jpg"
     assert row.get("goAction") == go_action
     assert page["window"] == {"windowStyle": "icon_list"}
