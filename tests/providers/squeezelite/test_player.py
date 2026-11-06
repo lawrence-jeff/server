@@ -116,6 +116,7 @@ def test_group_regular_track_ignores_wav_preference() -> None:
     [
         (MediaType.RADIO, (64, 1)),
         (MediaType.AUDIO_SOURCE, (64, 1)),
+        (MediaType.ANNOUNCEMENT, (64, 1)),
         (MediaType.TRACK, (200, 20)),
     ],
 )
@@ -793,3 +794,32 @@ async def test_a_saved_mute_is_restored_without_switching_the_output_off(
         assert player._muted_volume == (40 if saved[0] else None)
     finally:
         patch.stopall()
+
+
+@pytest.mark.parametrize(
+    ("duration", "expected"),
+    [
+        (2, (64, 1)),  # shorter than the usual output buffer: it would never start
+        (4, (64, 1)),
+        (5, (200, 20)),
+        (180, (200, 20)),
+        (None, (200, 20)),  # unknown length: the usual buffer
+    ],
+)
+async def test_short_clips_start_on_a_smaller_buffer(
+    duration: int | None, expected: tuple[int, int]
+) -> None:
+    """A track of only a few seconds must not wait for more audio than it has."""
+    player, _mass = _player_with_mocked_mass()
+    player._extra_data = {}
+    slimplayer = MagicMock()
+    slimplayer.play_url = AsyncMock()
+
+    await player._handle_play_url_for_slimplayer(
+        slimplayer,
+        url="http://127.0.0.1:8097/stream.flac",
+        media=PlayerMedia(uri="fake://x", media_type=MediaType.TRACK, duration=duration),
+    )
+
+    play_call = slimplayer.play_url.call_args
+    assert (play_call.kwargs["stream_threshold"], play_call.kwargs["output_threshold"]) == expected
