@@ -532,3 +532,27 @@ async def test_the_alarm_sound_is_left_alone_when_the_alarm_rings_again() -> Non
     await bl.BrowseLibraryHandler._alarm_sound_still_playing(handler, "p1")
     handler.mass.players.cmd_stop.assert_not_called()
 
+
+def test_a_new_alarm_id_cannot_be_taken_for_a_number() -> None:
+    """The command parser turns an id such as 1e5 into a number, so ids start with a letter."""
+    for _ in range(300):
+        book = ac.AlarmBook()
+        alarm_id = ac.alarm_command(book, ["add"], {"time": 3600}, NOW)["id"]
+        assert alarm_id[0].isalpha()
+        with pytest.raises(ValueError, match="could not convert"):
+            float(alarm_id)
+
+
+@pytest.mark.parametrize(
+    ("stored_id", "named"), [("9243e424", float("inf")), ("1e5", 100000.0), ("abc", "abc")]
+)
+def test_an_alarm_is_found_by_an_id_the_parser_turned_into_a_number(
+    stored_id: str, named: Any
+) -> None:
+    """Alarms made before ids started with a letter can still be updated and deleted."""
+    book = ac.AlarmBook(alarms=[ac.Alarm(id=stored_id, time=3600), ac.Alarm(id="other", time=7200)])
+    assert book.get(named).id == stored_id
+    ac.alarm_command(book, ["update"], {"id": named, "time": 5400}, NOW)
+    assert book.get(named).time == 5400
+    ac.alarm_command(book, ["delete"], {"id": named}, NOW)
+    assert [alarm.id for alarm in book.alarms] == ["other"]

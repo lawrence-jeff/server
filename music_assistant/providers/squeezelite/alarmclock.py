@@ -70,6 +70,20 @@ def supports_alarms(model: str | None) -> bool:
     return model in ALARM_MODELS
 
 
+def _same_id(alarm_id: str, wanted: Any) -> bool:
+    """
+    Return whether an alarm id is the one a command named.
+
+    The parser of the commands turns a tag value that looks like a number into one, so the id 1e5 comes back as 100000.0.
+    """
+    if alarm_id == str(wanted):
+        return True
+    try:
+        return float(alarm_id) == float(wanted)
+    except TypeError, ValueError:
+        return False
+
+
 def format_time(seconds: int) -> str:
     """Return a time of day as the device shows it, for example "12:32 PM"."""
     hour, minute = divmod(seconds // 60, 60)
@@ -123,9 +137,9 @@ class AlarmBook:
         data = {"enabled": self.enabled, "alarms": [asdict(alarm) for alarm in self.alarms]}
         mass.config.set_raw_player_config_value(player_id, CONF_ALARMS, json.dumps(data))
 
-    def get(self, alarm_id: str | None) -> Alarm | None:
+    def get(self, alarm_id: Any) -> Alarm | None:
         """Return the alarm with this id."""
-        return next((alarm for alarm in self.alarms if alarm.id == alarm_id), None)
+        return next((alarm for alarm in self.alarms if _same_id(alarm.id, alarm_id)), None)
 
     def switch_off_fired(self, now: dt.datetime) -> bool:
         """Switch off the one-time alarms whose time has passed; returns whether any was."""
@@ -423,7 +437,8 @@ def alarm_command(
         book.enabled = False
     elif what == "add":
         alarm = Alarm(
-            id=secrets.token_hex(4),
+            # starts with a letter, so that the parser of the commands cannot take it for a number (1e5)
+            id=f"a{secrets.token_hex(3)}",
             time=_as_int(kwargs.get("time"), DEFAULT_NEW_ALARM_TIME) % 86400,
             days=_days_from_list(str(kwargs["dow"])) if "dow" in kwargs else ALL_DAYS,
             enabled=bool(_as_int(kwargs.get("enabled"), 1)),
@@ -433,8 +448,8 @@ def alarm_command(
         book.alarms.append(alarm)
         return {"id": alarm.id}
     elif what == "delete":
-        book.alarms = [alarm for alarm in book.alarms if alarm.id != str(kwargs.get("id"))]
-    elif what == "update" and (target := book.get(str(kwargs.get("id")))) is not None:
+        book.alarms = [alarm for alarm in book.alarms if not _same_id(alarm.id, kwargs.get("id"))]
+    elif what == "update" and (target := book.get(kwargs.get("id"))) is not None:
         if "time" in kwargs:
             target.time = _as_int(kwargs["time"], target.time) % 86400
         if "enabled" in kwargs:

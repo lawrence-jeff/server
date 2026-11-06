@@ -2475,7 +2475,7 @@ class BrowseLibraryHandler:
             # stop or snooze: the device handles both itself, the ringer follows what it reports
             await self._alarm_ringer.on_device_message(player_id, kwargs)
             return {}
-        alarm = book.get(str(kwargs.get("id")))
+        alarm = book.get(kwargs.get("id"))
         if command == "jiveupdatealarm":
             return alarmclock.update_menu(alarm) if alarm else alarmclock.settings_menu(book)
         if command == "jiveupdatealarmdays":
