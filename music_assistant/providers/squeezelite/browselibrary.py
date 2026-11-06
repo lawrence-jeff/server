@@ -2977,6 +2977,10 @@ class BrowseLibraryHandler:
             # (['playlist', 'index', N]). Both jump to and play that position;
             # aioslimproto's built-in only handles "index +1" (a relative skip).
             index = int(args[1])
+            if str(args[1]).startswith(("+", "-")):
+                # A step from the current track, as Home Assistant's next and previous buttons send
+                # it; past either end it wraps, as on LMS.
+                index = ((queue.current_index or 0) + index) % int(queue.items or 1)
             await self._maybe_await(self.mass.player_queues.play_index(queue.queue_id, index))
         elif subcommand == "delete":
             index = int(args[1])

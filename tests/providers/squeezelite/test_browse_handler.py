@@ -666,6 +666,22 @@ async def test_each_playlist_subcommand_becomes_its_queue_call_and_a_refresh(
     handler._push_queue_update.assert_awaited_once_with(PLAYER)
 
 
+@pytest.mark.parametrize(
+    ("current", "step", "target"),
+    [(0, "+1", 1), (4, "+1", 5), (5, "-1", 4), (11, "+1", 0), (0, "-1", 11), (3, "+2", 5)],
+)
+async def test_a_signed_index_steps_from_the_current_track_and_wraps(
+    current: int, step: str, target: int
+) -> None:
+    """Home Assistant's next and previous send "index +1" and "index -1"."""
+    handler = _queue_commands_handler()
+    handler.mass.player_queues.get_active_queue.return_value = _queue(
+        items=12, current_index=current
+    )
+    await handler._handle_playlist(_cmd("playlist", "index", step))
+    handler.mass.player_queues.play_index.assert_awaited_once_with(PLAYER, target)
+
+
 async def test_playlist_commands_cope_with_plain_and_awaitable_results() -> None:
     """Some Music Assistant versions return None, others a coroutine."""
     handler = _queue_commands_handler()
