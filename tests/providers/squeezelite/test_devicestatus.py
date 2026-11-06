@@ -19,7 +19,7 @@ def test_a_report_becomes_status_fields() -> None:
     reports = ds.DeviceReports()
     reports.record(
         PLAYER,
-        {"mem": "80", "up": "3600", "batt": "94", "chg": "3", "temp": "28.34"},
+        {"mem": "80", "up": "3600", "batt": "94", "chg": "3", "temp": "28.34", "sig": "85"},
         now=100.0,
     )
     assert reports.status_fields(PLAYER, now=101.0) == {
@@ -28,6 +28,7 @@ def test_a_report_becomes_status_fields() -> None:
         "ma_battery_level": 94,
         "ma_charger_state": "discharging",
         "ma_battery_temperature": 28.3,
+        "ma_wifi_signal": 85,
     }
 
 
@@ -44,6 +45,7 @@ def test_a_device_without_a_battery_reports_the_rest() -> None:
         {"mem": "lots"},
         {"mem": "101"},
         {"batt": "-1"},
+        {"sig": "250"},
         {"up": "-5"},
         {"temp": "900"},
         {"unknown": "1"},
@@ -78,6 +80,16 @@ def test_a_player_that_never_reported_has_no_fields() -> None:
     reports.record(PLAYER, {"mem": "80"}, now=1.0)
     assert reports.status_fields("00:00:00:00:00:01", now=2.0) == {}
     assert reports.status_fields(None, now=2.0) == {}
+
+
+def test_a_report_is_noted_in_the_log(caplog: pytest.LogCaptureFixture) -> None:
+    """What a device reported can be read in the server log at debug level."""
+    reports = ds.DeviceReports()
+    with caplog.at_level("DEBUG", logger=ds.LOGGER.name):
+        reports.record(PLAYER, {"mem": "80", "sig": "85"}, now=1.0)
+    assert [r.getMessage() for r in caplog.records] == [
+        f"Device report of {PLAYER}: {{'ma_memory_used': 80, 'ma_wifi_signal': 85}}"
+    ]
 
 
 async def test_the_madevice_request_is_answered_and_kept() -> None:

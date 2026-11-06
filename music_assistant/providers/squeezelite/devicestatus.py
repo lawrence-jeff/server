@@ -1,17 +1,20 @@
 """
-What a device reports about itself: its memory, uptime and battery, sent by the MaDeviceStatus applet.
+What a device reports about itself: its memory, uptime, battery and wireless signal, sent by the MaDeviceStatus applet.
 
 The Squeezebox protocol carries none of this, and the Diagnostics applet of the Radio only shows it on its own screen. The
-MaDeviceStatus applet sends it every minute with the request "madevice" (mem, up, batt, chg and temp). The server keeps the
+MaDeviceStatus applet sends it every minute with the request "madevice" (mem, up, batt, chg, temp and sig). The server keeps the
 latest values of each player and adds them to the player's status as fields named ma_*, which a client that does not know
 them ignores. A report that is too old is dropped, so a device whose applet has stopped does not show stale values.
 """
 
 from __future__ import annotations
 
+import logging
 import time
 from collections.abc import Callable
 from typing import Any
+
+LOGGER = logging.getLogger(f"{__package__}.devicestatus")
 
 # a report is dropped when this many seconds old: the applet reports every 60 seconds
 STALE_SECONDS = 300
@@ -51,6 +54,7 @@ FIELDS: dict[str, tuple[str, Callable[[float], Any]]] = {
     "batt": ("ma_battery_level", _percent),
     "chg": ("ma_charger_state", _charger),
     "temp": ("ma_battery_temperature", _celsius),
+    "sig": ("ma_wifi_signal", _percent),
 }
 
 
@@ -81,6 +85,7 @@ class DeviceReports:
                 fields[field] = converted
         if fields:
             self._reports[player_id] = (now if now is not None else time.time(), fields)
+            LOGGER.debug("Device report of %s: %s", player_id, fields)
 
     def status_fields(self, player_id: str | None, now: float | None = None) -> dict[str, Any]:
         """
