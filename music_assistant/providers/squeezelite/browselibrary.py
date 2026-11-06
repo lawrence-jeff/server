@@ -3911,4 +3911,23 @@ def make_icon_routes(
 
         return web.Response(status=404, text="Not Found", content_type="text/plain")
 
-    return handle_icon, handle_unmatched
+    def log_served(
+        handler: Callable[[web.Request], Awaitable[web.Response]],
+    ) -> Callable[[web.Request], Awaitable[web.Response]]:
+        """Log each picture served (client, path, size in bytes) at debug level."""
+
+        async def logged(request: web.Request) -> web.Response:
+            response = await handler(request)
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    "Served %s to %s: %s, %s bytes",
+                    request.path,
+                    request.remote,
+                    response.status,
+                    len(response.body) if isinstance(response.body, bytes) else "?",
+                )
+            return response
+
+        return logged
+
+    return log_served(handle_icon), log_served(handle_unmatched)

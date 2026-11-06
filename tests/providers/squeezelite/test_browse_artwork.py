@@ -418,6 +418,22 @@ async def test_a_bare_id_without_art_falls_back_like_the_cover_route() -> None:
     assert other.headers["Cache-Control"] == "no-store"
 
 
+async def test_each_picture_served_is_logged_with_its_size_at_debug_level(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The log line names the path, the client and the bytes sent, so oversized pictures show."""
+    handle_icon, _ = _routes(MagicMock())
+    with caplog.at_level("DEBUG", logger=bl.logger.name):
+        response = await handle_icon(
+            _request("/html/images/Playlists_41x41_m.png", filename="Playlists_41x41_m.png")
+        )
+    assert isinstance(response.body, bytes)
+    served = [r.getMessage() for r in caplog.records if r.getMessage().startswith("Served ")]
+    assert served == [
+        f"Served /html/images/Playlists_41x41_m.png to None: 200, {len(response.body)} bytes"
+    ]
+
+
 @pytest.mark.parametrize(
     "host",
     ["192.0.2.10", "homeassistant.local", "ma.example.org", "[2001:db8::10]", "[::1]"],
