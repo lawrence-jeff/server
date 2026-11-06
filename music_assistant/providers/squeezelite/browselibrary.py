@@ -60,7 +60,7 @@ from music_assistant.controllers.player_queues.helpers import committed_index
 from music_assistant.controllers.webserver.helpers.auth_middleware import get_current_user
 from music_assistant.helpers import datetime as mass_datetime
 
-from . import alarmclock, applets, browseuser, haextras  # HA-EXTRAS
+from . import alarmclock, alarmring, applets, browseuser, haextras  # HA-EXTRAS
 
 if TYPE_CHECKING:
     from aioslimproto import SlimServer
@@ -1782,6 +1782,14 @@ class BrowseLibraryHandler:
         """Initialize the handler."""
         self.provider = provider
         self.mass = provider.mass
+        self._alarm_volume_before: dict[str, int] = {}
+        self._alarm_ringer = alarmring.AlarmRinger(
+            self.mass,
+            self._alarm_player_ids,
+            self._push_queue_update,
+            self._alarm_sound_start,
+            self._alarm_sound_stop,
+        )
 
     async def __call__(self, slim_command: SlimCLICommand) -> Any:
         """Dispatch a slim command to its handler."""
@@ -2374,6 +2382,74 @@ class BrowseLibraryHandler:
                 icon_id=f"artist-{artist.item_id}",
             )
 
+    def _alarm_player_ids(self) -> list[str]:
+        """Return the ids of the connected players that keep their own alarm timer."""
+        if self.provider.slimproto is None:
+            return []
+        return [
+            player.player_id
+            for player in self.provider.slimproto.players
+            if self._has_alarm_clock(player.player_id)
+        ]
+
+    async def _alarm_sound_start(self, player_id: str) -> None:
+        """
+        Play the player's first preset at the alarm volume.
+
+        Nothing is played when the first preset is not set or does not play: the device sounds its own alarm tone
+        when no stream has started after about a minute.
+
+        :param player_id: The device whose alarm is going off.
+        """
+        uri = self.mass.config.get_raw_player_config_value(player_id, alarmclock.ALARM_PRESET_KEY)
+        if not uri or (mass_player := self.mass.players.get_player(player_id)) is None:
+            logger.info("Alarm of %s: no sound to play, the device rings by itself", player_id)
+            return
+        self._alarm_volume_before.setdefault(player_id, int(mass_player.volume_level or 0))
+        await self.mass.players.cmd_power(player_id, True)
+        await self.mass.players.cmd_volume_set(player_id, alarmclock.ALARM_VOLUME)
+        await self.mass.player_queues.play_media(player_id, str(uri))
+
+    async def _alarm_sound_stop(self, player_id: str) -> None:
+        """
+        Stop the alarm sound this started, if it did, and put the volume back.
+
+        :param player_id: The device whose alarm stopped going off.
+        """
+        volume = self._alarm_volume_before.pop(player_id, None)
+        if volume is None:
+            return
+        await self.mass.players.cmd_stop(player_id)
+        await self.mass.players.cmd_volume_set(player_id, volume)
+        # a station that was about to start its next track can start it after the stop: look again
+        self.mass.create_task(self._alarm_sound_still_playing(player_id))
+
+    async def _alarm_sound_still_playing(self, player_id: str) -> None:
+        """
+        Stop the alarm sound again if the player went on playing after it was stopped.
+
+        :param player_id: The device whose alarm sound was stopped.
+        """
+        for _ in range(alarmclock.ALARM_STOP_CHECKS):
+            await asyncio.sleep(alarmclock.ALARM_STOP_CHECK_SECONDS)
+            if player_id in self._alarm_volume_before:
+                return  # the alarm rings again: this is its sound
+            player = self.mass.players.get_player(player_id)
+            if player is None or player.playback_state != PlaybackState.PLAYING:
+                return
+            logger.info(
+                "Alarm of %s: still playing after it was stopped, stopping it again", player_id
+            )
+            await self.mass.players.cmd_stop(player_id)
+
+    def start_alarm_ringer(self) -> None:
+        """Start following the alarms of the devices."""
+        self._alarm_ringer.start()
+
+    async def stop_alarm_ringer(self) -> None:
+        """Stop following the alarms of the devices."""
+        await self._alarm_ringer.stop()
+
     def _has_alarm_clock(self, player_id: str | None) -> bool:
         """Return whether the player is a device that keeps its own alarm timer (Radio, Touch, Controller, Boom)."""
         player = self._slimproto.get_player(player_id) if player_id else None
@@ -2396,7 +2472,9 @@ class BrowseLibraryHandler:
         if command == "alarms":
             return alarmclock.alarms_query(book, str(kwargs.get("filter", "all")))
         if command == "jivealarm":
-            return {}  # stop and snooze: the device handles both itself
+            # stop or snooze: the device handles both itself, the ringer follows what it reports
+            await self._alarm_ringer.on_device_message(player_id, kwargs)
+            return {}
         alarm = book.get(str(kwargs.get("id")))
         if command == "jiveupdatealarm":
             return alarmclock.update_menu(alarm) if alarm else alarmclock.settings_menu(book)
@@ -2968,7 +3046,13 @@ class BrowseLibraryHandler:
             result["mixer volume"] = muted_level
         if self._has_alarm_clock(slim_command.player_id):
             # the time of the next alarm: the device keeps it and rings by itself when it is due
-            result.update(alarmclock.status_fields(self.mass, slim_command.player_id))
+            result.update(
+                alarmclock.status_fields(
+                    self.mass,
+                    slim_command.player_id,
+                    ring=self._alarm_ringer.ring_of(str(slim_command.player_id)),
+                )
+            )
         return result
 
     def _muted_level(self, player_id: str | None) -> int:

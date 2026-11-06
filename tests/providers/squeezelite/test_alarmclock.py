@@ -341,6 +341,7 @@ def _handler(model: str | None, stored: dict[Any, Any] | None = None) -> Any:
         slimproto=SimpleNamespace(get_player=lambda _id: player, cli=cli)
     )
     handler._push_queue_update = AsyncMock()
+    handler._alarm_ringer = SimpleNamespace(ring_of=lambda _id: None, on_device_message=AsyncMock())
     return handler
 
 
@@ -450,3 +451,84 @@ async def test_other_player_settings_are_left_to_the_built_in() -> None:
     """Only alarmsEnabled is answered here."""
     with pytest.raises(NotImplementedError):
         await _handler("baby")(_command("playerpref", "volume", "?"))
+
+
+@pytest.mark.parametrize("message", [{"stop": "1"}, {"snooze": "1"}])
+async def test_what_a_radio_reports_about_its_alarm_reaches_the_ringer(
+    message: dict[str, str],
+) -> None:
+    """The jivealarm message a device sends when its alarm is turned off or snoozed is passed on."""
+    radio = _handler("baby")
+    assert await radio(_command("jivealarm", **message)) == {}
+    radio._alarm_ringer.on_device_message.assert_awaited_once_with("p1", message)
+
+
+def _sounding_handler(preset: str | None, volume: int = 30) -> Any:
+    """Return a handler for a radio whose first preset is as given, with the players it would drive."""
+    stored = {("p1", ac.ALARM_PRESET_KEY): preset} if preset else {}
+    handler = _handler("baby", stored)
+    handler.mass.players = SimpleNamespace(
+        get_player=lambda _id: SimpleNamespace(volume_level=volume),
+        cmd_power=AsyncMock(),
+        cmd_volume_set=AsyncMock(),
+        cmd_stop=AsyncMock(),
+    )
+    handler.mass.player_queues = SimpleNamespace(play_media=AsyncMock())
+    handler._alarm_volume_before = {}
+    return handler
+
+
+async def test_the_alarm_plays_the_first_preset_at_the_alarm_volume() -> None:
+    """The radio is switched on, set to the alarm volume and given the first preset."""
+    handler = _sounding_handler("library://radio/7")
+    await bl.BrowseLibraryHandler._alarm_sound_start(handler, "p1")
+    handler.mass.players.cmd_power.assert_awaited_once_with("p1", True)
+    handler.mass.players.cmd_volume_set.assert_awaited_once_with("p1", ac.ALARM_VOLUME)
+    handler.mass.player_queues.play_media.assert_awaited_once_with("p1", "library://radio/7")
+
+
+async def test_without_a_first_preset_nothing_is_played() -> None:
+    """The radio rings its own alarm tone, so the server leaves the player alone."""
+    handler = _sounding_handler(None)
+    await bl.BrowseLibraryHandler._alarm_sound_start(handler, "p1")
+    handler.mass.players.cmd_power.assert_not_called()
+    handler.mass.players.cmd_volume_set.assert_not_called()
+    handler.mass.player_queues.play_media.assert_not_called()
+    await bl.BrowseLibraryHandler._alarm_sound_stop(handler, "p1")
+    handler.mass.players.cmd_stop.assert_not_called()
+
+
+async def test_stopping_the_alarm_sound_restores_the_volume() -> None:
+    """The sound that was started is stopped and the volume goes back to what it was."""
+    handler = _sounding_handler("library://radio/7", volume=22)
+    await bl.BrowseLibraryHandler._alarm_sound_start(handler, "p1")
+    await bl.BrowseLibraryHandler._alarm_sound_stop(handler, "p1")
+    handler.mass.players.cmd_stop.assert_awaited_once_with("p1")
+    assert handler.mass.players.cmd_volume_set.await_args_list[-1].args == ("p1", 22)
+    # a second stop (a message the device sends again) does nothing more
+    await bl.BrowseLibraryHandler._alarm_sound_stop(handler, "p1")
+    handler.mass.players.cmd_stop.assert_awaited_once()
+
+
+async def test_the_alarm_sound_is_stopped_again_when_the_player_goes_on_playing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A station that starts its next track just after the stop is stopped once more, until it stays stopped."""
+    monkeypatch.setattr(bl.asyncio, "sleep", AsyncMock())
+    handler = _sounding_handler("library://radio/7")
+    states = iter(["playing", "playing", "idle"])
+    handler.mass.players.get_player = lambda _id: SimpleNamespace(
+        volume_level=30, playback_state=next(states)
+    )
+    await bl.BrowseLibraryHandler._alarm_sound_still_playing(handler, "p1")
+    assert handler.mass.players.cmd_stop.await_count == 2
+
+
+async def test_the_alarm_sound_is_left_alone_when_the_alarm_rings_again() -> None:
+    """If the next ring has started its sound, the check that follows the stop does not end it."""
+    handler = _sounding_handler("library://radio/7")
+    handler._alarm_volume_before = {"p1": 30}
+    handler.mass.players.get_player = lambda _id: SimpleNamespace(playback_state="playing")
+    await bl.BrowseLibraryHandler._alarm_sound_still_playing(handler, "p1")
+    handler.mass.players.cmd_stop.assert_not_called()
+

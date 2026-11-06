@@ -26,14 +26,23 @@ from music_assistant.helpers.datetime import host_timezone_name
 if TYPE_CHECKING:
     from music_assistant import MusicAssistant
 
+    from .alarmring import Ring
+
 CONF_ALARMS = "alarms"
-# the volume a device rings its own alarm sound at
+# the volume a device rings its own alarm sound at, and the one the server plays its alarm sound at
 ALARM_VOLUME = 43
+# after the alarm sound is stopped the player is looked at this many times, this many seconds apart, in case it started again
+ALARM_STOP_CHECKS = 3
+ALARM_STOP_CHECK_SECONDS = 1.5
+# the player setting that holds what the server plays when an alarm goes off (the first preset)
+ALARM_PRESET_KEY = "preset_1"
 # the Model of the devices that have the AlarmSnooze applet (Squeezebox Radio, Touch, Controller and Boom)
 ALARM_MODELS = frozenset({"baby", "fab4", "controller", "boom"})
 DAY_NAMES = ("Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday")
 ALL_DAYS = "1111111"
 DEFAULT_NEW_ALARM_TIME = 7 * 3600  # the time the entry window starts on
+# a one-time alarm stays switched on this long after it is due, so the alarm ringer is sure to see it
+FIRED_GRACE_SECONDS = 10
 SNOOZE_SECONDS = 540
 TIMEOUT_SECONDS = 3600
 
@@ -122,7 +131,12 @@ class AlarmBook:
         """Switch off the one-time alarms whose time has passed; returns whether any was."""
         changed = False
         for alarm in self.alarms:
-            if alarm.enabled and not alarm.repeat and alarm.due and now.timestamp() > alarm.due:
+            if (
+                alarm.enabled
+                and not alarm.repeat
+                and alarm.due
+                and now.timestamp() > alarm.due + FIRED_GRACE_SECONDS
+            ):
                 alarm.enabled = False
                 alarm.due = 0
                 changed = True
@@ -133,22 +147,35 @@ class AlarmBook:
         due = next_occurrence(alarm, now) if alarm.enabled and not alarm.repeat else None
         alarm.due = int(due.timestamp()) if due else 0
 
-    def next_alarm(self, now: dt.datetime) -> tuple[Alarm, dt.datetime] | None:
-        """Return the alarm that is due first, with the time, or None when nothing is due."""
+    def next_alarm(
+        self, now: dt.datetime, *, just_due: bool = True
+    ) -> tuple[Alarm, dt.datetime] | None:
+        """
+        Return the alarm that is due first, with the time, or None when nothing is due.
+
+        :param now: The current time.
+        :param just_due: Whether an alarm that fell due in the last few seconds still counts as the next one. A
+            device's own timer fires about a second after the server's clock reaches the time, and a device that is
+            told in that second that the next alarm is another one (or none) cancels the one that is about to ring.
+        """
         if not self.enabled:
             return None
         found: tuple[Alarm, dt.datetime] | None = None
+        since = now - dt.timedelta(seconds=FIRED_GRACE_SECONDS) if just_due else now
         for alarm in self.alarms:
             if not alarm.enabled:
                 continue
-            due = next_occurrence(alarm, now)
+            due = next_occurrence(alarm, since)
             if due is not None and (found is None or due < found[1]):
                 found = (alarm, due)
         return found
 
 
 def status_fields(
-    mass: MusicAssistant, player_id: str, now: dt.datetime | None = None
+    mass: MusicAssistant,
+    player_id: str,
+    now: dt.datetime | None = None,
+    ring: Ring | None = None,
 ) -> dict[str, Any]:
     """
     Return the alarm fields of the player's status: the time of the next alarm, or that there is none.
@@ -158,12 +185,23 @@ def status_fields(
     :param mass: The Music Assistant instance.
     :param player_id: The player the status is for.
     :param now: The current time (for tests).
+    :param ring: The alarm that is going off on the player now, if one is.
     """
     now = now or now_local()
     book = AlarmBook.load(mass, player_id)
     if book.switch_off_fired(now):
         book.save(mass, player_id)
-    found = book.next_alarm(now)
+    found = book.next_alarm(now, just_due=ring is None)
+    if ring is not None:
+        # while an alarm is going off or snoozed, the time that matters is when a snoozed one rings again
+        wake = ring.until if ring.state == "snooze" else (found[1].timestamp() if found else 0)
+        return {
+            "alarm_state": ring.state,
+            "alarm_version": 2,
+            "alarm_next": int(wake),
+            "alarm_snooze_seconds": SNOOZE_SECONDS,
+            "alarm_timeout_seconds": TIMEOUT_SECONDS,
+        }
     if found is None:
         return {"alarm_state": "none", "alarm_version": 2, "alarm_next": 0}
     alarm, due = found
@@ -417,4 +455,9 @@ def alarm_command(
 
 def now_local() -> dt.datetime:
     """Return the current time in the host's time zone."""
-    return dt.datetime.fromtimestamp(_time.time(), _zone())
+    return local_time(_time.time())
+
+
+def local_time(epoch: float) -> dt.datetime:
+    """Return an epoch time as a time in the host's time zone."""
+    return dt.datetime.fromtimestamp(epoch, _zone())

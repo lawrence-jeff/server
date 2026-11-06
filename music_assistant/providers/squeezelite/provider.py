@@ -137,6 +137,7 @@ class SqueezelitePlayerProvider(PlayerProvider):
         self.mass.streams.register_dynamic_route(
             "/slimproto/multi", self._serve_multi_client_stream
         )
+        cast("BrowseLibraryHandler", self.slimproto.cli.command_handler).start_alarm_ringer()
         # it seems that WiiM devices do not use the json rpc port that is broadcasted
         # in the discovery info but instead they just assume that the jsonrpc endpoint
         # lives on the same server as stream URL. So we need to provide a jsonrpc.js
@@ -151,6 +152,10 @@ class SqueezelitePlayerProvider(PlayerProvider):
     async def unload(self, is_removed: bool = False) -> None:
         """Handle unload/close of the provider."""
         # Ensure complete cleanup
+        if self.slimproto is not None and self.slimproto.cli.command_handler is not None:
+            await cast(
+                "BrowseLibraryHandler", self.slimproto.cli.command_handler
+            ).stop_alarm_ringer()
         await self._cleanup_server()
         self.mass.streams.unregister_dynamic_route("/slimproto/multi")
         self.mass.streams.unregister_dynamic_route("/jsonrpc.js")
