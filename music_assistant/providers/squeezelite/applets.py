@@ -39,7 +39,7 @@ APPLETS: dict[str, dict[str, str]] = {
         "title": "Device status for Music Assistant",
         "version": "1.1",
         "creator": "Music Assistant",
-        "desc": "Reports the memory in use, uptime, wireless signal and battery to Music Assistant once a minute. It has no menu.",
+        "desc": "Reports memory, signal and battery to Music Assistant.",
     },
 }
 
