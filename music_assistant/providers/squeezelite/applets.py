@@ -37,13 +37,9 @@ APPLETS: dict[str, dict[str, str]] = {
     "MaDeviceStatus.zip": {
         "name": "MaDeviceStatus",
         "title": "Device status for Music Assistant",
-        "version": "1.0",
+        "version": "1.1",
         "creator": "Music Assistant",
-        "desc": (
-            "Reports the memory in use, the uptime and (on a Squeezebox Radio) the battery of the device to Music Assistant once a "
-            "minute. Music Assistant adds them to the player's status as ma_* fields. It runs in the background after the "
-            "device restarts and has no menu."
-        ),
+        "desc": "Reports the memory in use, uptime, wireless signal and battery to Music Assistant once a minute. It has no menu.",
     },
 }
 
