@@ -359,12 +359,11 @@ async def test_a_seek_drops_the_next_track_queued_for_the_stream_it_replaces() -
     assert player._next_media is None
 
 
-async def test_seek_shows_the_target_and_asks_the_queue_to_seek() -> None:
-    """The target is reported from the moment the command arrives, absolute or relative."""
-    handler, cli, _player = _handler()
+async def test_seek_asks_the_queue_to_seek() -> None:
+    """The queue is asked for the position, absolute or relative."""
+    handler, _cli, _player = _handler()
     seek = handler.mass.player_queues.seek
     await handler._handle_time(_command("time", 90))
-    cli.set_pending_position.assert_called_with("p1", 90)
     seek.assert_awaited_with(queue_id="p1", position=90)
     await handler._handle_time(_command("time", "+10"))
     seek.assert_awaited_with(queue_id="p1", position=40)
@@ -382,15 +381,6 @@ async def test_the_position_query_and_unknown_players_are_left_to_the_built_in()
         await unknown._handle_time(_command("time", 90))
 
 
-async def test_a_refused_seek_stops_showing_its_target() -> None:
-    """If Music Assistant cannot seek, the position is read from the player again."""
-    handler, cli, _player = _handler()
-    handler.mass.player_queues.seek.side_effect = RuntimeError("cannot seek")
-    with pytest.raises(RuntimeError):
-        await handler._handle_time(_command("time", 90))
-    cli.set_pending_position.assert_called_with("p1", None)
-
-
 @pytest.mark.parametrize(
     ("value", "target"),
     [
@@ -406,11 +396,10 @@ async def test_a_refused_seek_stops_showing_its_target() -> None:
 )
 async def test_a_seek_stays_inside_the_track(value: Any, target: int) -> None:
     """The target is kept between the start and the end of the track."""
-    handler, cli, player = _handler()
+    handler, _cli, player = _handler()
     player.current_media = SimpleNamespace(metadata={"duration": 200})
     await handler._handle_time(_command("time", value))
     handler.mass.player_queues.seek.assert_awaited_once_with(queue_id="p1", position=target)
-    cli.set_pending_position.assert_called_with("p1", target)
 
 
 async def test_a_seek_in_a_track_of_unknown_length_is_not_cut_at_the_end() -> None:
@@ -427,19 +416,17 @@ async def test_a_seek_that_is_not_a_whole_number_is_the_built_ins_and_seeks_noth
     value: str,
 ) -> None:
     """Anything but whole seconds is passed on, as in the built-in handling, not made a position."""
-    handler, cli, _player = _handler()
+    handler, _cli, _player = _handler()
     with pytest.raises(NotImplementedError):
         await handler._handle_time(_command("time", value))
     handler.mass.player_queues.seek.assert_not_awaited()
-    cli.set_pending_position.assert_not_called()
 
 
-async def test_a_seek_music_assistant_refuses_is_logged_and_forgotten() -> None:
-    """For an item that cannot be seeked the device is not given an error, and the position returns."""
-    handler, cli, _player = _handler()
+async def test_a_seek_music_assistant_refuses_is_logged_and_not_an_error() -> None:
+    """For an item that cannot be seeked the device is not given an error."""
+    handler, _cli, _player = _handler()
     handler.mass.player_queues.seek.side_effect = MusicAssistantError("no duration")
     await handler._handle_time(_command("time", 90))
-    cli.set_pending_position.assert_called_with("p1", None)
 
 
 def _grouped(handler: Any, *, queue_id: str, members: list[str] | None = None) -> None:

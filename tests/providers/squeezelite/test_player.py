@@ -408,16 +408,6 @@ async def test_the_offset_is_never_negative_and_defaults_to_zero(
     assert metadata["elapsed_offset"] == offset
 
 
-async def test_a_flushed_stream_shows_its_start_position_at_once() -> None:
-    """The CLI is told where the new stream starts, but not for an enqueued or unflushed one."""
-    player, _mass, _metadata = await _play_url_metadata(_media(duration=200, stream_duration=120))
-    cli = player._provider.slimproto.cli  # type: ignore[union-attr]
-    cli.set_pending_position.assert_called_once_with("p1", 80)
-    for kwargs in ({"enqueue": True}, {"send_flush": False}):
-        player, _mass, _metadata = await _play_url_metadata(_media(duration=200), **kwargs)
-        player._provider.slimproto.cli.set_pending_position.assert_not_called()  # type: ignore[union-attr]
-
-
 def _slim_with_current(**metadata: object) -> MagicMock:
     slimplayer = MagicMock()
     slimplayer.current_media = SimpleNamespace(metadata={"queue_item_id": "item_1", **metadata})

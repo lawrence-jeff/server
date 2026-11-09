@@ -2862,16 +2862,11 @@ class BrowseLibraryHandler:
         # in place, the device's decoder-ready report for the old stream would start it, the server
         # would refuse its session, and the player would show as stopped until the new stream starts.
         player._next_media = None
-        cli.set_pending_position(player_id, target)
         try:
             await self.mass.player_queues.seek(queue_id=control[0], position=target)
         except MusicAssistantError as err:
             # for example an item without a duration, which cannot be seeked
             logger.warning("Seek to %ss was refused by Music Assistant: %s", target, err)
-            cli.set_pending_position(player_id, None)
-        except Exception:
-            cli.set_pending_position(player_id, None)
-            raise
 
     def _control_queue(self, player_id: str) -> tuple[str, bool] | None:
         """
