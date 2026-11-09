@@ -112,6 +112,11 @@ class SqueezelitePlayer(Player):
     # the volume to return to while muted: the player is muted by setting its volume to 0 (see
     # volume_mute), so this is None when it is not muted
     _muted_volume: int | None = None
+    # set once the saved volume has been restored: the volume a player starts with is not a choice
+    # made by the user, so it is not saved
+    _volume_tracking: bool = False
+    # the volume and mute that were saved last, so a change made on the device is saved once
+    _saved_volume_state: tuple[int, bool] | None = None
 
     def __init__(
         self,
@@ -162,6 +167,7 @@ class SqueezelitePlayer(Player):
     async def setup(self) -> None:
         """Set up the player."""
         player_id = self.client.player_id
+        self._volume_tracking = False
         self.logger.info("Player %s connected", self.client.name or player_id)
         # update all dynamic attributes
         self.update_attributes()
@@ -188,7 +194,10 @@ class SqueezelitePlayer(Player):
             await self.client.volume_set(0)
         else:
             await self.client.volume_set(init_volume)
+        # what was restored is the saved state, so only a later change is saved
+        self._saved_volume_state = (init_volume, bool(init_muted))
         await self.mass.players.register_or_update(self)
+        self._volume_tracking = True
         await self._restore_power()
 
     async def get_config_entries(self) -> list[ConfigEntry]:
@@ -489,6 +498,10 @@ class SqueezelitePlayer(Player):
             self.client.volume_level if self._muted_volume is None else self._muted_volume
         )
         self._attr_volume_muted = self._muted_volume is not None
+        if self._volume_tracking and self.client.connected:
+            # a volume or mute changed on the device does not come through volume_set or
+            # volume_mute, so it is saved here
+            self._save_volume_state(changed_only=True)
         self._attr_device_info = DeviceInfo(
             model=self.client.device_model,
             manufacturer=self.client.device_type,
@@ -978,13 +991,21 @@ class SqueezelitePlayer(Player):
     def _power_cache_key(self) -> str:
         return f"{self.player_id}_power"
 
-    def _save_volume_state(self) -> None:
-        """Remember the mute and the volume for the next connection."""
+    def _save_volume_state(self, *, changed_only: bool = False) -> None:
+        """
+        Remember the mute and the volume for the next connection.
+
+        :param changed_only: Skip the save when the state is the one saved last.
+        """
         # stored in the player config so it does not expire while the volume is controlled
         # elsewhere (e.g. by an AVR) and these commands never arrive; while muted it is the
         # volume that unmuting returns to
-        muted = self._muted_volume is not None
-        volume = self._muted_volume if muted else self.client.volume_level
+        muted_volume = self._muted_volume
+        muted = muted_volume is not None
+        volume = self.client.volume_level if muted_volume is None else muted_volume
+        if changed_only and self._saved_volume_state == (volume, muted):
+            return
+        self._saved_volume_state = (volume, muted)
         self.mass.config.set_raw_player_config_value(self.player_id, CONF_STORED_VOLUME, volume)
         self.mass.config.set_raw_player_config_value(self.player_id, CONF_STORED_MUTED, muted)
 

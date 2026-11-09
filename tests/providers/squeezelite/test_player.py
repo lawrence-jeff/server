@@ -856,3 +856,84 @@ async def test_volume_and_mute_are_stored_in_the_player_config_not_the_cache() -
         mass.cache.set.assert_not_awaited()
     finally:
         patch.stopall()
+
+
+async def test_a_volume_changed_on_the_device_is_saved_once() -> None:
+    """A change from the device does not come through volume_set, so it is saved on its update."""
+    try:
+        player, mass = await _connected_with_volume()
+        player.client.volume_level = 30
+        player.update_attributes()
+        assert _saved_volume(mass) == [False, 30]
+        saves = mass.config.set_raw_player_config_value.call_count
+        player.update_attributes()
+        assert mass.config.set_raw_player_config_value.call_count == saves
+    finally:
+        patch.stopall()
+
+
+async def test_nothing_is_saved_while_the_volume_stays_as_it_was() -> None:
+    """Every player event updates the attributes, and only a change is saved."""
+    try:
+        player, mass = await _connected_with_volume(stored={CONF_STORED_VOLUME: 50})
+        player.update_attributes()
+        player.update_attributes()
+        mass.config.set_raw_player_config_value.assert_not_called()
+    finally:
+        patch.stopall()
+
+
+async def test_the_restored_volume_is_not_saved_again() -> None:
+    """The volume a player starts with is the saved one, so connecting saves nothing."""
+    try:
+        player, mass = _connecting_player(set(), stored={CONF_STORED_VOLUME: 35})
+
+        async def set_level(level: int) -> None:
+            player.client.volume_level = level
+
+        player.client.volume_set = AsyncMock(side_effect=set_level)
+        await player.setup()
+        player.update_attributes()
+        assert player.client.volume_level == 35
+        mass.config.set_raw_player_config_value.assert_not_called()
+    finally:
+        patch.stopall()
+
+
+async def test_nothing_is_saved_before_the_player_is_set_up() -> None:
+    """The player config of a player that is not registered yet cannot be written."""
+    try:
+        player, mass = _connecting_player(set())
+        player.client.volume_level = 30
+        player.update_attributes()
+        mass.config.set_raw_player_config_value.assert_not_called()
+    finally:
+        patch.stopall()
+
+
+async def test_a_disconnected_player_is_not_saved() -> None:
+    """The volume of a client that is gone is not a change the user made."""
+    try:
+        player, mass = await _connected_with_volume()
+        player.client.connected = False
+        player.client.volume_level = 30
+        player.update_attributes()
+        mass.config.set_raw_player_config_value.assert_not_called()
+    finally:
+        patch.stopall()
+
+
+async def test_raising_the_volume_on_the_device_while_muted_saves_the_unmuted_state() -> None:
+    """A mute by volume 0 saves nothing new, and raising it on the device ends the mute."""
+    try:
+        player, mass = await _connected_with_volume()
+        await player.volume_mute(True)
+        player.client.volume_level = 0
+        mass.config.set_raw_player_config_value.reset_mock()
+        player.update_attributes()
+        mass.config.set_raw_player_config_value.assert_not_called()
+        player.client.volume_level = 20
+        player.update_attributes()
+        assert _saved_volume(mass) == [False, 20]
+    finally:
+        patch.stopall()
