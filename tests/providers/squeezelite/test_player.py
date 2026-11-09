@@ -26,6 +26,11 @@ from music_assistant.constants import (
     CONF_OUTPUT_CODEC,
     CONF_PREFER_WAV_FOR_LIVE_SOURCES,
 )
+from music_assistant.providers.squeezelite.constants import (
+    CONF_STORED_MUTED,
+    CONF_STORED_VOLUME,
+    DEFAULT_PLAYER_VOLUME,
+)
 from music_assistant.providers.squeezelite.player import SqueezelitePlayer, is_protocol_only_device
 from tests.common import use_real_create_task
 
@@ -454,9 +459,15 @@ async def test_the_quality_of_a_track_that_is_no_longer_playing_is_left_alone() 
 
 
 def _connecting_player(
-    features: set[PlayerFeature], saved_power: bool | None = None
+    features: set[PlayerFeature],
+    saved_power: bool | None = None,
+    stored: dict[str, Any] | None = None,
 ) -> tuple[SqueezelitePlayer, MagicMock]:
     player, mass = _player_with_mocked_mass()
+    config_values = stored or {}
+    mass.config.get_raw_player_config_value.side_effect = lambda _player_id, key, default=None: (
+        config_values.get(key, default)
+    )
     client = MagicMock(
         player_id="p1",
         connected=True,
@@ -695,9 +706,9 @@ async def test_a_stream_that_does_not_replace_the_playing_one_keeps_the_position
 
 
 async def _connected_with_volume(
-    saved: list[Any] | None = None,
+    saved: list[Any] | None = None, stored: dict[str, Any] | None = None
 ) -> tuple[SqueezelitePlayer, MagicMock]:
-    player, mass = _connecting_player(set())
+    player, mass = _connecting_player(set(), stored=stored)
     mass.cache.get = AsyncMock(side_effect=lambda key, **_k: saved if key == "p1" else None)
     await player.setup()
     player.update_state = MagicMock()  # type: ignore[method-assign,misc]
@@ -708,12 +719,17 @@ async def _connected_with_volume(
     player.client.volume_set = AsyncMock(side_effect=set_level)
     player.client.mute.reset_mock()
     player.client.volume_set.reset_mock()
-    mass.cache.set.reset_mock()
+    mass.config.set_raw_player_config_value.reset_mock()
     return player, mass
 
 
 def _saved_volume(mass: MagicMock) -> list[Any]:
-    return list(mass.cache.set.await_args.kwargs["data"])
+    """Return [muted, volume] as the last saved to the player config."""
+    saved = {
+        call.args[1]: call.args[2]
+        for call in mass.config.set_raw_player_config_value.call_args_list
+    }
+    return [saved[CONF_STORED_MUTED], saved[CONF_STORED_VOLUME]]
 
 
 async def test_muting_silences_the_volume_and_leaves_the_audio_output_on() -> None:
@@ -792,5 +808,51 @@ async def test_a_saved_mute_is_restored_without_switching_the_output_off(
         player.client.mute.assert_awaited_once_with(False)
         player.client.volume_set.assert_awaited_once_with(sent)
         assert player._muted_volume == (40 if saved[0] else None)
+    finally:
+        patch.stopall()
+
+
+@pytest.mark.parametrize(
+    ("stored", "legacy_cache", "expected_muted", "expected_volume"),
+    [
+        # volume mapped to an AVR: the volume commands never arrive, so the cache entry expired,
+        # but the stored value must still be restored
+        ({CONF_STORED_VOLUME: 100, CONF_STORED_MUTED: False}, None, False, 100),
+        ({CONF_STORED_VOLUME: 35, CONF_STORED_MUTED: True}, [False, 80], True, 35),
+        # stored before the volume moved out of the cache
+        ({}, [True, 55], True, 55),
+        ({}, None, False, DEFAULT_PLAYER_VOLUME),
+    ],
+)
+async def test_setup_restores_the_volume_without_a_valid_cache_entry(
+    stored: dict[str, Any],
+    legacy_cache: list[Any] | None,
+    expected_muted: bool,
+    expected_volume: int,
+) -> None:
+    """The player config wins over the cache entry, which only covers older versions."""
+    try:
+        player, mass = _connecting_player(set(), stored=stored)
+        mass.cache.get = AsyncMock(
+            side_effect=lambda key, **_k: legacy_cache if key == "p1" else None
+        )
+        await player.setup()
+        player.client.mute.assert_awaited_once_with(False)
+        player.client.volume_set.assert_awaited_once_with(0 if expected_muted else expected_volume)
+        assert player._muted_volume == (expected_volume if expected_muted else None)
+    finally:
+        patch.stopall()
+
+
+async def test_volume_and_mute_are_stored_in_the_player_config_not_the_cache() -> None:
+    """The saved volume does not expire: while muted it is the volume that unmuting returns to."""
+    try:
+        player, mass = await _connected_with_volume()
+        await player.volume_set(100)
+        assert _saved_volume(mass) == [False, 100]
+        player.client.volume_level = 100
+        await player.volume_mute(True)
+        assert _saved_volume(mass) == [True, 100]
+        mass.cache.set.assert_not_awaited()
     finally:
         patch.stopall()
