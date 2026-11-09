@@ -39,14 +39,20 @@ def _station() -> SimpleNamespace:
 
 
 def _handler(
-    *, state: PlaybackState = PlaybackState.PLAYING, items: int = 3, queue: bool = True
+    *,
+    state: PlaybackState = PlaybackState.PLAYING,
+    items: int = 3,
+    queue: bool = True,
+    dynamic: bool = False,
 ) -> Any:
     """Return a handler whose Music Assistant and CLI are mocks."""
     handler: Any = bl.BrowseLibraryHandler.__new__(bl.BrowseLibraryHandler)
     handler._device_reports = DeviceReports()
     mass = MagicMock()
     mass.player_queues.get.return_value = (
-        SimpleNamespace(state=state, items=items, current_index=None) if queue else None
+        SimpleNamespace(state=state, items=items, current_index=None, is_dynamic=dynamic)
+        if queue
+        else None
     )
     mass.player_queues.play_media = AsyncMock()
     mass.player_queues.play_index = AsyncMock()
@@ -169,6 +175,54 @@ async def test_an_idle_queue_starts_playing_what_was_added(
         play_index.assert_not_awaited()
     else:
         play_index.assert_awaited_once_with(queue_id=PLAYER, index=start_index)
+
+
+@pytest.mark.parametrize(
+    ("state", "expected"),
+    [(PlaybackState.PLAYING, QueueOption.NEXT), (PlaybackState.IDLE, QueueOption.PLAY)],
+)
+@pytest.mark.parametrize("kwargs", [{"track_id": 9}, {"uri": "pandora://track/TR:7"}])
+async def test_a_tap_on_a_track_in_a_station_queue_plays_it_next_or_now(
+    state: PlaybackState, expected: QueueOption, kwargs: dict[str, Any]
+) -> None:
+    """An add to a dynamic queue is rebuilt into its mix and can be dropped, so it is not used."""
+    handler = _handler(state=state, dynamic=True)
+    await handler._playlistcontrol(_command(cmd="add", **kwargs))
+    handler.mass.player_queues.play_media.assert_awaited_once()
+    assert handler.mass.player_queues.play_media.await_args.kwargs["option"] == expected
+    # a queue that starts by itself (play) or keeps playing (next) is never started at an index
+    handler.mass.player_queues.play_index.assert_not_awaited()
+
+
+async def test_a_tap_on_a_track_in_a_station_queue_says_what_it_did() -> None:
+    """Playing next gets the "to play next" popup, and playing now the "Now Playing" ones."""
+    handler = _handler(state=PlaybackState.PLAYING, dynamic=True)
+    await handler._playlistcontrol(_command(cmd="add", track_id=9))
+    assert handler.cli.push_show_briefly.call_args.kwargs["text"][0] == "to play next..."
+    handler = _handler(state=PlaybackState.IDLE, dynamic=True)
+    await handler._playlistcontrol(_command(cmd="add", track_id=9))
+    assert handler.cli.push_show_briefly.call_args.kwargs["text"][0] == "Now Playing"
+    handler.cli.push_play_icon.assert_called_once()
+
+
+async def test_a_tap_on_something_other_than_a_track_still_adds_to_a_station_queue() -> None:
+    """Only a single track is changed: a playlist is added as before."""
+    handler = _handler(state=PlaybackState.PLAYING, dynamic=True)
+    await handler._playlistcontrol(_command(cmd="add", uri="library://playlist/7"))
+    assert handler.mass.player_queues.play_media.await_args.kwargs["option"] == QueueOption.ADD
+
+
+@pytest.mark.parametrize("cmd", ["insert", "load", "replace"])
+async def test_the_other_commands_are_left_alone_on_a_station_queue(cmd: str) -> None:
+    """Only "add" is swapped; insert, load and replace already insert exactly as picked."""
+    handler = _handler(state=PlaybackState.PLAYING, dynamic=True)
+    await handler._playlistcontrol(_command(cmd=cmd, track_id=9))
+    expected = {
+        "insert": QueueOption.NEXT,
+        "load": QueueOption.PLAY,
+        "replace": QueueOption.REPLACE,
+    }
+    assert handler.mass.player_queues.play_media.await_args.kwargs["option"] == expected[cmd]
 
 
 async def test_no_queue_yet_counts_as_idle() -> None:

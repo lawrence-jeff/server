@@ -1029,6 +1029,11 @@ def _is_radio_uri(uri: Any) -> bool:
     return isinstance(uri, str) and urllib.parse.urlsplit(uri).netloc == "radio"
 
 
+def _is_track_uri(uri: Any) -> bool:
+    """Return whether uri names a track ("<provider>://track/<id>")."""
+    return isinstance(uri, str) and urllib.parse.urlsplit(uri).netloc == "track"
+
+
 def _radio_row(item: Any) -> dict[str, Any]:
     """Return the row of a radio station, played directly."""
     return {
@@ -2070,6 +2075,23 @@ class BrowseLibraryHandler:
             # Title", because MA only corrects the title when queue_item.media_item is set.
             media = track.uri
 
+        if (
+            queue_option == QueueOption.ADD
+            and queue is not None
+            and queue.is_dynamic
+            and (track is not None or _is_track_uri(uri))
+        ):
+            # A single tap on a track sends "add", and on a queue that holds a dynamic source (a
+            # Pandora station, a radio playlist) Music Assistant does not append: the track only
+            # becomes a seed of the managed mix, which is rebuilt behind the current item and can
+            # leave the track out without an error (one played recently is held back, for example).
+            # The tap then did nothing, or, on an idle queue, _start_if_idle below started an index
+            # that does not exist and the device showed "Can't play".
+            # A track played next (NEXT) is the one request the queue inserts exactly as picked
+            # (queue_loader's plays_next_track), so a playing queue gets it right after the current
+            # item, as "Play Now (keep queue)" does for a long press. An idle queue gets PLAY, which
+            # inserts it and starts it, because an add never starts a dynamic queue.
+            queue_option = QueueOption.PLAY if was_idle else QueueOption.NEXT
         await self.mass.player_queues.play_media(
             queue_id=player_id,
             media=media,
