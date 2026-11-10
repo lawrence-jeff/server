@@ -761,6 +761,20 @@ async def test_playlist_commands_it_cannot_do_are_the_built_ins() -> None:
     handler._push_queue_update.assert_not_awaited()
 
 
+async def test_clear_history_also_forgets_what_was_enqueued() -> None:
+    """The "Clear queue and history" command empties the enqueued list; a plain clear keeps it."""
+    handler = _queue_commands_handler()
+    history = [SimpleNamespace(name="80s Radio")]
+    handler.mass.player_queues.queue_data.return_value = SimpleNamespace(
+        enqueued_media_items=history
+    )
+    await handler._handle_playlist(_cmd("playlist", "clear"))
+    assert history == [SimpleNamespace(name="80s Radio")]
+    await handler._handle_playlist(_cmd("playlist", "clear", "history"))
+    assert history == []
+    assert handler.mass.player_queues.clear.call_count == 2
+
+
 def _queue_rows(count: int, *, with_artist: bool = True) -> list[SimpleNamespace]:
     return [
         SimpleNamespace(
@@ -922,6 +936,10 @@ async def test_a_menu_status_lists_the_queue_from_the_current_item_with_a_clear_
     confirm = result["item_loop"][-1]["item_loop"][1]
     assert confirm["actions"]["do"]["cmd"] == ["playlist", "clear"]
     assert confirm["nextWindow"] == "home"
+    with_history = result["item_loop"][-1]["item_loop"][2]
+    assert with_history["text"] == "Clear queue and history"
+    assert with_history["actions"]["do"]["cmd"] == ["playlist", "clear", "history"]
+    assert with_history["nextWindow"] == "home"
 
 
 async def test_the_clear_row_only_comes_after_the_last_real_row() -> None:

@@ -2900,7 +2900,7 @@ class BrowseLibraryHandler:
         #   upcoming items", i.e. "Play Next"
         # - moveend: move_item_end(queue_id, queue_item_id)
         # - clear: clear(queue_id); skip_stop stays False, like LMS's "playlist clear", which stops
-        #   playback
+        #   playback. "clear history" also forgets the list of enqueued items (see below)
         #
         # Every branch ends with _push_queue_update() so the queue view reflects the change without
         # waiting for the periodic replay.
@@ -2949,6 +2949,11 @@ class BrowseLibraryHandler:
             )
         elif subcommand == "clear":
             await self._maybe_await(self.mass.player_queues.clear(queue.queue_id))
+            if "history" in args[1:]:
+                # "Clear queue and history": Music Assistant's clear keeps the list of what was
+                # last enqueued, and a station in it refills the queue when it runs out. Forgetting
+                # it makes the next track start a queue with no memory of the old one.
+                self.mass.player_queues.queue_data(queue.queue_id).enqueued_media_items.clear()
         else:
             raise NotImplementedError(f"No handler for playlist/{subcommand}")
 
@@ -3092,8 +3097,9 @@ class BrowseLibraryHandler:
 
         # "Clear queue": an extra row after the last real track, as in LMS's
         # _addJivePlaylistControls (without its "Save Playlist" sibling). It holds two inline rows
-        # (no round-trip): "Cancel" (jiveblankcommand, a client-side no-op, see _dispatch) and
-        # "Clear queue" as the confirm (playlist clear). The icon resolves through
+        # (no round-trip): "Cancel" (jiveblankcommand, a client-side no-op, see _dispatch), "Clear
+        # queue" (playlist clear) and "Clear queue and history" (playlist clear history, which also
+        # forgets what was enqueued before). The icon resolves through
         # _resolve_static_icon_path, so playlistclear.png (or the sized variant) must exist in
         # static/.
         reaches_tail = offset + len(item_loop) >= queue.items
@@ -3105,7 +3111,7 @@ class BrowseLibraryHandler:
                     # no request. "Clear queue" (not LMS's "Clear Playlist") matches the MA app.
                     "text": "Clear queue",
                     "icon": _menu_icon("playlistclear"),
-                    "count": 2,
+                    "count": 3,
                     "offset": 0,
                     "item_loop": [
                         {
@@ -3116,6 +3122,13 @@ class BrowseLibraryHandler:
                         {
                             "text": "Clear queue",
                             "actions": {"do": {"player": 0, "cmd": ["playlist", "clear"]}},
+                            "nextWindow": "home",
+                        },
+                        {
+                            "text": "Clear queue and history",
+                            "actions": {
+                                "do": {"player": 0, "cmd": ["playlist", "clear", "history"]}
+                            },
                             "nextWindow": "home",
                         },
                     ],
