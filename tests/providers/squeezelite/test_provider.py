@@ -3,15 +3,20 @@
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator
+from functools import partial
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from aioslimproto.models import EventType as SlimEventType
+from aioslimproto.models import SlimEvent
 from music_assistant_models.enums import ContentType, RepeatMode
 from music_assistant_models.media_items import AudioFormat
 
+from music_assistant.models.player_provider import PlayerProvider
 from music_assistant.providers.squeezelite.constants import REPEATMODE_MAP
+from music_assistant.providers.squeezelite.player import SqueezelitePlayer
 from music_assistant.providers.squeezelite.provider import SqueezelitePlayerProvider
 
 FLOW_FORMAT = AudioFormat(content_type=ContentType.PCM_F32LE, sample_rate=192000, bit_depth=32)
@@ -113,3 +118,64 @@ def test_a_queue_change_is_ignored_when_there_is_nothing_to_push_to(case: str) -
     event = _queue_event(object_id=None if case == "no id" else "p1")
     SqueezelitePlayerProvider._handle_queue_items_updated(provider, event)
     provider.mass.create_task.assert_not_called()
+
+
+def _synced_member() -> tuple[MagicMock, SqueezelitePlayer, MagicMock]:
+    """Return a mocked provider whose registered player 'member' is synced to 'leader'."""
+    leader = SqueezelitePlayer.__new__(SqueezelitePlayer)
+    leader._player_id = "leader"
+    leader._attr_group_members = ["leader", "member"]
+    update_state = MagicMock()
+    leader.update_state = update_state  # type: ignore[misc,method-assign]
+    member = MagicMock(player_id="member", synced_to="leader")
+    provider = MagicMock()
+    provider.mass.closing = False
+    provider.mass.players.get_player.side_effect = {"leader": leader, "member": member}.get
+    provider._release_from_sync_leader = partial(
+        SqueezelitePlayerProvider._release_from_sync_leader, provider
+    )
+    return provider, leader, update_state
+
+
+def test_disconnected_member_leaves_its_sync_leader() -> None:
+    """A synced player that disconnects is dropped from its leader, so it returns ungrouped."""
+    provider, leader, update_state = _synced_member()
+    event = SlimEvent(type=SlimEventType.PLAYER_DISCONNECTED, player_id="member")
+
+    SqueezelitePlayerProvider._handle_slimproto_event(provider, event)
+
+    assert leader.group_members == []
+    update_state.assert_called_once()
+    provider.mass.players.unregister.assert_called_once_with("member")
+
+
+def test_reconnected_member_leaves_its_sync_leader() -> None:
+    """A synced player that reconnects before its old socket closed is dropped from its leader."""
+    provider, leader, _ = _synced_member()
+    event = SlimEvent(type=SlimEventType.PLAYER_CONNECTED, player_id="member")
+
+    with patch("music_assistant.providers.squeezelite.provider.SqueezelitePlayer"):
+        SqueezelitePlayerProvider._handle_slimproto_event(provider, event)
+
+    assert leader.group_members == []
+
+
+def test_the_display_name_is_the_one_set_in_music_assistant() -> None:
+    """The name for a client comes from Music Assistant's player, and is None for an unknown one."""
+    provider = MagicMock()
+    provider.mass.players.get_player.side_effect = {"p1": MagicMock(display_name="Kitchen")}.get
+
+    assert SqueezelitePlayerProvider._lookup_display_name(provider, "p1") == "Kitchen"
+    assert SqueezelitePlayerProvider._lookup_display_name(provider, "other") is None
+
+
+async def test_the_cli_reports_the_display_name_set_in_music_assistant() -> None:
+    """Loading the provider hands the lookup to the CLI, which reports it to the clients."""
+    provider = SqueezelitePlayerProvider.__new__(SqueezelitePlayerProvider)
+    provider.slimproto = MagicMock(start=AsyncMock())
+    provider.mass = MagicMock()
+
+    with patch.object(PlayerProvider, "loaded_in_mass", new=AsyncMock()):
+        await provider.loaded_in_mass()
+
+    assert provider.slimproto.cli.display_name_lookup == provider._lookup_display_name

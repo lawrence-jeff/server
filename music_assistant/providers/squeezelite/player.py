@@ -27,7 +27,6 @@ from music_assistant_models.enums import (
 from music_assistant_models.errors import InvalidCommand, MusicAssistantError
 
 from music_assistant.constants import (
-    CONF_ENTRY_HTTP_PROFILE_FORCED_2,
     CONF_ENTRY_PREFER_WAV_FOR_LIVE_SOURCES_DEFAULT_ENABLED,
     CONF_ENTRY_SYNC_ADJUST,
     CONF_OUTPUT_CODEC,
@@ -171,21 +170,25 @@ class SqueezelitePlayer(Player):
         self.logger.info("Player %s connected", self.client.name or player_id)
         # update all dynamic attributes
         self.update_attributes()
-        # restore volume state, the (expiring) cache entry only covers values
-        # stored by older versions
+        # restore volume state from the player config; the (expiring) cache entry only covers
+        # values stored by older versions
+        stored_volume = self.mass.config.get_raw_player_config_value(player_id, CONF_STORED_VOLUME)
         init_muted = False
         init_volume = DEFAULT_PLAYER_VOLUME
-        if last_state := await self.mass.cache.get(
-            key=player_id, provider=self.provider.instance_id, category=CACHE_CATEGORY_PREV_STATE
+        if stored_volume is None and (
+            last_state := await self.mass.cache.get(
+                key=player_id,
+                provider=self.provider.instance_id,
+                category=CACHE_CATEGORY_PREV_STATE,
+            )
         ):
-            init_muted = last_state[0]
-            init_volume = last_state[1]
-        init_muted = bool(
-            self.mass.config.get_raw_player_config_value(player_id, CONF_STORED_MUTED, init_muted)
-        )
-        init_volume = int(
-            self.mass.config.get_raw_player_config_value(player_id, CONF_STORED_VOLUME, init_volume)
-        )
+            init_muted = bool(last_state[0])
+            init_volume = int(last_state[1])
+        if stored_volume is not None:
+            init_volume = int(stored_volume)
+            init_muted = bool(
+                self.mass.config.get_raw_player_config_value(player_id, CONF_STORED_MUTED, False)
+            )
         await self.client.stop()
         # the audio output must be on whatever the saved mute is, as it is muted with the volume
         await self.client.mute(False)
@@ -194,8 +197,12 @@ class SqueezelitePlayer(Player):
             await self.client.volume_set(0)
         else:
             await self.client.volume_set(init_volume)
-        # what was restored is the saved state, so only a later change is saved
-        self._saved_volume_state = (init_volume, bool(init_muted))
+        if stored_volume is None:
+            # carries the volume of the legacy cache entry over before that entry expires
+            self._save_volume_state()
+        else:
+            # what was restored is the saved state, so only a later change is saved
+            self._saved_volume_state = (init_volume, bool(init_muted))
         await self.mass.players.register_or_update(self)
         self._volume_tracking = True
         await self._restore_power()
@@ -228,7 +235,6 @@ class SqueezelitePlayer(Player):
             CONF_ENTRY_SYNC_ADJUST,
             CONF_ENTRY_DISPLAY,
             CONF_ENTRY_VISUALIZATION,
-            CONF_ENTRY_HTTP_PROFILE_FORCED_2,
             CONF_ENTRY_PREFER_WAV_FOR_LIVE_SOURCES_DEFAULT_ENABLED,
             haextras.CONFIG_ENTRY,  # HA-EXTRAS
             await browseuser.config_entry(self.mass, self.player_id),
@@ -298,6 +304,10 @@ class SqueezelitePlayer(Player):
             msg = "A synced player cannot receive play commands directly"
             raise InvalidCommand(msg)
 
+        # don't report the old stream's position until the new stream's first heartbeat
+        self._attr_elapsed_time = 0
+        self._attr_elapsed_time_last_updated = time.time()
+
         # Protocol players are powered off on stop(), so power them (and every sync
         # client, as stop() does) back on when playback starts; otherwise the device
         # stays silent.
@@ -330,6 +340,7 @@ class SqueezelitePlayer(Player):
                 send_flush=True,
                 auto_play=False,
             )
+            self._sync_elapsed_after_flush()
             return
 
         # this is a syncgroup; we need to handle this with a multi client stream.
@@ -390,6 +401,7 @@ class SqueezelitePlayer(Player):
                         mime_type=get_mime_type(member_codec),
                     )
                 )
+        self._sync_elapsed_after_flush()
 
     async def enqueue_next_media(self, media: PlayerMedia) -> None:
         """Handle enqueuing next media item."""
@@ -460,7 +472,25 @@ class SqueezelitePlayer(Player):
         ):
             # restart stream session if it was already playing
             # for now, we dont support late joining into an existing stream
-            self.mass.create_task(self.mass.players.cmd_resume(self.player_id))
+            # a back-to-back restart reads the position of the one before it, so the newest wins
+            self.mass.create_task(
+                self.mass.players.cmd_resume(self.player_id),
+                task_id=f"squeezelite_regroup_resume_{self.player_id}",
+                abort_existing=True,
+            )
+
+    def remove_disconnected_member(self, player_id: str) -> None:
+        """
+        Remove a group member whose slimproto connection dropped.
+
+        :param player_id: The player id of the disconnected member.
+        """
+        if player_id not in self._attr_group_members:
+            return
+        self._attr_group_members.remove(player_id)
+        if self._attr_group_members == [self.player_id]:
+            self._attr_group_members.clear()
+        self.update_state()
 
     def handle_slim_event(self, event: SlimEvent) -> None:
         """Handle player event from slimproto server."""
@@ -543,6 +573,10 @@ class SqueezelitePlayer(Player):
         mime_type: str | None = None,
     ) -> None:
         """Handle playback of an url on slimproto player(s)."""
+        if mime_type is None:
+            # derive from the url extension (only reliable for plain file urls; sync
+            # group member urls have no extension, so callers pass the codec mime)
+            mime_type = get_mime_type(url.rsplit(".", maxsplit=1)[-1].split("?", maxsplit=1)[0])
         # Look up the queue item to get its real audio format (same lookup as
         # start_queue_item in play_media). The quality fields are re-checked
         # shortly after playback starts, see below.
@@ -596,10 +630,6 @@ class SqueezelitePlayer(Player):
             MediaType.RADIO,
             MediaType.ANNOUNCEMENT,
         )
-        if mime_type is None:
-            # derive from the url extension (only reliable for plain file urls; sync
-            # group member urls have no extension, so callers pass the codec mime)
-            mime_type = get_mime_type(url.rsplit(".", maxsplit=1)[-1].split("?", maxsplit=1)[0])
         stream_threshold, output_threshold = (64, 1) if low_latency_stream else (200, 20)
         if send_flush and not enqueue:
             # The position of the flushed stream no longer applies. Music Assistant adds the new
@@ -1013,6 +1043,11 @@ class SqueezelitePlayer(Player):
             provider=self.provider.instance_id,
             category=CACHE_CATEGORY_PREV_STATE,
         )
+
+    def _sync_elapsed_after_flush(self) -> None:
+        """Drop an old-stream heartbeat that landed before the flush."""
+        self._attr_elapsed_time = self.client.elapsed_seconds
+        self._attr_elapsed_time_last_updated = time.time()
 
 
 async def pause_and_unpause(slim_client: SlimClient, pause_duration_ms: int) -> None:
