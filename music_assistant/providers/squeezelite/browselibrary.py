@@ -1778,6 +1778,20 @@ class BrowseLibraryHandler:
             # The built-in answers "Invalid command" for a button it hands on as an event (a preset of
             # Music Assistant, repeat, shuffle), so a client such as Home Assistant reports a failure
             # for a button that worked. The button is handled exactly as before; only the answer changes.
+            #
+            # The Next button (jump_fwd) is answered by _handle_button, which moves Music Assistant's
+            # queue on, and it must be tried before the built-in. The built-in plays the player's own
+            # buffered "next" item, and that item only follows queue edits made while the queue is
+            # playing: Music Assistant hands the player a new next track only in the playing state, so
+            # after a Play Next or Add made while paused it still holds the old next track. The
+            # built-in would then play that one (queue index 0 -> 2 instead of 0 -> 1). This block
+            # sits ahead of the handlers table below, so without this call the table's "button" entry
+            # is never reached.
+            try:
+                await self._handle_button(slim_command)
+                return {}
+            except NotImplementedError:
+                pass  # not jump_fwd, or no active queue: the built-in handles it
             cli = self._slimproto.cli
             try:
                 await cli._handle_button(

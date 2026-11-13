@@ -1027,6 +1027,28 @@ async def test_a_button_the_built_in_hands_on_as_an_event_is_published_and_answe
     handler.cli._publish_unhandled_command.assert_called_once_with(command)
 
 
+async def test_the_next_button_reaches_the_queue_through_the_full_dispatch() -> None:
+    """jump_fwd must go to the queue, not the built-in's stale buffered next item, whatever order the checks run in."""
+    handler = _handler()
+    handler.mass.player_queues.next = AsyncMock()
+    handler.mass.player_queues.get_active_queue.return_value = SimpleNamespace(queue_id=PLAYER)
+    handler.cli._handle_button = AsyncMock()
+    assert await handler._dispatch(_cmd("button", "jump_fwd")) == {}
+    handler.mass.player_queues.next.assert_awaited_once_with(PLAYER)
+    handler.cli._handle_button.assert_not_awaited()
+
+
+async def test_the_next_button_without_a_queue_falls_back_to_the_built_in() -> None:
+    """With no active queue there is nothing to move on, so the built-in handles the button."""
+    handler = _handler()
+    handler.mass.player_queues.next = AsyncMock()
+    handler.mass.player_queues.get_active_queue.return_value = None
+    handler.cli._handle_button = AsyncMock(return_value=None)
+    assert await handler._dispatch(_cmd("button", "jump_fwd")) == {}
+    handler.mass.player_queues.next.assert_not_awaited()
+    handler.cli._handle_button.assert_awaited_once_with(PLAYER, "jump_fwd")
+
+
 async def test_a_button_the_built_in_handles_is_not_published_again() -> None:
     """Volume and power buttons are done by the built-in, with no event."""
     handler = _handler()
