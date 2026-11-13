@@ -185,7 +185,7 @@ class SqueezelitePlayer(Player):
             init_muted = bool(last_state[0])
             init_volume = int(last_state[1])
         if stored_volume is not None:
-            init_volume = int(stored_volume)
+            init_volume = int(cast("int", stored_volume))
             init_muted = bool(
                 self.mass.config.get_raw_player_config_value(player_id, CONF_STORED_MUTED, False)
             )
