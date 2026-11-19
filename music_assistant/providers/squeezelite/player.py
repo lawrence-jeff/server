@@ -2,17 +2,12 @@
 
 from __future__ import annotations
 
-import asyncio
-import statistics
 import time
-from collections import deque
-from collections.abc import Iterator
 from typing import TYPE_CHECKING, cast
 
+from aioslimproto.models import ButtonCode, RemoteCode, SlimEvent
 from aioslimproto.models import EventType as SlimEventType
-from aioslimproto.models import PlayerState as SlimPlayerState
 from aioslimproto.models import Preset as SlimPreset
-from aioslimproto.models import SlimEvent
 from aioslimproto.models import VisualisationType as SlimVisualisationType
 from music_assistant_models.config_entries import ConfigEntry, ConfigValueOption
 from music_assistant_models.enums import (
@@ -21,56 +16,49 @@ from music_assistant_models.enums import (
     MediaType,
     PlaybackState,
     PlayerFeature,
-    PlayerType,
+    ProtocolRole,
     RepeatMode,
 )
-from music_assistant_models.errors import InvalidCommand, MusicAssistantError
+from music_assistant_models.errors import MusicAssistantError
 
 from music_assistant.constants import (
     CONF_ENTRY_PREFER_WAV_FOR_LIVE_SOURCES_DEFAULT_ENABLED,
     CONF_ENTRY_SYNC_ADJUST,
-    CONF_OUTPUT_CODEC,
-    CONF_PREFER_WAV_FOR_LIVE_SOURCES,
     VERBOSE_LOG_LEVEL,
 )
-from music_assistant.controllers.streams.audio_processing import get_media_session_id
 from music_assistant.helpers.audio import get_mime_type
-from music_assistant.helpers.util import TaskManager
-from music_assistant.models.player import (
-    POSITION_JUMP_THRESHOLD,
-    DeviceInfo,
-    Player,
-    PlayerMedia,
-)
+from music_assistant.helpers.player import served_duration
+from music_assistant.models.player import DeviceInfo, PlayerMedia
+from music_assistant.models.player_protocol import PlayerProtocol
+from music_assistant.models.player_state import POSITION_JUMP_THRESHOLD
+from music_assistant.providers.sendspin.bridge_manager import evaluate_bridge_of
 
 from . import browseuser, haextras  # HA-EXTRAS
 from .browselibrary import art_ref_for_item, cover_icon
 from .constants import (
+    CACHE_CATEGORY_PREV_STATE,
     CONF_ENTRY_DISPLAY,
     CONF_ENTRY_VISUALIZATION,
     CONF_STORED_MUTED,
     CONF_STORED_VOLUME,
-    DEFAULT_PLAYER_VOLUME,
-    DEVIATION_JUMP_IGNORE,
-    MAX_SKIP_AHEAD_MS,
-    MIN_DEVIATION_ADJUST,
-    MIN_REQ_PLAYPOINTS,
+    REPEATMODE_BY_LMS_VALUE,
     REPEATMODE_MAP,
     STATE_MAP,
-    SyncPlayPoint,
 )
-from .multi_client_stream import MultiClientStream
 
 if TYPE_CHECKING:
     from aioslimproto.client import SlimClient
+    from aioslimproto.models import MediaMetadata
     from music_assistant_models.media_items import AudioFormat
+    from music_assistant_models.player_queue import PlayerQueue
 
     from .provider import SqueezelitePlayerProvider
+    from .sendspin_bridge import SendspinSqueezeliteBridge
 
 
-CACHE_CATEGORY_PREV_STATE = (
-    1  # category for caching previous player state (bumped to invalidate old format)
-)
+# Device models of the LMS bridge tools that expose AirPlay/Chromecast/UPnP devices as
+# squeezelite players.
+BRIDGE_TOOL_MODELS = ("raopbridge", "castbridge", "upnpbridge")
 
 # icon_id prefix per media type, as the server's icon route expects (see
 # browselibrary._fetch_real_item_art); albums use the bare id.
@@ -87,12 +75,10 @@ PROTOCOL_ONLY_MODELS = (
     # Device models where slimproto is only a secondary protocol on a device with
     # its own (native) identity: WiiM/LinkPlay devices (ModelName=WiiM Player) and
     # the LMS bridge tools that expose AirPlay/Chromecast/UPnP devices as
-    # squeezelite players. These register as PlayerType.PROTOCOL and get linked
-    # to the device's visible player.
+    # squeezelite players. These attach as an audio protocol to the player of
+    # the device.
     "wiim",
-    "raopbridge",
-    "castbridge",
-    "upnpbridge",
+    *BRIDGE_TOOL_MODELS,
 )
 
 
@@ -102,9 +88,17 @@ def is_protocol_only_device(device_model: str) -> bool:
     return any(model.lower() in device_model_lower for model in PROTOCOL_ONLY_MODELS)
 
 
-class SqueezelitePlayer(Player):
+def is_bridge_tool(device_model: str) -> bool:
+    """Return True if the device is an LMS bridge tool for a device of another protocol."""
+    device_model_lower = device_model.lower()
+    return any(model in device_model_lower for model in BRIDGE_TOOL_MODELS)
+
+
+class SqueezelitePlayer(PlayerProtocol):
     """Squeezelite Player implementation."""
 
+    # the Sendspin bridge of this player while it has one, set by that bridge
+    sendspin_bridge: SendspinSqueezeliteBridge | None = None
     # set once the saved power state has been restored: the state a player starts with is not a
     # choice made by the user, so it is not saved
     _power_tracking: bool = False
@@ -120,32 +114,29 @@ class SqueezelitePlayer(Player):
     def __init__(
         self,
         provider: SqueezelitePlayerProvider,
-        player_id: str,
+        protocol_id: str,
         client: SlimClient,
     ) -> None:
         """Initialize the Squeezelite Player."""
-        super().__init__(provider, player_id)
+        super().__init__(provider, protocol_id)
         self.client = client
         self._provider: SqueezelitePlayerProvider = provider
         # Set static player attributes
         self._attr_supported_features = {
             PlayerFeature.PLAY_MEDIA,
-            PlayerFeature.SET_MEMBERS,
             PlayerFeature.MULTI_DEVICE_DSP,
             PlayerFeature.VOLUME_SET,
             PlayerFeature.PAUSE,
             PlayerFeature.ENQUEUE,
             PlayerFeature.GAPLESS_PLAYBACK,
         }
-        # Protocol players are powered on/off with the stream and expose no power
+        # Audio protocols are powered on/off with the stream and expose no power
         # control; full players get native power support (slimproto power can e.g.
         # drive a GPIO/script wired to an amplifier).
         if is_protocol_only_device(client.device_model):
-            self._attr_type = PlayerType.PROTOCOL
+            self._attr_role = ProtocolRole.AUDIO
         else:
-            self._attr_type = PlayerType.PLAYER
             self._attr_supported_features.add(PlayerFeature.POWER)
-        self._attr_can_group_with = {provider.instance_id}
         max_sr = int(self.client.max_sample_rate)
         self._attr_supported_sample_rates = [
             (sr, bd)
@@ -153,57 +144,66 @@ class SqueezelitePlayer(Player):
             if sr <= max_sr
             for bd in (16, 24)
         ]
-        self.multi_client_stream: MultiClientStream | None = None
-        self._sync_playpoints: deque[SyncPlayPoint] = deque(maxlen=MIN_REQ_PLAYPOINTS)
-        self._do_not_resync_before: float = 0.0
 
     async def on_config_updated(self) -> None:
         """Handle logic when the PlayerConfig is first loaded or updated."""
         # set presets and display
         await self._set_preset_items()
         await self._set_display()
+        # not awaited: the attach of this protocol does not wait for its Sendspin bridge
+        self.mass.create_task(evaluate_bridge_of(self.mass, self.protocol_id))
+
+    def on_player_media_updated(self) -> None:
+        """Handle callback when the current media of the player is updated."""
+        if (bridge := self.sendspin_bridge) is not None:
+            # the stream of the bridge plays on from track to track
+            bridge.update_now_playing()
+        if queue := self._active_queue():
+            self._report_repeat_shuffle(queue)
+
+    def on_queue_updated(self, queue_id: str) -> None:
+        """
+        Report repeat and shuffle to the client when the queue the player plays changes.
+
+        :param queue_id: The id of the queue that changed.
+        """
+        if (queue := self._active_queue()) and queue.queue_id == queue_id:
+            self._report_repeat_shuffle(queue)
+
+    async def on_remove(self) -> None:
+        """Handle logic when the protocol is removed for good."""
+        await self._provider.bridge_manager.remove_bridge(self.protocol_id, permanent=True)
 
     async def setup(self) -> None:
-        """Set up the player."""
-        player_id = self.client.player_id
+        """Set up the player and register it."""
+        protocol_id = self.client.player_id
         self._volume_tracking = False
-        self.logger.info("Player %s connected", self.client.name or player_id)
+        self.logger.info("Player %s connected", self.client.name or protocol_id)
         # update all dynamic attributes
         self.update_attributes()
-        # restore volume state from the player config; the (expiring) cache entry only covers
-        # values stored by older versions
-        stored_volume = self.mass.config.get_raw_player_config_value(player_id, CONF_STORED_VOLUME)
-        init_muted = False
-        init_volume = DEFAULT_PLAYER_VOLUME
-        if stored_volume is None and (
-            last_state := await self.mass.cache.get(
-                key=player_id,
-                provider=self.provider.instance_id,
-                category=CACHE_CATEGORY_PREV_STATE,
-            )
-        ):
-            init_muted = bool(last_state[0])
-            init_volume = int(last_state[1])
-        if stored_volume is not None:
-            init_volume = int(cast("int", stored_volume))
-            init_muted = bool(
-                self.mass.config.get_raw_player_config_value(player_id, CONF_STORED_MUTED, False)
-            )
+        # its volume was restored on connect, by the provider's _get_initial_volume; the mute is
+        # restored here, as the volume set to 0 (see volume_mute)
+        stored_volume = self.mass.config.get_protocol_value(protocol_id, CONF_STORED_VOLUME)
+        init_muted = stored_volume is not None and bool(
+            self.mass.config.get_protocol_value(protocol_id, CONF_STORED_MUTED, False)
+        )
         await self.client.stop()
-        # the audio output must be on whatever the saved mute is, as it is muted with the volume
-        await self.client.mute(False)
+        # the audio output must be on whatever the saved mute is, as it is muted with the volume;
+        # nothing else is sent, as a WiiM keeps the first of two quick volume commands
+        if self.client.muted:
+            await self.client.mute(False)
         if init_muted:
-            self._muted_volume = init_volume
+            self._muted_volume = self.client.volume_level
             await self.client.volume_set(0)
-        else:
-            await self.client.volume_set(init_volume)
+        await self.mass.players.register(self)
         if stored_volume is None:
-            # carries the volume of the legacy cache entry over before that entry expires
+            # carries a volume from the legacy cache over before that entry expires; only after
+            # the attach, which creates the record of a new protocol
             self._save_volume_state()
         else:
             # what was restored is the saved state, so only a later change is saved
-            self._saved_volume_state = (init_volume, bool(init_muted))
-        await self.mass.players.register_or_update(self)
+            volume = self._muted_volume if init_muted else self.client.volume_level
+            self._saved_volume_state = (cast("int", volume), init_muted)
         self._volume_tracking = True
         await self._restore_power()
 
@@ -237,7 +237,7 @@ class SqueezelitePlayer(Player):
             CONF_ENTRY_VISUALIZATION,
             CONF_ENTRY_PREFER_WAV_FOR_LIVE_SOURCES_DEFAULT_ENABLED,
             haextras.CONFIG_ENTRY,  # HA-EXTRAS
-            await browseuser.config_entry(self.mass, self.player_id),
+            await browseuser.config_entry(self.mass, self.protocol_id),
         ]
 
     async def volume_set(self, volume_level: int) -> None:
@@ -268,146 +268,56 @@ class SqueezelitePlayer(Player):
 
     async def power(self, powered: bool) -> None:
         """Handle POWER command on the player."""
-        async with TaskManager(self.mass) as tg:
-            for client in self._get_sync_clients():
-                tg.create_task(client.power(powered))
+        await self.client.power(powered)
 
     async def stop(self) -> None:
         """Handle STOP command on the player."""
-        # Clean up any existing multi-client stream
-        if self.multi_client_stream is not None:
-            await self.multi_client_stream.stop()
-            self.multi_client_stream = None
-        async with TaskManager(self.mass) as tg:
-            for client in self._get_sync_clients():
-                if self.type == PlayerType.PROTOCOL:
-                    tg.create_task(client.power(False))
-                else:
-                    tg.create_task(client.stop())
+        if (bridge := self.sendspin_bridge) is not None:
+            # a stream of the Sendspin bridge ends with the stop below
+            bridge.stop_streaming()
+        if self.role == ProtocolRole.AUDIO:
+            await self.client.power(False)
+        else:
+            await self.client.stop()
         self.update_state()
 
     async def play(self) -> None:
         """Handle PLAY command on the player."""
-        async with TaskManager(self.mass) as tg:
-            for client in self._get_sync_clients():
-                tg.create_task(client.play())
+        await self.client.play()
 
     async def pause(self) -> None:
         """Handle PAUSE command on the player."""
-        async with TaskManager(self.mass) as tg:
-            for client in self._get_sync_clients():
-                tg.create_task(client.pause())
+        await self.client.pause()
 
     async def play_media(self, media: PlayerMedia) -> None:
         """Handle PLAY MEDIA on the player."""
-        if self.synced_to:
-            msg = "A synced player cannot receive play commands directly"
-            raise InvalidCommand(msg)
-
         # don't report the old stream's position until the new stream's first heartbeat
         self._attr_elapsed_time = 0
         self._attr_elapsed_time_last_updated = time.time()
 
-        # Protocol players are powered off on stop(), so power them (and every sync
-        # client, as stop() does) back on when playback starts; otherwise the device
-        # stays silent.
-        if self.type == PlayerType.PROTOCOL:
-
-            async def _power_on(client: SlimClient) -> None:
-                await client.power(True)
-
-            async with TaskManager(self.mass) as tg:
-                for client in self._get_sync_clients():
-                    tg.create_task(_power_on(client))
-
-        # Clean up any existing multi-client stream before starting a new one
-        if self.multi_client_stream is not None:
-            await self.multi_client_stream.stop()
-            self.multi_client_stream = None
+        # a Sendspin bridge that plays on the player gives it back: the new stream
+        # replaces the stream of that bridge
+        if (bridge := self.sendspin_bridge) is not None:
+            bridge.stop_streaming()
 
         # Clear next media item during announcements to prevent playing the
         # next enqueued track after it finishes.
         if media.media_type == MediaType.ANNOUNCEMENT:
             self.client._next_media = None
 
-        if not self.group_members:
-            # Simple, single-player playback
-            stream_url = await self.provider.mass.streams.resolve_stream_url(self.player_id, media)
-            await self._handle_play_url_for_slimplayer(
-                self.client,
-                url=stream_url,
-                media=media,
-                send_flush=True,
-                auto_play=False,
-            )
-            self._sync_elapsed_after_flush()
-            return
-
-        # this is a syncgroup; we need to handle this with a multi client stream.
-        # pick the master flow format honoring the leader's flow-mode-sample-rate
-        # setting and supported rates. anchor on the first track when its streamdetails
-        # are already resolved so smart/bit-perfect modes start at the right rate.
-        start_queue_item = (
-            self.mass.player_queues.get_item(media.source_id, media.queue_item_id)
-            if media.source_id and media.queue_item_id
-            else None
+        stream_url = await self.provider.mass.streams.resolve_stream_url(self.protocol_id, media)
+        await self._handle_play_url_for_slimplayer(
+            url=stream_url,
+            media=media,
+            send_flush=True,
+            auto_play=False,
         )
-        # crossfade is a queue-scoped setting; read it from the queue being played (source_id),
-        # which can differ from this player when playing on behalf of a group/linked queue
-        queue = self.mass.player_queues.get(media.source_id) if media.source_id else None
-        crossfade_enabled = bool(
-            queue and queue.crossfade_enabled and media.media_type == MediaType.TRACK
-        )
-        master_audio_format = await self.mass.streams.audio.select_flow_pcm_format(
-            self,
-            start_streamdetails=start_queue_item.streamdetails if start_queue_item else None,
-            crossfade_enabled=crossfade_enabled,
-            overlay_active=bool(queue and queue.overlay_enabled and queue.overlay_source),
-        )
-
-        # select audio source, we force flow mode
-        # because multi-client streaming does not support enqueueing
-        audio_source = self.mass.streams.get_stream(
-            media, master_audio_format, player_id=self.player_id, force_flow_mode=True
-        )
-
-        # start the stream task
-        self.multi_client_stream = stream = MultiClientStream(
-            audio_source=audio_source,
-            audio_format=master_audio_format,
-            queue_id=media.source_id,
-            session_id=get_media_session_id(media),
-        )
-        base_url = f"{self.mass.streams.base_url}/slimproto/multi?player_id={self.player_id}"
-
-        # Count how many clients will connect
-        expected_clients = len(list(self._get_sync_clients()))
-        stream.expected_clients = expected_clients
-
-        # forward to downstream play_media commands
-        # Per-member output_codec: classic Squeezeboxes silently fail on fixed flac in sync (#5506).
-        async with TaskManager(self.mass) as tg:
-            for slimplayer in self._get_sync_clients():
-                member_codec = self._get_member_output_codec(slimplayer.player_id, media)
-                url = f"{base_url}&fmt={member_codec}&child_player_id={slimplayer.player_id}"
-                tg.create_task(
-                    self._handle_play_url_for_slimplayer(
-                        slimplayer,
-                        url=url,
-                        media=media,
-                        send_flush=True,
-                        auto_play=False,
-                        is_group_playback=True,
-                        mime_type=get_mime_type(member_codec),
-                    )
-                )
         self._sync_elapsed_after_flush()
 
     async def enqueue_next_media(self, media: PlayerMedia) -> None:
         """Handle enqueuing next media item."""
-        stream_url = await self.provider.mass.streams.resolve_stream_url(self.player_id, media)
+        stream_url = await self.provider.mass.streams.resolve_stream_url(self.protocol_id, media)
         await self._handle_play_url_for_slimplayer(
-            self.client,
             url=stream_url,
             media=media,
             enqueue=True,
@@ -415,100 +325,42 @@ class SqueezelitePlayer(Player):
             auto_play=True,
         )
 
-    async def set_members(
-        self,
-        player_ids_to_add: list[str] | None = None,
-        player_ids_to_remove: list[str] | None = None,
-    ) -> None:
-        """Handle SET_MEMBERS command on the player."""
-        if self.synced_to:
-            # this should not happen, but guard anyways
-            raise InvalidCommand("Player is synced, cannot set members")
-        if not player_ids_to_add and not player_ids_to_remove:
-            # nothing to do
-            return
-
-        # handle removals first
-        if player_ids_to_remove:
-            for sync_client in self._get_sync_clients():
-                if sync_client.player_id in player_ids_to_remove:
-                    if sync_client.player_id in self._attr_group_members:
-                        # remove child from the group
-                        self._attr_group_members.remove(sync_client.player_id)
-                        if sync_client.state != SlimPlayerState.STOPPED:
-                            # stop the player if it is playing
-                            await sync_client.stop()
-            # if no children remain, remove ourselves from the list too
-            remaining = [x for x in self._attr_group_members if x != self.player_id]
-            if not remaining:
-                self._attr_group_members.clear()
-
-        # handle additions
-        players_added = False
-        for player_id in player_ids_to_add or []:
-            if player_id == self.player_id or player_id in self.group_members:
-                # nothing to do: player is already part of the group
-                continue
-            child_player = cast("SqueezelitePlayer | None", self.mass.players.get_player(player_id))
-            if not child_player:
-                # should not happen, but guard against it
-                continue
-            if child_player.state != SlimPlayerState.STOPPED:
-                # stop the player if it is already playing something else
-                await child_player.stop()
-            self._attr_group_members.append(player_id)
-            players_added = True
-        # ensure the sync leader (self) is the first item in group_members
-        if self._attr_group_members and self.player_id not in self._attr_group_members:
-            self._attr_group_members.insert(0, self.player_id)
-
-        # always update the state after modifying group members
-        self.update_state()
-
-        if (
-            (players_added or player_ids_to_remove)
-            and self.state.current_media
-            and self._attr_playback_state == PlaybackState.PLAYING
-        ):
-            # restart stream session if it was already playing
-            # for now, we dont support late joining into an existing stream
-            # a back-to-back restart reads the position of the one before it, so the newest wins
-            self.mass.create_task(
-                self.mass.players.cmd_resume(self.player_id),
-                task_id=f"squeezelite_regroup_resume_{self.player_id}",
-                abort_existing=True,
-            )
-
-    def remove_disconnected_member(self, player_id: str) -> None:
+    def release_native_playback(self) -> None:
         """
-        Remove a group member whose slimproto connection dropped.
+        End what this protocol plays itself, for a stream that takes the player over.
 
-        :param player_id: The player id of the disconnected member.
+        The protocol reports no position of its own anymore. The stream on the player
+        itself is left to the one taking over.
         """
-        if player_id not in self._attr_group_members:
-            return
-        self._attr_group_members.remove(player_id)
-        if self._attr_group_members == [self.player_id]:
-            self._attr_group_members.clear()
-        self.update_state()
+        self._attr_elapsed_time = 0
+        self._attr_elapsed_time_last_updated = time.time()
 
     def handle_slim_event(self, event: SlimEvent) -> None:
         """Handle player event from slimproto server."""
         if event.type == SlimEventType.PLAYER_BUFFER_READY:
-            self.mass.create_task(self._handle_buffer_ready())
+            # the Sendspin bridge starts its own stream, at the instant of its timeline
+            if not self._plays_for_bridge:
+                self.mass.create_task(self.client.unpause_at(self.client.jiffies))
             return
 
         if event.type == SlimEventType.PLAYER_HEARTBEAT:
-            self._handle_player_heartbeat()
+            # the position of the stream of the Sendspin bridge is not one of this protocol
+            if not self._plays_for_bridge:
+                self._handle_player_heartbeat()
             return
 
-        if event.type in (SlimEventType.PLAYER_BTN_EVENT, SlimEventType.PLAYER_CLI_EVENT):
+        if event.type == SlimEventType.PLAYER_BTN_EVENT:
+            self.mass.create_task(self._handle_player_button_event(event))
+            return
+
+        if event.type == SlimEventType.PLAYER_CLI_EVENT:
             self.mass.create_task(self._handle_player_cli_event(event))
             return
 
         # all other: update attributes and update state
         self.update_attributes()
         self.update_state()
+        self._report_delivered_format()
 
     def update_attributes(self) -> None:
         """Update player attributes from slim player."""
@@ -539,6 +391,9 @@ class SqueezelitePlayer(Player):
         self._attr_device_info.add_identifier(IdentifierType.IP_ADDRESS, self.client.device_address)
         # player_id is the MAC address in slimproto
         self._attr_device_info.add_identifier(IdentifierType.MAC_ADDRESS, self.client.player_id)
+        # several squeezelite instances on one host share its IP (and possibly its MAC), and
+        # each tells its own slimproto id: that id keeps the instances apart
+        self._attr_device_info.add_identifier(IdentifierType.UUID, self.client.player_id)
         if (
             old_state != PlaybackState.PLAYING
             and self._attr_playback_state == PlaybackState.PLAYING
@@ -555,74 +410,51 @@ class SqueezelitePlayer(Player):
                 artist=metadata.get("artist"),
                 image_url=metadata.get("image_url"),
                 duration=metadata.get("duration"),
-                source_id=metadata.get("source_id"),
-                queue_item_id=metadata.get("queue_item_id"),
+                source_id=cast("str | None", metadata.get("source_id")),
+                queue_item_id=cast("str | None", metadata.get("queue_item_id")),
             )
         else:
+            self._attr_current_media = None
+        if self._plays_for_bridge:
+            # the stream of the Sendspin bridge is no media of this protocol
             self._attr_current_media = None
 
     async def _handle_play_url_for_slimplayer(
         self,
-        slimplayer: SlimClient,
         url: str,
         media: PlayerMedia,
         enqueue: bool = False,
         send_flush: bool = True,
         auto_play: bool = False,
-        is_group_playback: bool = False,
-        mime_type: str | None = None,
     ) -> None:
-        """Handle playback of an url on slimproto player(s)."""
-        if mime_type is None:
-            # derive from the url extension (only reliable for plain file urls; sync
-            # group member urls have no extension, so callers pass the codec mime)
-            mime_type = get_mime_type(url.rsplit(".", maxsplit=1)[-1].split("?", maxsplit=1)[0])
-        # Look up the queue item to get its real audio format (same lookup as
-        # start_queue_item in play_media). The quality fields are re-checked
-        # shortly after playback starts, see below.
-        queue_item = (
-            self.mass.player_queues.get_item(media.source_id, media.queue_item_id)
-            if media.source_id and media.queue_item_id
-            else None
+        """Handle playback of an url on the slimproto player."""
+        mime_type = get_mime_type(url.rsplit(".", maxsplit=1)[-1].split("?", maxsplit=1)[0])
+        # The codec and bitrate for Now Playing come from the queue item's stream details; they
+        # are re-checked shortly after playback starts, see below. The sample rate and size are
+        # added by _report_delivered_format once the player fetched the stream.
+        quality_fields = self._build_quality_metadata_fields(self._queue_item_audio_format(media))
+        # MediaMetadata has no source and queue item ids; they ride along so
+        # current_media can be restored from the client
+        metadata = cast(
+            "MediaMetadata",
+            {
+                "item_id": media.uri,
+                "title": media.title,
+                "album": media.album,
+                "artist": media.artist,
+                "image_url": media.image_url,
+                # the whole track's length: the position reported to the client is the one in
+                # the track (the provider's elapsed lookup), also after a seek, when the stream
+                # holds only the part that is left
+                "duration": (
+                    media.duration if media.duration is not None else served_duration(media, url)
+                ),
+                "source_id": media.source_id,
+                "queue_item_id": media.queue_item_id,
+                **quality_fields,
+            },
         )
-        audio_format = None
-        if queue_item and queue_item.streamdetails:
-            # prefer the format MA actually sends (decoded, when it transcoded) over
-            # the source file's own, as that is what plays
-            audio_format = (
-                queue_item.streamdetails.decoded_audio_format
-                or queue_item.streamdetails.audio_format
-            )
-        quality_fields = self._build_quality_metadata_fields(audio_format)
-        # "duration" is the real track length, not media.stream_duration, which shrinks
-        # after a seek on transports whose stream restarts at position zero.
-        # "elapsed_offset" (declared on aioslimproto's MediaMetadata) is how far into the track
-        # this stream's position 0 is; cli.py adds it to the stream-relative position it reports.
-        real_duration = (
-            media.duration if media.duration is not None else (media.stream_duration or 0)
-        )
-        elapsed_offset = (
-            max(0, media.duration - media.stream_duration)
-            if media.duration is not None and media.stream_duration is not None
-            else 0
-        )
-        metadata = {
-            "item_id": media.uri,
-            "title": media.title,
-            "album": media.album,
-            "artist": media.artist,
-            "image_url": media.image_url,
-            "duration": real_duration,
-            "elapsed_offset": elapsed_offset,
-            "source_id": media.source_id,
-            "queue_item_id": media.queue_item_id,
-            "samplerate": str(audio_format.sample_rate) if audio_format else "",
-            **quality_fields,
-        }
-        queue = None
-        if media.source_id and (queue := self.mass.player_queues.get(media.source_id)):
-            self.extra_data["playlist repeat"] = REPEATMODE_MAP[queue.repeat_mode]
-            self.extra_data["playlist shuffle"] = int(queue.shuffle_enabled)
+        queue = self.mass.player_queues.get(media.source_id) if media.source_id else None
         # live streams and announcements start on a smaller buffer (KB, tenths of a second) to cut
         # latency; a short announcement would never fill the default 2 second output buffer
         low_latency_stream = media.media_type in (
@@ -631,16 +463,7 @@ class SqueezelitePlayer(Player):
             MediaType.ANNOUNCEMENT,
         )
         stream_threshold, output_threshold = (64, 1) if low_latency_stream else (200, 20)
-        if send_flush and not enqueue:
-            # The position of the flushed stream no longer applies. Music Assistant adds the new
-            # stream's offset to the player's position, so the old one would show up in the queue
-            # as a jump forward until the new stream starts and the player reports again.
-            target = self.mass.players.get_player(slimplayer.player_id)
-            if isinstance(target, SqueezelitePlayer):
-                target._attr_elapsed_time = 0
-                target._attr_elapsed_time_last_updated = time.time()
-                target.update_state()
-        await slimplayer.play_url(
+        await self.client.play_url(
             url=url,
             mime_type=mime_type,
             metadata=metadata,
@@ -648,17 +471,10 @@ class SqueezelitePlayer(Player):
             send_flush=send_flush,
             # if autoplay=False playback will not start automatically
             # instead 'buffer ready' will be called when the buffer is full
-            # to coordinate a start of multiple synced players
             autostart=auto_play,
             stream_threshold=stream_threshold,
             output_threshold=output_threshold,
         )
-        # TODO: When we implement server clock sync, we can remove the pause here
-        # and rely on unpause_at + HEADROOM in the buffer_ready handler. LMS
-        # also does NOT use an explicit pause. For now, we pause here to avoid
-        # WiiM devices starting playback too early, causing huge initial drift.
-        if is_group_playback:
-            await slimplayer.pause()
         # if queue is set to single track repeat,
         # immediately set this track as the next
         # this prevents race conditions with super short audio clips (on single repeat)
@@ -666,7 +482,7 @@ class SqueezelitePlayer(Player):
         if queue and queue.repeat_mode == RepeatMode.ONE:
             self.mass.call_later(
                 0.2,
-                slimplayer.play_url(
+                self.client.play_url(
                     url=url,
                     mime_type=mime_type,
                     metadata=metadata,
@@ -681,10 +497,25 @@ class SqueezelitePlayer(Player):
         # queue_item/audio_format may not be resolvable yet when the metadata above is built, so re-
         # check at increasing intervals; each is a no-op if nothing changed or the track changed.
         for delay in (1.0, 3.0, 6.0):
-            self.mass.call_later(delay, self._recheck_quality_metadata(slimplayer, media))
+            self.mass.call_later(delay, self._recheck_quality_metadata(media))
+
+    def _queue_item_audio_format(self, media: PlayerMedia) -> AudioFormat | None:
+        """Return the audio format of the queue item of the media, None if not known yet."""
+        queue_item = (
+            self.mass.player_queues.get_item(media.source_id, media.queue_item_id)
+            if media.source_id and media.queue_item_id
+            else None
+        )
+        if not queue_item or not queue_item.streamdetails:
+            return None
+        # prefer the format MA actually sends (decoded, when it transcoded) over the source
+        # file's own, as that is what plays
+        return (
+            queue_item.streamdetails.decoded_audio_format or queue_item.streamdetails.audio_format
+        )
 
     def _build_quality_metadata_fields(self, audio_format: AudioFormat | None) -> dict[str, str]:
-        """Build the "type"/"bitrate"/"samplesize" Now Playing fields from an AudioFormat."""
+        """Build the "type"/"bitrate" Now Playing fields from an AudioFormat."""
         return {
             # plain codec name (e.g. "mp3"), which is the ContentType value
             "type": str(audio_format.content_type) if audio_format else "",
@@ -694,49 +525,25 @@ class SqueezelitePlayer(Player):
             "bitrate": f"{audio_format.bit_rate}kbps"
             if audio_format and audio_format.bit_rate
             else "",
-            # samplesize only for lossless content: LMS omits it for lossy formats, while
-            # AudioFormat.bit_depth always has a value (default 16).
-            "samplesize": (
-                str(audio_format.bit_depth)
-                if audio_format and audio_format.content_type.is_lossless()
-                else ""
-            ),
         }
 
-    async def _recheck_quality_metadata(self, slimplayer: SlimClient, media: PlayerMedia) -> None:
+    async def _recheck_quality_metadata(self, media: PlayerMedia) -> None:
         """
-        Re-check and, if needed, correct the Now Playing quality fields after the fact.
+        Re-check and, if needed, correct the Now Playing codec and bitrate after the fact.
 
-        Updates the metadata in place and signals an update, without restarting playback.
-
-        :param slimplayer: The player.
         :param media: The media being played.
         """
         # queue_item/audio_format may not be resolvable yet when playback starts (see the re-checks
         # scheduled in _handle_play_url_for_slimplayer).
-        current_media = slimplayer.current_media
+        current_media = self.client.current_media
         # only touch it if it is still the track this was scheduled for
         if not current_media or current_media.metadata.get("queue_item_id") != media.queue_item_id:
             return
-        queue_item = (
-            self.mass.player_queues.get_item(media.source_id, media.queue_item_id)
-            if media.source_id and media.queue_item_id
-            else None
-        )
-        audio_format = None
-        if queue_item and queue_item.streamdetails:
-            audio_format = (
-                queue_item.streamdetails.decoded_audio_format
-                or queue_item.streamdetails.audio_format
-            )
-        quality_fields = self._build_quality_metadata_fields(audio_format)
-        quality_fields["samplerate"] = str(audio_format.sample_rate) if audio_format else ""
-        if any(
-            quality_fields[key] and quality_fields[key] != current_media.metadata.get(key)
-            for key in quality_fields
-        ):
-            current_media.metadata.update(quality_fields)
-            slimplayer.signal_update()
+        quality_fields = self._build_quality_metadata_fields(self._queue_item_audio_format(media))
+        metadata = current_media.metadata
+        if any(value and value != metadata.get(key) for key, value in quality_fields.items()):
+            # the update replaces all metadata of the stream
+            await self.client.update_metadata(cast("MediaMetadata", {**metadata, **quality_fields}))
 
     def _handle_player_heartbeat(self) -> None:
         """Process SlimClient elapsed_time update."""
@@ -748,51 +555,12 @@ class SqueezelitePlayer(Player):
         self._attr_elapsed_time = self.client.elapsed_seconds
         self._attr_elapsed_time_last_updated = time.time()
         # only involve the state machine when the reported position diverged (e.g. buffering/seek)
-        published_position = self.state.corrected_elapsed_time
+        published_position = self.player.corrected_elapsed_time if self.player is not None else None
         if (
             published_position is None
             or abs(published_position - self.client.elapsed_seconds) > POSITION_JUMP_THRESHOLD
         ):
             self.update_state()
-
-        # handle sync
-        if self.synced_to:
-            self._handle_sync()
-
-    async def _handle_buffer_ready(self) -> None:
-        """
-        Handle buffer ready event, player has buffered a (new) track.
-
-        Only used when autoplay=0 for coordinated start of synced players.
-        """
-        if self.synced_to:
-            # unpause of sync child is handled by sync master
-            return
-        if not self.group_members:
-            # not a sync group, continue
-            await self.client.unpause_at(self.client.jiffies)
-            return
-        count = 0
-        while count < 40:
-            childs_total = 0
-            childs_ready = 0
-            await asyncio.sleep(0.2)
-            for sync_child in self._get_sync_clients():
-                childs_total += 1
-                if sync_child.state == SlimPlayerState.BUFFER_READY:
-                    childs_ready += 1
-            if childs_total == childs_ready:
-                break
-            count += 1
-
-        # all child's ready (or timeout) - start play
-        async with TaskManager(self.mass) as tg:
-            for sync_child in self._get_sync_clients():
-                # NOTE: Officially you should do an unpause_at based on the player timestamp
-                # but I did not have any good results with that.
-                # Instead just start playback on all players and let the sync logic work out
-                # the delays etc.
-                tg.create_task(pause_and_unpause(sync_child, 200))
 
     async def _handle_player_cli_event(self, event: SlimEvent) -> None:
         """Process CLI Event."""
@@ -801,8 +569,7 @@ class SqueezelitePlayer(Player):
         # event data is str, not dict
         # TODO: fix this in the aioslimproto lib
         event_data = cast("str", event.data)
-        queue = self.mass.player_queues.get_active_queue(self.player_id)
-        if not queue:
+        if not (queue := self._active_queue()):
             return
         if event_data.startswith("button preset_") and event_data.endswith(".single"):
             preset_id = event_data.split("preset_")[1].split(".")[0]
@@ -810,8 +577,13 @@ class SqueezelitePlayer(Player):
             if len(self.client.presets) >= preset_index + 1:
                 preset = self.client.presets[preset_index]
                 await self.mass.player_queues.play_media(queue.queue_id, preset.uri)
-        elif event_data == "button repeat":
-            if queue.repeat_mode == RepeatMode.OFF:
+        elif event_data == "button repeat" or event_data.startswith("playlist repeat"):
+            # a client such as a WiiM sends the mode it wants as its LMS number; a button,
+            # or a request without a number, cycles through the modes
+            lms_value = event_data.removeprefix("playlist repeat ")
+            if lms_value in REPEATMODE_BY_LMS_VALUE:
+                repeat_mode = REPEATMODE_BY_LMS_VALUE[lms_value]
+            elif queue.repeat_mode == RepeatMode.OFF:
                 repeat_mode = RepeatMode.ONE
             elif queue.repeat_mode == RepeatMode.ONE:
                 repeat_mode = RepeatMode.ALL
@@ -822,8 +594,13 @@ class SqueezelitePlayer(Player):
             # updates once the session's options echo lands
             self.client.extra_data["playlist repeat"] = REPEATMODE_MAP[repeat_mode]
             self.client.signal_update()
-        elif event.data == "button shuffle":
-            shuffle_enabled = not queue.shuffle_enabled
+        elif event_data == "button shuffle" or event_data.startswith("playlist shuffle"):
+            lms_value = event_data.removeprefix("playlist shuffle ")
+            # LMS shuffles by track (1) or by album (2); without a number it toggles
+            if lms_value in ("0", "1", "2"):
+                shuffle_enabled = lms_value != "0"
+            else:
+                shuffle_enabled = not queue.shuffle_enabled
             await self.mass.player_queues.set_shuffle(queue.queue_id, shuffle_enabled)
             self.client.extra_data["playlist shuffle"] = int(shuffle_enabled)
             self.client.signal_update()
@@ -838,90 +615,79 @@ class SqueezelitePlayer(Player):
                 await self.mass.player_queues.seek(queue.queue_id, int(param))
         self.logger.log(VERBOSE_LOG_LEVEL, "CLI Event: %s", event_data)
 
-    def _handle_sync(self) -> None:
-        """Synchronize audio of a sync slimplayer."""
-        sync_master_id = self.synced_to
-        if not sync_master_id:
-            # we only correct sync members, not the sync master itself
+    async def _handle_player_button_event(self, event: SlimEvent) -> None:
+        """
+        Handle a button or remote key of the device that aioslimproto passed on.
+
+        aioslimproto passes play and pause on when the device can not act on them itself,
+        such as on a stopped device: play starts playback on the player and pause toggles
+        it, which reaches the group that owns its playback. Other buttons are ignored.
+
+        :param event: The button event of the device.
+        """
+        match event.data:
+            case {"type": "butn", "button": ButtonCode.PLAY} | {
+                "type": "ir",
+                "code": RemoteCode.PLAY,
+            }:
+                command = self.mass.players.cmd_play
+            case {"type": "butn", "button": ButtonCode.PAUSE} | {
+                "type": "ir",
+                "code": RemoteCode.PAUSE,
+            }:
+                command = self.mass.players.cmd_play_pause
+            case _:
+                return
+        if self.player is None:
             return
-        if not self._provider.slimproto or not (
-            sync_master := self._provider.slimproto.get_player(sync_master_id)
-        ):
-            return  # just here as a guard as bad things can happen
+        bridge = self.sendspin_bridge
+        player_id = (bridge.transport_command_target() if bridge else None) or self.player.player_id
+        try:
+            await command(player_id)
+        except MusicAssistantError as err:
+            self.logger.warning(
+                "Failed to handle the play or pause button of %s: %s", self.display_name, err
+            )
 
-        if sync_master.state != SlimPlayerState.PLAYING:
-            return
-        if self.client.state != SlimPlayerState.PLAYING:
-            return
+    def _active_queue(self) -> PlayerQueue | None:
+        """Return the queue the player plays and its buttons act on."""
+        if self.player is None:
+            return None
+        # while the player plays for its Sendspin bridge, that is the queue of the player
+        # that leads its Sendspin group
+        bridge = self.sendspin_bridge
+        player_id = (bridge.transport_command_target() if bridge else None) or self.player.player_id
+        return self.mass.player_queues.get_active_queue(player_id)
 
-        # we collect a few playpoints of the player to determine
-        # average lag/drift so we can adjust accordingly
-        sync_playpoints = self._sync_playpoints
-
-        now = time.time()
-        if now < self._do_not_resync_before:
-            return
-
-        last_playpoint = sync_playpoints[-1] if sync_playpoints else None
-        if last_playpoint and (now - last_playpoint.timestamp) > 10:
-            # last playpoint is too old, invalidate
-            sync_playpoints.clear()
-        if last_playpoint and last_playpoint.sync_master != sync_master.player_id:
-            # this should not happen, but just in case
-            sync_playpoints.clear()
-
-        diff = int(
-            self._provider.get_corrected_elapsed_milliseconds(sync_master)
-            - self._provider.get_corrected_elapsed_milliseconds(self.client)
-        )
-
-        sync_playpoints.append(SyncPlayPoint(now, sync_master.player_id, diff))
-
-        # ignore unexpected spikes
+    def _report_repeat_shuffle(self, queue: PlayerQueue) -> None:
+        """Report repeat and shuffle of a queue in the status the client polls or is pushed."""
+        repeat = REPEATMODE_MAP[queue.repeat_mode]
+        shuffle = int(queue.shuffle_enabled)
+        extra_data = self.client.extra_data
         if (
-            sync_playpoints
-            and abs(statistics.fmean(abs(x.diff) for x in sync_playpoints) - abs(diff))
-            > DEVIATION_JUMP_IGNORE
+            extra_data.get("playlist repeat") == repeat
+            and extra_data.get("playlist shuffle") == shuffle
         ):
             return
+        extra_data["playlist repeat"] = repeat
+        extra_data["playlist shuffle"] = shuffle
+        self.client.signal_update()
 
-        min_req_playpoints = 2 if sync_master.elapsed_seconds < 2 else MIN_REQ_PLAYPOINTS
-        if len(sync_playpoints) < min_req_playpoints:
-            return
-
-        # get the average diff
-        avg_diff = statistics.fmean(x.diff for x in sync_playpoints)
-        delta = int(abs(avg_diff))
-
-        if delta < MIN_DEVIATION_ADJUST:
-            return
-
-        # resync the player by skipping ahead or pause for x amount of (milli)seconds
-        sync_playpoints.clear()
-        self._do_not_resync_before = now + 5
-        if avg_diff > MAX_SKIP_AHEAD_MS:
-            # player lagging behind more than MAX_SKIP_AHEAD_MS,
-            # we need to correct the sync_master
-            self.logger.debug("%s resync: pauseFor %sms", sync_master.name, delta)
-            self.mass.create_task(pause_and_unpause(sync_master, delta))
-        elif avg_diff > 0:
-            # handle player lagging behind, fix with skip_ahead
-            self.logger.debug("%s resync: skipAhead %sms", self.display_name, delta)
-            self.mass.create_task(self.client.skip_over(delta))
-        else:
-            # handle player is drifting too far ahead, use pause_for to adjust
-            self.logger.debug("%s resync: pauseFor %sms", self.display_name, delta)
-            self.mass.create_task(pause_and_unpause(self.client, delta))
+    @property
+    def _plays_for_bridge(self) -> bool:
+        """Return whether the stream on the player is that of its Sendspin bridge."""
+        return (bridge := self.sendspin_bridge) is not None and bridge.owns_stream
 
     async def _set_preset_items(self) -> None:
         """Set the presets for a player."""
         preset_items: list[SlimPreset] = []
         for preset_index in range(1, 11):
-            if preset_conf := self.mass.config.get_raw_player_config_value(
-                self.player_id, f"preset_{preset_index}"
+            if preset_conf := self.mass.config.get_protocol_value(
+                self.protocol_id, f"preset_{preset_index}"
             ):
                 try:
-                    media_item = await self.mass.music.get_item_by_uri(cast("str", preset_conf))
+                    preset_uri = cast("str", preset_conf)
+                    media_item = await self.mass.music.get_item_by_uri(preset_uri)
                     # A local identifier that the server's icon route resolves to art. The
                     # client must never be handed a raw image URL (it asks the server for an
                     # /imageproxy/ path that does not exist). Other kinds of item (a track, a
@@ -934,7 +700,7 @@ class SqueezelitePlayer(Player):
                     )
                     preset_items.append(
                         SlimPreset(
-                            uri=media_item.uri,
+                            uri=media_item.uri or preset_uri,
                             text=media_item.name,
                             icon=cover_icon(art_ref) if art_ref else "",
                         )
@@ -954,41 +720,18 @@ class SqueezelitePlayer(Player):
 
     async def _set_display(self) -> None:
         """Set the display config for a player."""
-        display_enabled = self.mass.config.get_raw_player_config_value(
-            self.player_id,
+        display_enabled = self.mass.config.get_protocol_value(
+            self.protocol_id,
             CONF_ENTRY_DISPLAY.key,
             CONF_ENTRY_DISPLAY.default_value,
         )
-        visualization = self.mass.config.get_raw_player_config_value(
-            self.player_id,
+        visualization = self.mass.config.get_protocol_value(
+            self.protocol_id,
             CONF_ENTRY_VISUALIZATION.key,
             CONF_ENTRY_VISUALIZATION.default_value,
         )
         await self.client.configure_display(
             visualisation=SlimVisualisationType(visualization), disabled=not display_enabled
-        )
-
-    def _get_sync_clients(self) -> Iterator[SlimClient]:
-        """Get all sync clients for a player."""
-        yield self.client
-        for member_id in self.group_members:
-            if member_id == self.player_id:  # ← Skip if it's the leader itself
-                continue
-            if self._provider.slimproto and (
-                slimplayer := self._provider.slimproto.get_player(member_id)
-            ):
-                yield slimplayer
-
-    def _get_member_output_codec(self, member_player_id: str, media: PlayerMedia) -> str:
-        """Return the stream format to request for a sync group member."""
-        if media.media_type == MediaType.AUDIO_SOURCE:
-            member_player = self.mass.players.get_player(member_player_id)
-            if member_player and member_player.config.get_value(
-                CONF_PREFER_WAV_FOR_LIVE_SOURCES, default=False
-            ):
-                return "wav"
-        return self.mass.config.get_raw_player_config_value(
-            member_player_id, CONF_OUTPUT_CODEC, "flac"
         )
 
     async def _restore_power(self) -> None:
@@ -999,7 +742,7 @@ class SqueezelitePlayer(Player):
         # power on)": it only resumes the queue when that player setting is ticked, which is off by
         # default.
         # Hardware that powers itself on at boot (e.g. the Squeezebox Radio) overrides a saved off.
-        if PlayerFeature.POWER not in self.supported_features:
+        if PlayerFeature.POWER not in self.supported_features or self.player is None:
             return
         was_powered = await self.mass.cache.get(
             key=self._power_cache_key,
@@ -1007,15 +750,16 @@ class SqueezelitePlayer(Player):
             category=CACHE_CATEGORY_PREV_STATE,
         )
         if was_powered is None or was_powered:
+            player_id = self.player.player_id
             try:
-                await self.mass.players.cmd_power(self.player_id, True)
+                await self.mass.players.cmd_power(player_id, True)
             except MusicAssistantError as err:
-                self.logger.debug("Could not power on %s after connecting: %s", self.player_id, err)
+                self.logger.debug("Could not power on %s after connecting: %s", player_id, err)
         self._power_tracking = True
 
     @property
     def _power_cache_key(self) -> str:
-        return f"{self.player_id}_power"
+        return f"{self.protocol_id}_power"
 
     def _save_volume_state(self, *, changed_only: bool = False) -> None:
         """
@@ -1032,8 +776,8 @@ class SqueezelitePlayer(Player):
         if changed_only and self._saved_volume_state == (volume, muted):
             return
         self._saved_volume_state = (volume, muted)
-        self.mass.config.set_raw_player_config_value(self.player_id, CONF_STORED_VOLUME, volume)
-        self.mass.config.set_raw_player_config_value(self.player_id, CONF_STORED_MUTED, muted)
+        self.mass.config.set_protocol_value(self.protocol_id, CONF_STORED_VOLUME, volume)
+        self.mass.config.set_protocol_value(self.protocol_id, CONF_STORED_MUTED, muted)
 
     async def _save_power_state(self, powered: bool) -> None:
         """Remember the power state, next to the volume and mute, for the next connection."""
@@ -1049,14 +793,36 @@ class SqueezelitePlayer(Player):
         self._attr_elapsed_time = self.client.elapsed_seconds
         self._attr_elapsed_time_last_updated = time.time()
 
-
-async def pause_and_unpause(slim_client: SlimClient, pause_duration_ms: int) -> None:
-    """
-    Pause player and schedule unpause after specified duration.
-
-    This is used instead of pause_for because WiiM devices
-    don't properly auto-unpause after pause_for interval.
-    """
-    await slim_client.pause()
-    unpause_timestamp = slim_client.jiffies + pause_duration_ms
-    await slim_client.unpause_at(unpause_timestamp)
+    def _report_delivered_format(self) -> None:
+        """Add the format Music Assistant streams to the player to the metadata of its stream."""
+        # the Sendspin bridge reports the format of its own stream
+        if self._plays_for_bridge or (media := self.client.current_media) is None:
+            return
+        metadata = media.metadata
+        # once, as the stream starts: the update goes to the stream requested last, which
+        # later on can be a newer one
+        if metadata.get("samplerate"):
+            return
+        source_id = cast("str | None", metadata.get("source_id"))
+        queue_item_id = cast("str | None", metadata.get("queue_item_id"))
+        if not source_id or not queue_item_id:
+            return
+        # the stream controller records the format once the player fetched the stream
+        queue_item = self.mass.player_queues.get_item(source_id, queue_item_id)
+        streamdetails = queue_item.streamdetails if queue_item else None
+        if streamdetails is None or (chain := streamdetails.audio_processing) is None:
+            return
+        player_id = self.player.player_id if self.player else self.protocol_id
+        output_format = next(
+            (output.output_format for output in chain.outputs if player_id in output.player_ids),
+            None,
+        )
+        if output_format is None:
+            return
+        quality = {"samplerate": str(output_format.sample_rate)}
+        if output_format.content_type.is_lossless():
+            quality["samplesize"] = str(output_format.bit_depth)
+        # the update replaces all metadata of the stream
+        self.mass.create_task(
+            self.client.update_metadata(cast("MediaMetadata", {**metadata, **quality}))
+        )

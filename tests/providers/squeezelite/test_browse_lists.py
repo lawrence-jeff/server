@@ -574,7 +574,7 @@ async def test_a_play_control_menu_for_a_playlist_or_podcast_row_is_a_flat_menu(
 def _dispatch_handler(*, known_player: bool = True) -> Any:
     # a player set to browse as nobody: the setting is read for every command
     handler = _handler(
-        SimpleNamespace(config=SimpleNamespace(get_raw_player_config_value=lambda *_: "anonymous"))
+        SimpleNamespace(config=SimpleNamespace(get_protocol_value=lambda *_: "anonymous"))
     )
     cli = MagicMock()
     cli._handle_menu = AsyncMock(return_value={"item_loop": [{"id": "preset1", "text": "Preset"}]})

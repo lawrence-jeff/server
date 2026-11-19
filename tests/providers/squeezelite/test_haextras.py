@@ -17,7 +17,7 @@ def _state(entity_id: str, state: str, **attributes: Any) -> dict[str, Any]:
 
 def _mass(*, enabled: bool, ha: Any = None) -> MagicMock:
     mass = MagicMock()
-    mass.config.get_raw_player_config_value.return_value = enabled
+    mass.config.get_protocol_value.return_value = enabled
     mass.get_provider.return_value = ha
     return mass
 

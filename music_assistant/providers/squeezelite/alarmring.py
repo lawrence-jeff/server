@@ -119,11 +119,6 @@ class AlarmRinger:
         await self._on_change(player_id)
         await self._sound(self._sound_stop, player_id)
 
-    async def _run(self) -> None:
-        while True:
-            await asyncio.sleep(TICK_SECONDS)
-            await self.tick(time.time())
-
     async def tick(self, now: float) -> None:
         """
         Move the alarms on to the given time: end or repeat what has run out, and start what has come due.
@@ -167,6 +162,11 @@ class AlarmRinger:
             await self._sound(self._sound_stop, player_id)
         for player_id in started:
             await self._sound(self._sound_start, player_id)
+
+    async def _run(self) -> None:
+        while True:
+            await asyncio.sleep(TICK_SECONDS)
+            await self.tick(time.time())
 
     @staticmethod
     async def _sound(action: Callable[[str], Awaitable[None]] | None, player_id: str) -> None:

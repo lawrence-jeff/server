@@ -38,6 +38,13 @@ ANONYMOUS = "anonymous"
 CHANGE_HINT = 'Set "Browse as" in this player\'s settings in Music Assistant'
 
 
+def _player_id(mass: MusicAssistant, protocol_id: str) -> str:
+    """Return the id of the Music Assistant player a slimproto client is a protocol of."""
+    # users are limited to players by player id, which a new player gets apart from its protocol
+    player = mass.players.get_player_by_protocol(protocol_id)
+    return player.player_id if player else protocol_id
+
+
 async def _choosable_users(mass: MusicAssistant, player_id: str) -> list[User]:
     """
     Return the users the player can browse as.
@@ -45,10 +52,13 @@ async def _choosable_users(mass: MusicAssistant, player_id: str) -> list[User]:
     Enabled accounts that may use this player (a user can be limited to certain players), not the system user Home Assistant uses.
     """
     users = await mass.webserver.auth.list_users()
+    mass_player_id = _player_id(mass, player_id)
     return [
         user
         for user in users
-        if user.enabled and user.role != UserRole.SERVICE and has_player_access(user, player_id)
+        if user.enabled
+        and user.role != UserRole.SERVICE
+        and has_player_access(user, mass_player_id)
     ]
 
 
@@ -59,7 +69,8 @@ async def config_entry(mass: MusicAssistant, player_id: str) -> ConfigEntry:
     :param mass: The Music Assistant instance.
     :param player_id: The player the setting is for: users who may not use it are not offered.
     """
-    options = [ConfigValueOption(ANONYMOUS, title="Browse as Anonymous")]
+    # the title of Anonymous is in strings.json; a user's is composed from the name
+    options = [ConfigValueOption(ANONYMOUS)]
     for user in await _choosable_users(mass, player_id):
         options.append(
             ConfigValueOption(user.user_id, title=f"Browse as {user.display_name or user.username}")
@@ -82,11 +93,11 @@ async def user_for_player(mass: MusicAssistant, player_id: str) -> User | None:
     :param mass: The Music Assistant instance.
     :param player_id: The player the request came from.
     """
-    user_id = mass.config.get_raw_player_config_value(player_id, CONF_BROWSE_USER, ANONYMOUS)
+    user_id = mass.config.get_protocol_value(player_id, CONF_BROWSE_USER, ANONYMOUS)
     if not user_id or user_id == ANONYMOUS:
         return None
     user = await mass.webserver.auth.get_user(str(user_id))
-    if user is None or not has_player_access(user, player_id):
+    if user is None or not has_player_access(user, _player_id(mass, player_id)):
         # the user was removed, disabled, or limited to other players after the setting was made
         LOGGER.warning(
             "Player %s is set to browse as a user that is not available to it (%s): browsing anonymously",

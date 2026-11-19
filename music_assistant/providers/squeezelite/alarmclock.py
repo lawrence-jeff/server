@@ -124,7 +124,7 @@ class AlarmBook:
     @classmethod
     def load(cls, mass: MusicAssistant, player_id: str) -> AlarmBook:
         """Read the alarms stored with a player's settings; nothing stored, or something unreadable, is no alarms."""
-        raw = mass.config.get_raw_player_config_value(player_id, CONF_ALARMS, "")
+        raw = mass.config.get_protocol_value(player_id, CONF_ALARMS, "")
         try:
             data = json.loads(str(raw)) if raw else {}
             alarms = [Alarm(**item) for item in data.get("alarms", [])]
@@ -135,7 +135,7 @@ class AlarmBook:
     def save(self, mass: MusicAssistant, player_id: str) -> None:
         """Store the alarms with the player's settings."""
         data = {"enabled": self.enabled, "alarms": [asdict(alarm) for alarm in self.alarms]}
-        mass.config.set_raw_player_config_value(player_id, CONF_ALARMS, json.dumps(data))
+        mass.config.set_protocol_value(player_id, CONF_ALARMS, json.dumps(data))
 
     def get(self, alarm_id: Any) -> Alarm | None:
         """Return the alarm with this id."""

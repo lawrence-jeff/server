@@ -311,10 +311,10 @@ def _handler(
 ) -> tuple[Any, MagicMock, SimpleNamespace]:
     player = SimpleNamespace(state=state, current_media=None, elapsed_seconds=30)
     cli = MagicMock()
-    cli._corrected_elapsed_seconds.return_value = 30
+    cli._elapsed_seconds.return_value = 30
     slimproto = SimpleNamespace(get_player=lambda _id: player if known else None, cli=cli)
     handler: Any = bl.BrowseLibraryHandler.__new__(bl.BrowseLibraryHandler)
-    handler.provider = SimpleNamespace(slimproto=slimproto)
+    handler.provider = SimpleNamespace(slimproto=slimproto, get_protocol=lambda _id: None)
     handler.mass = MagicMock()
     handler.mass.player_queues.play = AsyncMock()
     handler.mass.player_queues.pause = AsyncMock()
@@ -490,9 +490,8 @@ def _cli_command(command: str, *args: Any) -> SlimCLICommand:
 def _mixer_handler(muted: bool = False, level: int = 40) -> tuple[Any, AsyncMock]:
     handler, _cli, _player = _handler()
     mute = AsyncMock()
-    handler.mass.players.get_player.return_value = SimpleNamespace(
-        volume_muted=muted, volume_mute=mute, volume_level=level
-    )
+    protocol = SimpleNamespace(volume_muted=muted, volume_mute=mute, volume_level=level)
+    handler.provider.get_protocol = lambda _id: protocol
     return handler, mute
 
 
@@ -553,7 +552,7 @@ async def test_the_volume_query_of_a_player_that_is_not_muted_is_the_built_ins(
 async def test_mixer_from_an_unknown_player_is_the_built_ins() -> None:
     """A device Music Assistant does not know is not muted here."""
     handler, mute = _mixer_handler()
-    handler.mass.players.get_player.return_value = None
+    handler.provider.get_protocol = lambda _id: None
     with pytest.raises(NotImplementedError):
         await handler._handle_mixer(_cli_command("mixer", "muting", "1"))
     mute.assert_not_awaited()

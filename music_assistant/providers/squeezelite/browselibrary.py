@@ -69,6 +69,7 @@ if TYPE_CHECKING:
     from music_assistant.controllers.music.media.base import MediaControllerBase
     from music_assistant.mass import MusicAssistant
 
+    from .player import SqueezelitePlayer
     from .provider import SqueezelitePlayerProvider
 
 logger = logging.getLogger("music_assistant.squeezelite.browselibrary")
@@ -1722,6 +1723,14 @@ class BrowseLibraryHandler:
         with browseuser.acting_as(user):
             return await self._dispatch(slim_command)
 
+    def start_alarm_ringer(self) -> None:
+        """Start following the alarms of the devices."""
+        self._alarm_ringer.start()
+
+    async def stop_alarm_ringer(self) -> None:
+        """Stop following the alarms of the devices."""
+        await self._alarm_ringer.stop()
+
     @property
     def _slimproto(self) -> SlimServer:
         """Return the provider's SlimServer, which exists once the provider has loaded."""
@@ -2359,7 +2368,7 @@ class BrowseLibraryHandler:
 
         :param player_id: The device whose alarm is going off.
         """
-        uri = self.mass.config.get_raw_player_config_value(player_id, alarmclock.ALARM_PRESET_KEY)
+        uri = self.mass.config.get_protocol_value(player_id, alarmclock.ALARM_PRESET_KEY)
         if not uri or (mass_player := self.mass.players.get_player(player_id)) is None:
             logger.info("Alarm of %s: no sound to play, the device rings by itself", player_id)
             return
@@ -2399,14 +2408,6 @@ class BrowseLibraryHandler:
                 "Alarm of %s: still playing after it was stopped, stopping it again", player_id
             )
             await self.mass.players.cmd_stop(player_id)
-
-    def start_alarm_ringer(self) -> None:
-        """Start following the alarms of the devices."""
-        self._alarm_ringer.start()
-
-    async def stop_alarm_ringer(self) -> None:
-        """Stop following the alarms of the devices."""
-        await self._alarm_ringer.stop()
 
     def _has_alarm_clock(self, player_id: str | None) -> bool:
         """Return whether the player is a device that keeps its own alarm timer (Radio, Touch, Controller, Boom)."""
@@ -2822,20 +2823,25 @@ class BrowseLibraryHandler:
             muted_level := self._muted_level(player_id)
         ):
             return muted_level
-        mass_player = self.mass.players.get_player(player_id) if player_id else None
-        if mass_player is None or len(args) < 1 or str(args[0]) != "muting":
+        # the protocol of the device, which mutes it with the volume
+        protocol = (
+            cast("SqueezelitePlayer | None", self.provider.get_protocol(player_id))
+            if player_id
+            else None
+        )
+        if protocol is None or len(args) < 1 or str(args[0]) != "muting":
             raise NotImplementedError
         value = str(args[1]) if len(args) > 1 else "toggle"
         if value == "?":
-            return int(bool(mass_player.volume_muted))
+            return int(bool(protocol.volume_muted))
         if value == "toggle":
-            muted = not mass_player.volume_muted
+            muted = not protocol.volume_muted
         else:
             try:
                 muted = bool(int(value))
             except ValueError:
                 raise NotImplementedError from None
-        await mass_player.volume_mute(muted)
+        await protocol.volume_mute(muted)
         return None
 
     async def _handle_time(self, slim_command: SlimCLICommand) -> None:
@@ -2866,7 +2872,7 @@ class BrowseLibraryHandler:
         if text[0] in "+-":
             # relative to the position being shown, since the player's own is relative to the
             # stream it is playing, which restarts at zero after a seek
-            amount += cli._corrected_elapsed_seconds(player)
+            amount += cli._elapsed_seconds(player)
         # Within the track: Music Assistant takes the start as 0 and refuses a position after the
         # end, so a drag or a skip past either end lands on it.
         target = max(0, int(amount))
@@ -3029,10 +3035,10 @@ class BrowseLibraryHandler:
 
         :param player_id: The player to look up.
         """
-        mass_player = self.mass.players.get_player(player_id) if player_id else None
-        if mass_player is None or not mass_player.volume_muted:
+        protocol = self.provider.get_protocol(player_id) if player_id else None
+        if protocol is None or not protocol.volume_muted:
             return 0
-        return -int(mass_player.volume_level or 0)
+        return -int(protocol.volume_level or 0)
 
     async def _queue_status(self, slim_command: SlimCLICommand) -> dict[str, Any]:
         """

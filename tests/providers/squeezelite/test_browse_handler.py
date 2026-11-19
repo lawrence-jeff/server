@@ -60,8 +60,10 @@ def _handler(
     mass.music.get_item_by_uri = AsyncMock(return_value=_station())
     handler.mass = mass
     handler.cli = MagicMock()
+    handler.protocol = SimpleNamespace(volume_muted=False, volume_level=40)
     handler.provider = SimpleNamespace(
-        slimproto=SimpleNamespace(cli=handler.cli, get_player=lambda _id: None)
+        slimproto=SimpleNamespace(cli=handler.cli, get_player=lambda _id: None),
+        get_protocol=lambda _id: handler.protocol,
     )
     handler._push_queue_update = AsyncMock()
     return handler
@@ -862,9 +864,7 @@ def _status_handler(queue: SimpleNamespace | None, built_in: dict[str, Any] | No
     base = {"player_name": "Kitchen", "mode": "play"} if built_in is None else built_in
     handler.cli._handle_status = AsyncMock(return_value=base)
     handler.mass.player_queues.items.return_value = _queue_rows(3)
-    handler.mass.players.get_player.return_value = SimpleNamespace(
-        volume_muted=False, volume_level=40
-    )
+    handler.protocol = SimpleNamespace(volume_muted=False, volume_level=40)
     return handler
 
 
@@ -978,9 +978,7 @@ async def test_a_muted_players_status_volume_is_negative(
 ) -> None:
     """A muted player reports its negated level; with none to negate the built-in's stays."""
     handler = _status_handler(_queue(), built_in={"mixer volume": 40})
-    handler.mass.players.get_player.return_value = SimpleNamespace(
-        volume_muted=muted, volume_level=level
-    )
+    handler.protocol = SimpleNamespace(volume_muted=muted, volume_level=level)
     result = await handler._handle_queue_status(_status_cmd("-", 1))
     assert result["mixer volume"] == expected
 
@@ -988,7 +986,7 @@ async def test_a_muted_players_status_volume_is_negative(
 async def test_the_status_of_an_unknown_player_keeps_its_volume() -> None:
     """A player Music Assistant does not know is not reported as muted."""
     handler = _status_handler(_queue(), built_in={"mixer volume": 40})
-    handler.mass.players.get_player.return_value = None
+    handler.protocol = None
     result = await handler._handle_queue_status(_status_cmd("-", 1))
     assert result["mixer volume"] == 40
 

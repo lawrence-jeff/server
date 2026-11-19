@@ -34,10 +34,13 @@
     },
     "browse_as_user": {
       "label": "Browse as (user)",
-      "description": "Favorites and the music sources a user may see belong to a Music Assistant user, but a Squeezebox or JiveLite client cannot log in. Choose the user this device browses as: its Favorites menus and its play requests then count for that user. Anonymous (the default) uses no user, so no favorites are shown. The device is recognised by its player id only, so anyone on your network who sends that id can see what the chosen user sees; avoid choosing an administrator unless you are comfortable with that."
+      "description": "Favorites and the music sources a user may see belong to a Music Assistant user, but a Squeezebox or JiveLite client cannot log in. Choose the user this device browses as: its Favorites menus and its play requests then count for that user. Anonymous (the default) uses no user, so no favorites are shown. The device is recognised by its player id only, so anyone on your network who sends that id can see what the chosen user sees; avoid choosing an administrator unless you are comfortable with that.",
+      "options": {
+        "anonymous": "Browse as Anonymous"
+      }
     }
   },
   "manifest": {
-    "description": "Stream music to Squeezelite and some legacy Squeezebox players on your local network using the slimproto protocol."
+    "description": "Stream music to Squeezelite players such as piCorePlayer and some legacy Squeezebox players, as known from Lyrion (Logitech Media Server)."
   }
 }

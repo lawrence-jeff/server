@@ -34,7 +34,9 @@ def _mass(users: list[User], setting: Any = browseuser.ANONYMOUS) -> MagicMock:
     mass.webserver.auth.get_user = AsyncMock(
         side_effect=lambda user_id: next((u for u in users if u.user_id == user_id), None)
     )
-    mass.config.get_raw_player_config_value.return_value = setting
+    mass.config.get_protocol_value.return_value = setting
+    # a player that has the id of its slimproto protocol
+    mass.players.get_player_by_protocol.return_value = None
     return mass
 
 
@@ -50,7 +52,7 @@ async def test_the_setting_offers_anonymous_first_then_every_usable_user() -> No
     assert entry.key == browseuser.CONF_BROWSE_USER
     assert entry.default_value == browseuser.ANONYMOUS
     assert [(o.title, o.value) for o in entry.options] == [
-        ("Browse as Anonymous", browseuser.ANONYMOUS),
+        (None, browseuser.ANONYMOUS),
         ("Browse as admin", "1"),
         ("Browse as Kim", "2"),
     ]
@@ -59,7 +61,7 @@ async def test_the_setting_offers_anonymous_first_then_every_usable_user() -> No
 async def test_with_a_single_user_the_setting_has_two_choices() -> None:
     """One user (the administrator) gives two choices: Anonymous and that user."""
     entry = await browseuser.config_entry(_mass([_user("1", "admin", role=UserRole.ADMIN)]), "p1")
-    assert [o.title for o in entry.options] == ["Browse as Anonymous", "Browse as admin"]
+    assert [o.title for o in entry.options] == [None, "Browse as admin"]
 
 
 @pytest.mark.parametrize("setting", [browseuser.ANONYMOUS, "", None])
@@ -77,7 +79,7 @@ async def test_a_player_set_to_a_user_runs_as_that_user() -> None:
     users = [_user("1", "admin"), _user("2", "kim")]
     mass = _mass(users, "2")
     assert await browseuser.user_for_player(mass, "p1") == users[1]
-    mass.config.get_raw_player_config_value.assert_called_once_with(
+    mass.config.get_protocol_value.assert_called_once_with(
         "p1", browseuser.CONF_BROWSE_USER, browseuser.ANONYMOUS
     )
 
@@ -132,7 +134,7 @@ async def test_a_request_runs_as_the_user_of_its_own_player_only() -> None:
     """Players are looked up by their own id: one set to Kim runs as Kim, one left on Anonymous runs as nobody."""
     users = [_user("1", "admin"), _user("2", "kim")]
     mass = _mass(users)
-    mass.config.get_raw_player_config_value.side_effect = lambda player_id, *_: (
+    mass.config.get_protocol_value.side_effect = lambda player_id, *_: (
         "2" if player_id == "kims-player" else browseuser.ANONYMOUS
     )
     assert await _run_as_seen(mass, "kims-player") == users[1]
@@ -167,11 +169,11 @@ async def test_a_user_limited_to_other_players_is_not_offered_for_this_player() 
     kitchen = await browseuser.config_entry(_mass(users), "kitchen")
     other = await browseuser.config_entry(_mass(users), "den")
     assert [o.title for o in kitchen.options] == [
-        "Browse as Anonymous",
+        None,
         "Browse as admin",
         "Browse as user2",
     ]
-    assert [o.title for o in other.options] == ["Browse as Anonymous", "Browse as admin"]
+    assert [o.title for o in other.options] == [None, "Browse as admin"]
 
 
 async def test_a_setting_that_names_a_user_who_may_no_longer_use_the_player_means_anonymous() -> (
@@ -183,3 +185,13 @@ async def test_a_setting_that_names_a_user_who_may_no_longer_use_the_player_mean
     mass = _mass([limited], "2")
     assert await browseuser.user_for_player(mass, "kitchen") == limited
     assert await browseuser.user_for_player(mass, "den") is None
+
+
+async def test_the_player_filter_is_matched_against_the_player_of_the_protocol() -> None:
+    """A new player gets an id of its own: a user is limited by that id, not by the client's."""
+    limited = _user("2", "user2")
+    limited.player_filter = ["pl0123456789ab"]
+    mass = _mass([limited], "2")
+    mass.players.get_player_by_protocol.return_value = MagicMock(player_id="pl0123456789ab")
+    assert await browseuser.user_for_player(mass, "aa:bb:cc:dd:ee:ff") == limited
+    mass.players.get_player_by_protocol.assert_called_with("aa:bb:cc:dd:ee:ff")

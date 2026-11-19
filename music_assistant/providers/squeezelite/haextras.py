@@ -131,7 +131,7 @@ def _hass(mass: MusicAssistant) -> Any:
 
 def _enabled(mass: MusicAssistant, player_id: str) -> bool:
     """Return True if the device's HA Extras setting is ticked."""
-    return bool(mass.config.get_raw_player_config_value(player_id, CONF_EXPOSE, False))
+    return bool(mass.config.get_protocol_value(player_id, CONF_EXPOSE, False))
 
 
 async def menu_items(mass: MusicAssistant, player_id: str) -> list[dict[str, Any]]:

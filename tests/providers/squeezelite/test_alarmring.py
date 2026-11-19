@@ -34,10 +34,10 @@ def _setup(
     monkeypatch.setattr(ac, "host_timezone_name", lambda: "America/Chicago")
     store = {("p1", ac.CONF_ALARMS): json.dumps({"enabled": enabled, "alarms": alarms})}
     mass = MagicMock()
-    mass.config.get_raw_player_config_value.side_effect = lambda pid, key, default=None: store.get(
+    mass.config.get_protocol_value.side_effect = lambda pid, key, default=None: store.get(
         (pid, key), default
     )
-    mass.config.set_raw_player_config_value.side_effect = lambda pid, key, value: store.__setitem__(
+    mass.config.set_protocol_value.side_effect = lambda pid, key, value: store.__setitem__(
         (pid, key), value
     )
     mass._store = store
@@ -177,7 +177,7 @@ def test_the_status_reports_what_is_going_off(monkeypatch: pytest.MonkeyPatch) -
     """An active alarm shows the next alarm after it; a snoozed one shows when it rings again."""
     _, _, _ = _setup(monkeypatch, [_alarm()])
     mass = MagicMock()
-    mass.config.get_raw_player_config_value.return_value = json.dumps(
+    mass.config.get_protocol_value.return_value = json.dumps(
         {"enabled": True, "alarms": [_alarm()]}
     )
     now = dt.datetime.fromtimestamp(DUE + 30, CHICAGO)

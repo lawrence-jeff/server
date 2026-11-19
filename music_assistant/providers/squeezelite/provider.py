@@ -3,34 +3,41 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from aiohttp import web
+from aiosendspin.clock import RawMonotonicClock
 from aioslimproto.models import EventType as SlimEventType
+from aioslimproto.models import PlayerState as SlimPlayerState
 from aioslimproto.models import SlimEvent
 from aioslimproto.server import SlimServer
 from music_assistant_models.config_entries import ConfigEntry
-from music_assistant_models.enums import ConfigEntryType, EventType, MediaType
-from music_assistant_models.errors import SetupFailedError
+from music_assistant_models.enums import ConfigEntryType, EventType, ProtocolRole
+from music_assistant_models.errors import MusicAssistantError, SetupFailedError
 
-from music_assistant.constants import CONF_PORT, CONF_SYNC_ADJUST, VERBOSE_LOG_LEVEL
-from music_assistant.helpers.audio import get_mime_type
+from music_assistant.constants import CONF_PORT, VERBOSE_LOG_LEVEL
 from music_assistant.helpers.util import is_port_in_use
 from music_assistant.models.player_provider import PlayerProvider
 
 from . import applets, haextras  # HA-EXTRAS
 from .browselibrary import BrowseLibraryHandler, handle_root_redirect, make_icon_routes
 from .constants import (
+    CACHE_CATEGORY_PREV_STATE,
     CONF_CLI_JSON_PORT,
     CONF_CLI_TELNET_PORT,
     CONF_DISCOVERY,
+    CONF_STORED_VOLUME,
+    DEFAULT_PLAYER_VOLUME,
     DEFAULT_SLIMPROTO_PORT,
-    REPEATMODE_MAP,
 )
 from .player import SqueezelitePlayer
+from .sendspin_bridge import BRIDGE_STREAM_PATH, SendspinBridgeManager
 
 if TYPE_CHECKING:
-    from aioslimproto.client import SlimClient
+    from collections.abc import Callable
+
+    from aiosendspin.clock import Clock
+    from aioslimproto.cli import SlimCLICommand
     from music_assistant_models.event import MassEvent
 
 
@@ -39,6 +46,12 @@ class SqueezelitePlayerProvider(PlayerProvider):
 
     reload_on_streams_network_change = True
     slimproto: SlimServer | None = None
+    # the clock every server time of slimproto is on: the one Sendspin runs on
+    clock: Clock
+    bridge_manager: SendspinBridgeManager
+    # the browse menus, queue view and transport commands of the clients (browselibrary.py)
+    browse_handler: BrowseLibraryHandler
+    _unsub_queue_updated: Callable[[], None] | None = None
 
     async def get_config_entries(self) -> tuple[ConfigEntry, ...]:
         """Return Config entries to setup this provider."""
@@ -84,19 +97,25 @@ class SqueezelitePlayerProvider(PlayerProvider):
         # Validate ALL required ports before starting ANY services
         await self._validate_all_ports(control_port, telnet_port, json_port)
 
+        self.clock = RawMonotonicClock()
+        self.bridge_manager = SendspinBridgeManager(self)
+
         # create the server here (also validates config and sets up the CLI) but defer
         # start() to loaded_in_mass, so we subscribe to events before accepting clients
         # Icon/cover-art routes are built per provider (make_icon_routes) because
         # resolving real album art needs self.mass, and aiohttp route handlers only
         # receive the request. See make_icon_routes in browselibrary.py.
         icon_handler, unmatched_handler = make_icon_routes(self.mass)
+        self.browse_handler = BrowseLibraryHandler(self)
         self.slimproto = SlimServer(
             cli_port=telnet_port or None,
             cli_port_json=json_port or None,
             ip_address=self.mass.streams.publish_ip,
             name="Music Assistant",
             control_port=control_port,
-            cli_command_handler=BrowseLibraryHandler(self),
+            cli_command_handler=self._dispatch_cli_command,
+            clock=self._server_time,
+            initial_volume=self._get_initial_volume,
             extra_routes={
                 # Plain GET on the CLI web port (e.g. the link on a piCorePlayer's
                 # LMS settings page) goes to the Music Assistant web UI instead.
@@ -118,24 +137,18 @@ class SqueezelitePlayerProvider(PlayerProvider):
         await super().loaded_in_mass()
         assert self.slimproto is not None  # for type checker
         self.slimproto.cli.display_name_lookup = self._lookup_display_name
+        self.slimproto.cli.elapsed_lookup = self._lookup_elapsed
         # subscribe before starting the socket server: aioslimproto does not buffer
         # events, so a client connecting before we subscribe would be missed entirely
         self.slimproto.subscribe(self._handle_slimproto_event)
-        # QUEUE_UPDATED (not QUEUE_ITEMS_UPDATED) because it is signalled on every
-        # change, including shuffle/repeat toggles, so queue edits made from the MA app,
-        # voice or other integrations also refresh the client. Shares
-        # _push_queue_update() with the command handlers in browselibrary.py.
-        self.mass.subscribe(self._handle_queue_items_updated, EventType.QUEUE_UPDATED)
         try:
             await self.slimproto.start()
         except Exception as err:
             # ports were validated during setup, so a failure here is unlikely
             self.unload_with_error(err)
             return
-        self.mass.streams.register_dynamic_route(
-            "/slimproto/multi", self._serve_multi_client_stream
-        )
-        cast("BrowseLibraryHandler", self.slimproto.cli.command_handler).start_alarm_ringer()
+        self.mass.streams.register_dynamic_route(BRIDGE_STREAM_PATH, self._serve_bridge_stream)
+        self.browse_handler.start_alarm_ringer()
         # it seems that WiiM devices do not use the json rpc port that is broadcasted
         # in the discovery info but instead they just assume that the jsonrpc endpoint
         # lives on the same server as stream URL. So we need to provide a jsonrpc.js
@@ -146,29 +159,85 @@ class SqueezelitePlayerProvider(PlayerProvider):
         # Icon/cover-art routes are registered via extra_routes in the SlimServer(...)
         # constructor above, not here: the router is frozen once start() has run
         # AppRunner.setup(), so a later add_get raises RuntimeError.
+        # QUEUE_UPDATED (not QUEUE_ITEMS_UPDATED) because it is signalled on every
+        # change, including shuffle/repeat toggles, so queue edits made from the MA app,
+        # voice or other integrations also refresh the client.
+        self._unsub_queue_updated = self.mass.subscribe(
+            self._on_queue_updated, EventType.QUEUE_UPDATED
+        )
+
+    async def discover_players(self) -> None:
+        """Attach the connected players that have no attached protocol, such as a removed one."""
+        if not self.slimproto:
+            return
+        for slimclient in self.slimproto.players:
+            protocol_id = slimclient.player_id
+            if self.get_protocol(protocol_id) is None and self.mass.players.wants_protocol(
+                protocol_id
+            ):
+                await SqueezelitePlayer(self, protocol_id, slimclient).setup()
 
     async def unload(self, is_removed: bool = False) -> None:
         """Handle unload/close of the provider."""
+        if self._unsub_queue_updated is not None:
+            self._unsub_queue_updated()
+            self._unsub_queue_updated = None
+        # Stop all Sendspin bridges
+        bridge_manager = getattr(self, "bridge_manager", None)
+        if bridge_manager:
+            await bridge_manager.close()
         # Ensure complete cleanup
-        if self.slimproto is not None and self.slimproto.cli.command_handler is not None:
-            await cast(
-                "BrowseLibraryHandler", self.slimproto.cli.command_handler
-            ).stop_alarm_ringer()
+        if (browse_handler := getattr(self, "browse_handler", None)) is not None:
+            await browse_handler.stop_alarm_ringer()
         await self._cleanup_server()
-        self.mass.streams.unregister_dynamic_route("/slimproto/multi")
+        self.mass.streams.unregister_dynamic_route(BRIDGE_STREAM_PATH)
         self.mass.streams.unregister_dynamic_route("/jsonrpc.js")
 
-    def get_corrected_elapsed_milliseconds(self, slimplayer: SlimClient) -> int:
-        """Return corrected elapsed milliseconds for a slimplayer."""
-        sync_delay = self.mass.config.get_raw_player_config_value(
-            slimplayer.player_id, CONF_SYNC_ADJUST, 0
-        )
-        return int(slimplayer.elapsed_milliseconds - sync_delay)
+    def _server_time(self) -> float:
+        """Return the time of the clock of this provider in seconds, for aioslimproto."""
+        return self.clock.now_us() / 1_000_000
 
     def _lookup_display_name(self, player_id: str) -> str | None:
-        """Return Music Assistant's display name for a player, or None if it does not know it."""
-        mass_player = self.mass.players.get_player(player_id)
-        return mass_player.display_name if mass_player else None
+        """Return Music Assistant's display name for a slimproto player, or None if unknown."""
+        mass_player = self.mass.players.get_player_by_protocol(player_id)
+        return mass_player.name if mass_player else None
+
+    def _lookup_elapsed(self, player_id: str) -> float | None:
+        """
+        Return the position in the track to report for a slimproto player, else None.
+
+        A player counts its elapsed time from the start of its stream, and a seek starts a new
+        stream part way into the track. The position in the track is the one its Sendspin
+        bridge has, else the one of the queue it plays, which publishes a seek's target before
+        it starts the new stream. None reports the player's own elapsed time.
+
+        :param player_id: The id of the slimproto player.
+        """
+        bridge = self.bridge_manager.get_bridge(player_id)
+        if bridge is not None and (position := bridge.position_in_track) is not None:
+            return position
+        if not self.slimproto or (slimclient := self.slimproto.get_player(player_id)) is None:
+            return None
+        if slimclient.state == SlimPlayerState.STOPPED:
+            # A stopped player reports position 0, as LMS does. Without it the client keeps
+            # showing the position it had: nothing pushes the player's own reset to 0 to the
+            # client. Play afterwards resumes where MA saved the position, so this only
+            # changes what is shown while stopped.
+            return 0
+        if (media := slimclient.current_media) is None:
+            return None
+        source_id = cast("str | None", media.metadata.get("source_id"))
+        queue_item_id = cast("str | None", media.metadata.get("queue_item_id"))
+        if not source_id or not queue_item_id:
+            return None
+        queue = self.mass.player_queues.get(source_id)
+        if queue is None or queue.current_item is None:
+            return None
+        if queue.current_item.queue_item_id != queue_item_id:
+            # the player plays a track the queue has moved on from, such as the end of the
+            # previous track while the next one is buffered
+            return None
+        return queue.corrected_elapsed_time
 
     async def _validate_all_ports(
         self, control_port: int, telnet_port: int | None, json_port: int | None
@@ -220,125 +289,126 @@ class SqueezelitePlayerProvider(PlayerProvider):
             slimclient = self.slimproto.get_player(event.player_id)
             if not slimclient:
                 return  # should not happen, but guard anyways
-            # a reconnect before the old socket closed is not reported as a disconnect
-            self._release_from_sync_leader(event.player_id)
+            if not self.mass.players.wants_protocol(event.player_id):
+                return
             player = SqueezelitePlayer(self, event.player_id, slimclient)
             self.mass.create_task(player.setup())
             return
 
-        if not (mass_player := self.mass.players.get_player(event.player_id)):
+        if not (mass_player := self.get_protocol(event.player_id)):
             return  # guard for unknown player
         player = cast("SqueezelitePlayer", mass_player)
 
         # Handle player disconnect
         if event.type == SlimEventType.PLAYER_DISCONNECTED:
-            self._release_from_sync_leader(player.player_id)
-            self.mass.create_task(self.mass.players.unregister(player.player_id))
+            self.mass.create_task(self.mass.players.unregister(player.protocol_id))
             return
+
+        # the Sendspin bridge of the player goes first: what it does with an event
+        # decides what is left of it for the player itself
+        if (bridge := player.sendspin_bridge) is not None:
+            bridge.handle_slim_event(event)
 
         # forward all other events to the player itself
         player.handle_slim_event(event)
 
-    def _handle_queue_items_updated(self, event: MassEvent) -> None:
+    def _on_queue_updated(self, event: MassEvent) -> None:
         """
-        Push a queue-view update when the queue changes from any source.
+        Update the players for a queue that changed from any source.
 
-        Covers changes from the MA app/web UI, voice or another integration, not just this
-        provider's own SlimProto command handlers.
+        The players show repeat and shuffle of the queue they play, and the queue view of a
+        client is pushed again, for changes from the MA app/web UI, voice or another
+        integration too, not just this provider's own SlimProto command handlers.
 
         :param event: The queue updated event.
         """
-        # Uses the same update those handlers push. Subscribed to QUEUE_UPDATED (see
-        # loaded_in_mass), so event.data is the PlayerQueue and object_id is the queue_id, the same
-        # value as player_id for this provider. Its repeat/shuffle mode is refreshed into extra_data
-        # here, as play_media() does: the client's shuffle/repeat indicator only updates from a
-        # playerstatus push whose values changed (see Player.lua's
-        # notify_playerShuffleModeChange/notify_playerRepeatModeChange), and nothing else keeps
-        # extra_data current for a change made from the MA app.
-        if self.mass.closing or not self.slimproto or not event.object_id:
+        if (queue_id := event.object_id) is None:
             return
-        if (player := self.slimproto.get_player(event.object_id)) and event.data:
-            player.extra_data["playlist repeat"] = REPEATMODE_MAP[event.data.repeat_mode]
-            player.extra_data["playlist shuffle"] = int(event.data.shuffle_enabled)
-        handler = cast("BrowseLibraryHandler", self.slimproto.cli.command_handler)
-        self.mass.create_task(handler._push_queue_update(event.object_id))
+        for protocol in self.protocols:
+            cast("SqueezelitePlayer", protocol).on_queue_updated(queue_id)
+        if self.mass.closing or not self.slimproto:
+            return
+        # the same update the command handlers in browselibrary.py push
+        self.mass.create_task(self.browse_handler._push_queue_update(queue_id))
 
-    async def _serve_multi_client_stream(self, request: web.Request) -> web.StreamResponse:
-        """Serve the multi-client flow stream audio to a player."""
+    async def _serve_bridge_stream(self, request: web.Request) -> web.StreamResponse:
+        """Serve the stream of a Sendspin bridge to its player."""
         player_id = request.query.get("player_id")
-        fmt = request.query.get("fmt")
-        child_player_id = request.query.get("child_player_id")
-
-        if not player_id:
-            raise web.HTTPNotFound(reason="Missing player_id parameter")
-        if not fmt:
-            raise web.HTTPNotFound(reason="Missing fmt parameter")
-        if not child_player_id:
-            raise web.HTTPNotFound(reason="Missing child_player_id parameter")
-
-        if not (sync_parent := self.mass.players.get_player(player_id)):
+        if not player_id or not (bridge := self.bridge_manager.get_bridge(player_id)):
             raise web.HTTPNotFound(reason=f"Unknown player: {player_id}")
-        sync_parent = cast("SqueezelitePlayer", sync_parent)
+        return await bridge.serve_stream(request)
 
-        if not (child_player := self.mass.players.get_player(child_player_id)):
-            raise web.HTTPNotFound(reason=f"Unknown player: {child_player_id}")
+    async def _dispatch_cli_command(self, command: SlimCLICommand) -> Any:
+        """
+        Handle a CLI command with the browse handler, else with _handle_cli_command.
 
-        if not (stream := sync_parent.multi_client_stream) or stream.done:
-            raise web.HTTPNotFound(reason=f"There is no active stream for {player_id}!")
+        :param command: The CLI command as received from the client.
+        :raises NotImplementedError: When neither handles it, so aioslimproto's built-in does.
+        """
+        try:
+            return await self.browse_handler(command)
+        except NotImplementedError:
+            return await self._handle_cli_command(command)
 
-        output_format = await self.mass.streams.audio.get_output_format(
-            output_format_str=fmt,
-            player=child_player,
-            content_sample_rate=stream.audio_format.sample_rate,  # Flow PCM sample rate
-            content_bit_depth=stream.audio_format.bit_depth,  # Flow PCM bit depth (32)
-            media_type=MediaType.FLOW_STREAM,
-        )
-        # squeezelite takes the PCM params from the Content-Type, not from the WAV header
-        resp = web.StreamResponse(
-            status=200,
-            reason="OK",
-            headers={
-                "Content-Type": get_mime_type(output_format.output_format_str),
-            },
-        )
-        await resp.prepare(request)
+    async def _handle_cli_command(self, command: SlimCLICommand) -> None:
+        """
+        Handle play, pause and stop sent by a client, acting on its whole group like LMS does.
 
-        # return early if this is not a GET request
-        if request.method != "GET":
-            return resp
+        A stop from a protocol-only device stops only that device, which then leaves the
+        Sendspin session of its bridge. A client that plays for its Sendspin bridge acts on
+        the player that leads its Sendspin group.
 
-        # all checks passed, start streaming!
-        self.logger.debug(
-            "Start serving multi-client flow audio stream to %s",
-            child_player.display_name,
-        )
-
-        output_plan = self.mass.streams.audio.get_player_output_plan(
-            child_player_id,
-            stream.audio_format,
-            output_format,
-            queue_id=stream.queue_id,
-            session_id=stream.session_id,
-        )
-
-        async for chunk in stream.get_stream(
-            output_format=output_format,
-            filter_params=output_plan.filter_params,
-        ):
-            try:
-                await resp.write(chunk)
-            except BrokenPipeError, ConnectionResetError, ConnectionError:
-                # race condition
-                break
-        return resp
-
-    def _release_from_sync_leader(self, player_id: str) -> None:
-        """Drop a player whose connection ended from the group of its sync leader."""
-        # a reconnect registers a fresh player, so the leader must let go of the old
-        # one or it keeps listing a member that is no longer part of its stream
+        :param command: The CLI command as received from the client.
+        :raises NotImplementedError: For any other command, an unknown player and a stop
+            from a protocol-only device, so aioslimproto handles it for that client alone.
+        """
         if (
-            (player := self.mass.players.get_player(player_id))
-            and (leader_id := player.synced_to)
-            and (leader := self.mass.players.get_player(leader_id))
+            not command.player_id
+            or not (protocol := self.get_protocol(command.player_id))
+            or not (player := protocol.player)
         ):
-            cast("SqueezelitePlayer", leader).remove_disconnected_member(player_id)
+            raise NotImplementedError
+        arg = str(command.args[0]) if command.args else None
+        match command.command, arg:
+            case ("play", _) | ("mode", "play") | ("pause", "0"):
+                player_cmd = self.mass.players.cmd_play
+            case ("pause", "1") | ("mode", "pause"):
+                player_cmd = self.mass.players.cmd_pause
+            case ("pause", None):
+                player_cmd = self.mass.players.cmd_play_pause
+            # a protocol-only device also sends stop when another source or app takes
+            # over, so that stop must only stop the device itself and not its group
+            case ("stop", _) | ("mode", "stop") if protocol.role != ProtocolRole.AUDIO:
+                player_cmd = self.mass.players.cmd_stop
+            case ("stop", _) | ("mode", "stop"):
+                # it most likely switched to another source: its Sendspin bridge would
+                # otherwise put its stream right back
+                self.bridge_manager.stop_streaming(protocol.protocol_id)
+                raise NotImplementedError
+            case _:
+                raise NotImplementedError
+        player_id = (
+            self.bridge_manager.get_transport_command_target(protocol.protocol_id)
+            or player.player_id
+        )
+        try:
+            await player_cmd(player_id)
+        except MusicAssistantError as err:
+            self.logger.warning(
+                "Failed to handle %s command from %s: %s",
+                command.command,
+                protocol.display_name,
+                err,
+            )
+
+    async def _get_initial_volume(self, player_id: str) -> int:
+        """Return the volume a slimproto player starts at on connect: its last one, else default."""
+        if (
+            volume := self.mass.config.get_protocol_value(player_id, CONF_STORED_VOLUME)
+        ) is not None:
+            return cast("int", volume)
+        # older versions kept it in an (expiring) cache entry
+        last_state = await self.mass.cache.get(
+            key=player_id, provider=self.instance_id, category=CACHE_CATEGORY_PREV_STATE
+        )
+        return cast("int", last_state[1]) if last_state else DEFAULT_PLAYER_VOLUME

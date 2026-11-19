@@ -95,9 +95,7 @@ async def test_the_jiveapplets_command_is_answered_with_the_applets(
     """The browse handler gives the device's request to the applet list instead of letting the built-in answer."""
     _folder_with(monkeypatch, tmp_path, "FontReplacer.zip")
     handler: Any = bl.BrowseLibraryHandler.__new__(bl.BrowseLibraryHandler)
-    handler.mass = SimpleNamespace(
-        config=MagicMock(get_raw_player_config_value=lambda *_: "anonymous")
-    )
+    handler.mass = SimpleNamespace(config=MagicMock(get_protocol_value=lambda *_: "anonymous"))
     command = SimpleNamespace(
         command="jiveapplets",
         player_id="p1",

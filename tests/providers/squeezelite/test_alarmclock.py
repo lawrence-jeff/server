@@ -26,10 +26,10 @@ def _mass(stored: dict[Any, Any] | None = None) -> MagicMock:
     """Return a Music Assistant whose player settings are the given dict."""
     store = stored if stored is not None else {}
     mass = MagicMock()
-    mass.config.get_raw_player_config_value.side_effect = lambda pid, key, default=None: store.get(
+    mass.config.get_protocol_value.side_effect = lambda pid, key, default=None: store.get(
         (pid, key), default
     )
-    mass.config.set_raw_player_config_value.side_effect = lambda pid, key, value: store.__setitem__(
+    mass.config.set_protocol_value.side_effect = lambda pid, key, value: store.__setitem__(
         (pid, key), value
     )
     mass._store = store
