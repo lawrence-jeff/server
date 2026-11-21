@@ -692,7 +692,8 @@ async def get_artists(
     """
     # icon_id is "artist-<item_id>", not the bare id albums use: the two id spaces share the
     # /music/{icon_id}/cover route (see _fetch_real_item_art).
-    filters = _artists_filters()
+    # a search finds every artist, as in the web UI, where the filter belongs to the Artists page
+    filters = {} if search else _artists_filters()
     return await _library_page(
         mass.music.artists,
         partial(_rows, _artist_row, mark_unavailable=False),
@@ -703,8 +704,8 @@ async def get_artists(
         window_style="home_menu",
         base_actions=ARTIST_LIST_BASE_ACTIONS,
         filters=filters,
-        # say so on the title bar when the list is cut down, but only on the plain list: a search or favorites list has its own title
-        title=ARTISTS_FILTERED_TITLE if filters and not search and not favorite_only else None,
+        # say so on the title bar when the list is cut down, but only on the plain list: a favorites list has its own title
+        title=ARTISTS_FILTERED_TITLE if filters and not favorite_only else None,
     )
 
 

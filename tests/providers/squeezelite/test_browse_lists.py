@@ -102,16 +102,19 @@ async def test_the_artists_list_follows_the_users_album_artists_filter(
     assert {k: v for k, v in measured_call.items() if k == "album_artists_only"} == expected
 
 
-async def test_a_filtered_artists_search_keeps_its_own_title(
+async def test_an_artists_search_ignores_the_album_artists_filter(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A search or favorites list is not retitled, even with the album-artists filter on."""
+    """A search finds artists that are on no album too, and keeps its own title."""
     user = SimpleNamespace(
         preferences={"itemsListing.libraryartists.artists": {"albumArtistsFilter": True}}
     )
     monkeypatch.setattr(bl, "get_current_user", lambda: user)
-    page = await bl.get_artists(_mass(artists=_Controller([_item("Band")])), search="ba")
+    artists = _Controller([_item("Band")])
+    page = await bl.get_artists(_mass(artists=artists), search="ba")
     assert "text" not in page["window"]
+    (items_call,) = artists.calls
+    assert "album_artists_only" not in items_call
 
 
 async def test_every_page_reports_the_same_length_for_as_long_as_the_count_is_the_same() -> None:
