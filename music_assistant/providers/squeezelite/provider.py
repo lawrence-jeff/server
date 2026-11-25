@@ -6,7 +6,6 @@ import logging
 from typing import TYPE_CHECKING, Any, cast
 
 from aiohttp import web
-from aiosendspin.clock import RawMonotonicClock
 from aioslimproto.models import EventType as SlimEventType
 from aioslimproto.models import PlayerState as SlimPlayerState
 from aioslimproto.models import SlimEvent
@@ -52,6 +51,7 @@ class SqueezelitePlayerProvider(PlayerProvider):
     # the browse menus, queue view and transport commands of the clients (browselibrary.py)
     browse_handler: BrowseLibraryHandler
     _unsub_queue_updated: Callable[[], None] | None = None
+    _unsub_timeline_rate: Callable[[], None] | None = None
 
     async def get_config_entries(self) -> tuple[ConfigEntry, ...]:
         """Return Config entries to setup this provider."""
@@ -97,8 +97,12 @@ class SqueezelitePlayerProvider(PlayerProvider):
         # Validate ALL required ports before starting ANY services
         await self._validate_all_ports(control_port, telnet_port, json_port)
 
-        self.clock = RawMonotonicClock()
+        self.clock = self.mass.timeline_clock
         self.bridge_manager = SendspinBridgeManager(self)
+        # a bridge stream maps the timeline onto the clock of its player
+        self._unsub_timeline_rate = self.mass.timeline_clock.add_rate_listener(
+            pinned=self.bridge_manager.has_stream
+        )
 
         # create the server here (also validates config and sets up the CLI) but defer
         # start() to loaded_in_mass, so we subscribe to events before accepting clients
@@ -143,7 +147,7 @@ class SqueezelitePlayerProvider(PlayerProvider):
         self.slimproto.subscribe(self._handle_slimproto_event)
         try:
             await self.slimproto.start()
-        except Exception as err:
+        except OSError as err:
             # ports were validated during setup, so a failure here is unlikely
             self.unload_with_error(err)
             return
@@ -182,6 +186,9 @@ class SqueezelitePlayerProvider(PlayerProvider):
         if self._unsub_queue_updated is not None:
             self._unsub_queue_updated()
             self._unsub_queue_updated = None
+        if self._unsub_timeline_rate is not None:
+            self._unsub_timeline_rate()
+            self._unsub_timeline_rate = None
         # Stop all Sendspin bridges
         bridge_manager = getattr(self, "bridge_manager", None)
         if bridge_manager:
@@ -203,41 +210,25 @@ class SqueezelitePlayerProvider(PlayerProvider):
         return mass_player.name if mass_player else None
 
     def _lookup_elapsed(self, player_id: str) -> float | None:
-        """
-        Return the position in the track to report for a slimproto player, else None.
-
-        A player counts its elapsed time from the start of its stream, and a seek starts a new
-        stream part way into the track. The position in the track is the one its Sendspin
-        bridge has, else the one of the queue it plays, which publishes a seek's target before
-        it starts the new stream. None reports the player's own elapsed time.
-
-        :param player_id: The id of the slimproto player.
-        """
+        """Return a player's position in the track from its Sendspin bridge or queue, else None."""
         bridge = self.bridge_manager.get_bridge(player_id)
-        if bridge is not None and (position := bridge.position_in_track) is not None:
+        if bridge and (position := bridge.position_in_track) is not None:
             return position
-        if not self.slimproto or (slimclient := self.slimproto.get_player(player_id)) is None:
-            return None
-        if slimclient.state == SlimPlayerState.STOPPED:
-            # A stopped player reports position 0, as LMS does. Without it the client keeps
-            # showing the position it had: nothing pushes the player's own reset to 0 to the
-            # client. Play afterwards resumes where MA saved the position, so this only
-            # changes what is shown while stopped.
+        slimclient = self.slimproto.get_player(player_id) if self.slimproto else None
+        if slimclient and slimclient.state == SlimPlayerState.STOPPED:
+            # a stopped player reports 0, as LMS does: nothing else resets what the client shows
             return 0
-        if (media := slimclient.current_media) is None:
-            return None
-        source_id = cast("str | None", media.metadata.get("source_id"))
-        queue_item_id = cast("str | None", media.metadata.get("queue_item_id"))
-        if not source_id or not queue_item_id:
-            return None
-        queue = self.mass.player_queues.get(source_id)
-        if queue is None or queue.current_item is None:
-            return None
-        if queue.current_item.queue_item_id != queue_item_id:
-            # the player plays a track the queue has moved on from, such as the end of the
-            # previous track while the next one is buffered
-            return None
-        return queue.corrected_elapsed_time
+        media = slimclient.current_media if slimclient else None
+        if media and (source_id := media.metadata.get("source_id")):
+            queue = self.mass.player_queues.get(cast("str", source_id))
+            # the end of the previous track can still play while the queue is on the next one
+            if (
+                queue
+                and queue.current_item
+                and queue.current_item.queue_item_id == media.metadata.get("queue_item_id")
+            ):
+                return queue.corrected_elapsed_time
+        return None
 
     async def _validate_all_ports(
         self, control_port: int, telnet_port: int | None, json_port: int | None
@@ -270,7 +261,7 @@ class SqueezelitePlayerProvider(PlayerProvider):
         if self.slimproto:
             try:
                 await self.slimproto.stop()
-            except Exception as err:
+            except Exception as err:  # noqa: BLE001 - cleanup must not hide the setup error
                 self.logger.warning("Error stopping SlimProto server during cleanup: %s", err)
             finally:
                 self.slimproto = None

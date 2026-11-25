@@ -129,7 +129,8 @@ Supporting modules in `helpers/`:
 4. Player requests stream -> get_queue_item_stream() calls buffer.get_stream()
 5. prepare_next_audio_buffer() pre-fills the item after the streamed one: 60s before the end of
    its stream, or for a realtime source once its audio has fully arrived
-6. _cleanup_stale_queue_buffers() clears old buffers to free memory
+6. The queue's release_unneeded_audio() gives up every buffer that left its scope and that
+   nothing reads
 ```
 
 A player that moves on to another track by itself, after a skip on the speaker or a track it gave up
@@ -241,7 +242,7 @@ Smart fades mix the outgoing track's held-back tail (up to 45 seconds) with the 
 - `STANDARD_CROSSFADE`: `StandardCrossFade`, a fixed-length overlap after stripping trailing silence
 - `VOICE_OVER`: `VoiceOverFade`, a declared transition that plays as declared and is never planned
 
-An item that declares a tail overlap (`StreamDetails.tail_overlap`) plays it as `VOICE_OVER` into the item it was planned against, whatever the queue's crossfade setting: on the flow stream, and per item on a player that plays gapless, where the incoming item's request takes the smart fade stream to pick the mix up. A direct PCM stream of a single item never mixes its boundary. A plugin about to queue such items asks for the queue's boundaries to be mixed with `set_boundary_mix_required`; at each play start the controller then puts only a player whose selected output protocol cannot play gapless in flow mode.
+An item that declares a tail overlap (`StreamDetails.tail_overlap`) plays it as `VOICE_OVER` into the item it was planned against, whatever the queue's crossfade setting: on the flow stream, and per item on a player that plays gapless, where the incoming item's request takes the smart fade stream to pick the mix up. A plugin about to queue such items asks for the queue's boundaries to be mixed with `set_boundary_mix_required`; at each play start the controller then puts only a player whose selected output protocol cannot play gapless in flow mode.
 
 A smart crossfade falls back to the standard crossfade when a track has no analysis row with BPM and beats, when the planner raises `SmartFadeNotApplicable` (the held-back tail falls silent within its first 8 seconds, or no candidate fits), or when the build fails.
 

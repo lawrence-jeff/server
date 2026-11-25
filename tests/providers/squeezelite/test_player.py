@@ -7,7 +7,7 @@ import time
 from collections.abc import AsyncIterator
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
-from unittest.mock import AsyncMock, MagicMock, PropertyMock, call, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 from aioslimproto.models import ButtonCode, RemoteCode, SlimEvent
@@ -22,7 +22,7 @@ from music_assistant_models.enums import (
     ProtocolRole,
     RepeatMode,
 )
-from music_assistant_models.errors import MusicAssistantError, PlayerUnavailableError
+from music_assistant_models.errors import PlayerUnavailableError
 from music_assistant_models.media_items import AudioFormat
 from music_assistant_models.player import PlayerMedia
 
@@ -34,6 +34,7 @@ from music_assistant.providers.squeezelite.constants import (
     CONF_ENTRY_DISPLAY,
     CONF_ENTRY_VISUALIZATION,
     CONF_STORED_MUTED,
+    CONF_STORED_POWER,
     CONF_STORED_VOLUME,
     DEFAULT_PLAYER_VOLUME,
     REPEATMODE_MAP,
@@ -165,15 +166,16 @@ async def test_play_url_mime_type_follows_the_url_extension(url: str, expected: 
 
 
 @pytest.mark.parametrize(
-    ("url", "duration"),
+    ("media_type", "duration", "stream_duration", "expected"),
     [
-        ("http://127.0.0.1:8097/single/s1/queue_1/q2/p1.flac", 198),
-        ("http://127.0.0.1:8097/flow/s1/queue_1/q2/p1.flac", 198),
+        (MediaType.TRACK, 198, 4, 198),
+        (MediaType.TRACK, None, 4, 4),
+        (MediaType.RADIO, None, None, None),
     ],
-    ids=["single_item", "flow"],
+    ids=["track_after_a_seek", "stream_length_only", "radio"],
 )
 async def test_a_stream_gets_the_whole_tracks_duration_also_after_a_seek(
-    url: str, duration: int
+    media_type: MediaType, duration: int | None, stream_duration: int | None, expected: int | None
 ) -> None:
     """The position reported is the one in the track, so the duration is the track's."""
     player, mass = _player_with_mocked_mass()
@@ -182,15 +184,17 @@ async def test_a_stream_gets_the_whole_tracks_duration_also_after_a_seek(
     slimplayer.play_url = AsyncMock()
     media = PlayerMedia(
         uri="fake://x",
-        media_type=MediaType.TRACK,
+        media_type=media_type,
         source_id="queue_1",
-        duration=198,
-        stream_duration=4,
+        duration=duration,
+        stream_duration=stream_duration,
     )
 
-    await player._handle_play_url_for_slimplayer(url=url, media=media)
+    await player._handle_play_url_for_slimplayer(
+        url="http://127.0.0.1:8097/single/s1/queue_1/q2/p1.flac", media=media
+    )
 
-    assert slimplayer.play_url.call_args.kwargs["metadata"]["duration"] == duration
+    assert slimplayer.play_url.call_args.kwargs["metadata"]["duration"] == expected
 
 
 @pytest.mark.parametrize(
@@ -369,173 +373,12 @@ async def test_the_quality_of_a_track_that_is_no_longer_playing_is_left_alone() 
     nothing.update_metadata.assert_not_awaited()
 
 
-def _connecting_player(
-    features: set[PlayerFeature],
-    saved_power: bool | None = None,
-    stored: dict[str, Any] | None = None,
-) -> tuple[SqueezelitePlayer, MagicMock]:
-    player, mass = _player_with_mocked_mass()
-    config_values = stored or {}
-    mass.config.get_protocol_value.side_effect = lambda _player_id, key, default=None: (
-        config_values.get(key, default)
-    )
-    client = MagicMock(
-        player_id="p1",
-        connected=True,
-        powered=False,
-        state=SlimPlayerState.STOPPED,
-        current_media=None,
-        device_model="Squeezebox",
-        device_type="touch",
-        device_address="127.0.0.1",
-        volume_level=50,
-        muted=False,
-    )
-    client.name = "Kitchen"
-    for method in ("stop", "mute", "volume_set"):
-        setattr(client, method, AsyncMock())
-    player.client = client
-    saved = {"p1_power": saved_power}
-    mass.cache.get = AsyncMock(side_effect=lambda key, **_kwargs: saved.get(key))
-    mass.cache.set = AsyncMock()
-    mass.players.register = AsyncMock()
-    mass.players.cmd_power = AsyncMock()
-    use_real_create_task(mass)
-    patch.object(
-        SqueezelitePlayer,
-        "provider",
-        new_callable=PropertyMock,
-        return_value=MagicMock(instance_id="squeezelite"),
-    ).start()
-    player.logger = MagicMock()
-    patch.object(
-        SqueezelitePlayer,
-        "supported_features",
-        new_callable=PropertyMock,
-        return_value=features,
-    ).start()
-    player._player = MagicMock(player_id="p1")
-    return player, mass
-
-
-@pytest.mark.parametrize("saved_power", [True, None])
-async def test_a_player_that_was_on_or_is_new_comes_up_powered_on(
-    saved_power: bool | None,
-) -> None:
-    """After a boot or a server restart a player that was on, or is new, comes up on."""
-    try:
-        player, mass = _connecting_player({PlayerFeature.POWER}, saved_power)
-        await player.setup()
-        mass.players.cmd_power.assert_awaited_once_with("p1", True)
-        mass.players.register.assert_awaited_once_with(player)
-    finally:
-        patch.stopall()
-
-
-async def test_a_player_that_was_switched_off_stays_off_after_connecting() -> None:
-    """Rebooting a player does not turn on one that was off, as on LMS."""
-    try:
-        player, mass = _connecting_player({PlayerFeature.POWER}, saved_power=False)
-        await player.setup()
-        mass.players.cmd_power.assert_not_awaited()
-        mass.players.register.assert_awaited_once_with(player)
-    finally:
-        patch.stopall()
-
-
-async def test_a_player_without_power_control_is_not_powered_on() -> None:
-    """Only players that can be powered are asked to, or have a state to restore."""
-    try:
-        player, mass = _connecting_player(set(), saved_power=True)
-        await player.setup()
-        mass.players.cmd_power.assert_not_awaited()
-        assert not player._power_tracking
-    finally:
-        patch.stopall()
-
-
-async def test_a_refused_power_on_does_not_stop_the_player_from_connecting() -> None:
-    """Music Assistant refusing is logged, and the player stays registered and tracked."""
-    try:
-        player, mass = _connecting_player({PlayerFeature.POWER})
-        mass.players.cmd_power.side_effect = MusicAssistantError("no")
-        await player.setup()
-        mass.players.register.assert_awaited_once()
-        cast("MagicMock", player.logger.debug).assert_called_once()
-        assert player._power_tracking
-    finally:
-        patch.stopall()
-
-
-async def test_the_power_state_is_saved_when_it_changes_after_connecting() -> None:
-    """Switching a connected player on or off is remembered for the next connection."""
-    try:
-        player, mass = _connecting_player({PlayerFeature.POWER}, saved_power=True)
-        await player.setup()
-        mass.cache.set.reset_mock()
-        for powered in (True, False):
-            player.client.powered = powered
-            player.update_attributes()
-            await asyncio.sleep(0)
-            kwargs = mass.cache.set.await_args.kwargs
-            assert (kwargs["key"], kwargs["data"]) == ("p1_power", powered)
-        assert mass.cache.set.await_count == 2
-    finally:
-        patch.stopall()
-
-
-async def test_an_unchanged_power_state_is_not_saved_again() -> None:
-    """Every player event updates the attributes, but only a change is written."""
-    try:
-        player, mass = _connecting_player({PlayerFeature.POWER}, saved_power=True)
-        await player.setup()
-        mass.cache.set.reset_mock()
-        for _ in range(3):
-            player.update_attributes()
-        await asyncio.sleep(0)
-        mass.cache.set.assert_not_awaited()
-    finally:
-        patch.stopall()
-
-
-async def test_the_state_a_player_starts_with_is_not_saved_over_the_remembered_one() -> None:
-    """A fresh player object is off until restored; that must not overwrite "on"."""
-    try:
-        player, mass = _connecting_player({PlayerFeature.POWER}, saved_power=True)
-        # before setup has restored the state, an event arrives with the player off
-        player.client.powered = True
-        player.update_attributes()
-        player.client.powered = False
-        player.update_attributes()
-        await asyncio.sleep(0)
-        mass.cache.set.assert_not_awaited()
-    finally:
-        patch.stopall()
-
-
-async def test_a_disconnected_player_does_not_save_its_power_state() -> None:
-    """When the connection drops the player reports off, which is not a choice to remember."""
-    try:
-        player, mass = _connecting_player({PlayerFeature.POWER}, saved_power=True)
-        await player.setup()
-        player.client.powered = True
-        player.update_attributes()
-        await asyncio.sleep(0)
-        mass.cache.set.reset_mock()
-        player.client.powered = False
-        player.client.connected = False
-        player.update_attributes()
-        await asyncio.sleep(0)
-        mass.cache.set.assert_not_awaited()
-    finally:
-        patch.stopall()
-
-
 async def _connected_with_volume(
     saved: list[Any] | None = None, stored: dict[str, Any] | None = None
 ) -> tuple[SqueezelitePlayer, MagicMock]:
     player, mass = _connecting_player(set(), stored=stored)
     mass.cache.get = AsyncMock(side_effect=lambda key, **_k: saved if key == "p1" else None)
+    mass.cache.set = AsyncMock()
     await player.setup()
     player.update_state = MagicMock()  # type: ignore[method-assign,misc]
 
@@ -704,7 +547,7 @@ async def test_the_restored_volume_is_not_saved_again() -> None:
 async def test_a_volume_from_the_legacy_cache_is_carried_into_the_player_config() -> None:
     """Connecting copies the volume restored from the cache entry over once, before it expires."""
     try:
-        player, mass = _connecting_player(set())
+        player, mass = _connecting_player(set(), stored={})
         # restored on connect from the legacy cache entry, by the provider's _get_initial_volume
         player.client.volume_level = 55
         await player.setup()
@@ -812,6 +655,8 @@ def _player_for_volume_restore(
     player._provider = MagicMock(mass=mass, instance_id="squeezelite_1")
     player._attr_supported_features = set()
     player.logger = MagicMock()
+    # no power control, so these tests leave the power state alone
+    player._attr_supported_features = set()
     player.client = MagicMock(player_id="p1", muted=False, volume_level=20)
     player.client.stop = AsyncMock()
     player.client.mute = AsyncMock()
@@ -908,6 +753,137 @@ async def test_volume_changed_on_the_player_is_stored() -> None:
         player.handle_slim_event(event)
         # the volume and the mute, once
         assert mass.config.set_protocol_value.call_count == 2
+
+
+def _connecting_player(
+    features: set[PlayerFeature],
+    saved_power: bool | None = None,
+    stored: dict[str, Any] | None = None,
+) -> tuple[SqueezelitePlayer, MagicMock]:
+    """
+    Return a connecting player whose stored config values are mocked.
+
+    :param features: The supported features of the player.
+    :param saved_power: The power state stored for the player, None when none is stored.
+    :param stored: The config values stored for the player, else just a volume of 50.
+    """
+    player, mass = _player_with_mocked_mass()
+    stored = {CONF_STORED_VOLUME: 50} if stored is None else dict(stored)
+    if saved_power is not None:
+        stored[CONF_STORED_POWER] = saved_power
+    mass.config.get_protocol_value.side_effect = lambda _pid, key, default=None: stored.get(
+        key, default
+    )
+    mass.config.set_protocol_value.side_effect = lambda _pid, key, value: stored.update(
+        {key: value}
+    )
+    client = MagicMock(
+        player_id="p1",
+        connected=True,
+        powered=False,
+        state=SlimPlayerState.STOPPED,
+        current_media=None,
+        device_model="Squeezebox",
+        device_type="touch",
+        device_address="127.0.0.1",
+        volume_level=50,
+        muted=False,
+    )
+    client.name = "Kitchen"
+    for method in ("stop", "power", "mute", "volume_set"):
+        setattr(client, method, AsyncMock())
+    player.client = client
+    mass.players.register = AsyncMock()
+    mass.players.cmd_power = AsyncMock()
+    player.logger = MagicMock()
+    player._attr_supported_features = features
+    return player, mass
+
+
+def _saved_power_states(mass: MagicMock) -> list[object]:
+    """Return the power states stored, in order."""
+    return [
+        args[2]
+        for args, _kwargs in mass.config.set_protocol_value.call_args_list
+        if args[1] == CONF_STORED_POWER
+    ]
+
+
+@pytest.mark.parametrize("saved_power", [True, None])
+async def test_a_player_that_was_on_or_is_new_comes_up_powered_on(
+    saved_power: bool | None,
+) -> None:
+    """After a boot or a server restart a player that was on, or is new, comes up on."""
+    player, mass = _connecting_player({PlayerFeature.POWER}, saved_power)
+    await player.setup()
+    cast("MagicMock", player.client).power.assert_awaited_once_with(True)
+    mass.players.register.assert_awaited_once_with(player)
+
+
+async def test_powering_on_after_connecting_starts_no_playback() -> None:
+    """The device is powered on itself: Music Assistant's power command would run its auto play."""
+    player, mass = _connecting_player({PlayerFeature.POWER}, saved_power=True)
+    await player.setup()
+    mass.players.cmd_power.assert_not_awaited()
+    mass.player_queues.resume.assert_not_called()
+
+
+async def test_a_player_that_was_switched_off_stays_off_after_connecting() -> None:
+    """Rebooting a player does not turn on one that was off, as on LMS."""
+    player, mass = _connecting_player({PlayerFeature.POWER}, saved_power=False)
+    await player.setup()
+    cast("MagicMock", player.client).power.assert_not_awaited()
+    mass.players.register.assert_awaited_once_with(player)
+
+
+async def test_a_player_without_power_control_is_not_powered_on() -> None:
+    """Only players that can be powered are asked to, or have a state to restore."""
+    player, _ = _connecting_player(set(), saved_power=True)
+    await player.setup()
+    cast("MagicMock", player.client).power.assert_not_awaited()
+    assert not player._power_tracking
+
+
+async def test_the_power_state_is_saved_when_it_changes_after_connecting() -> None:
+    """Switching a connected player on or off is remembered for the next connection."""
+    player, mass = _connecting_player({PlayerFeature.POWER}, saved_power=True)
+    await player.setup()
+    for powered in (True, False):
+        cast("MagicMock", player.client).powered = powered
+        player.update_attributes()
+    assert _saved_power_states(mass) == [True, False]
+
+
+async def test_an_unchanged_power_state_is_not_saved_again() -> None:
+    """Every player event updates the attributes, but only a change is written."""
+    player, mass = _connecting_player({PlayerFeature.POWER}, saved_power=True)
+    await player.setup()
+    for _ in range(3):
+        player.update_attributes()
+    assert _saved_power_states(mass) == []
+
+
+async def test_the_state_a_player_starts_with_is_not_saved_over_the_remembered_one() -> None:
+    """A fresh player object is off until restored; that must not overwrite "on"."""
+    player, mass = _connecting_player({PlayerFeature.POWER}, saved_power=True)
+    # before setup has restored the state, an event arrives with the player off
+    cast("MagicMock", player.client).powered = True
+    player.update_attributes()
+    cast("MagicMock", player.client).powered = False
+    player.update_attributes()
+    assert _saved_power_states(mass) == []
+
+
+async def test_a_disconnected_player_does_not_save_its_power_state() -> None:
+    """When the connection drops the player reports off, which is not a choice to remember."""
+    player, mass = _connecting_player({PlayerFeature.POWER}, saved_power=True)
+    await player.setup()
+    cast("MagicMock", player.client).powered = True
+    player.update_attributes()
+    cast("MagicMock", player.client).powered = False
+    cast("MagicMock", player.client).connected = False
+    player.update_attributes()
+    assert _saved_power_states(mass) == [True]
 
 
 @pytest.mark.parametrize("entry", [CONF_ENTRY_DISPLAY, CONF_ENTRY_VISUALIZATION])

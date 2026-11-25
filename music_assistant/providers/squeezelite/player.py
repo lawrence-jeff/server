@@ -27,7 +27,6 @@ from music_assistant.constants import (
     VERBOSE_LOG_LEVEL,
 )
 from music_assistant.helpers.audio import get_mime_type
-from music_assistant.helpers.player import served_duration
 from music_assistant.models.player import DeviceInfo, PlayerMedia
 from music_assistant.models.player_protocol import PlayerProtocol
 from music_assistant.models.player_state import POSITION_JUMP_THRESHOLD
@@ -36,10 +35,10 @@ from music_assistant.providers.sendspin.bridge_manager import evaluate_bridge_of
 from . import browseuser, haextras  # HA-EXTRAS
 from .browselibrary import art_ref_for_item, cover_icon
 from .constants import (
-    CACHE_CATEGORY_PREV_STATE,
     CONF_ENTRY_DISPLAY,
     CONF_ENTRY_VISUALIZATION,
     CONF_STORED_MUTED,
+    CONF_STORED_POWER,
     CONF_STORED_VOLUME,
     REPEATMODE_BY_LMS_VALUE,
     REPEATMODE_MAP,
@@ -99,8 +98,7 @@ class SqueezelitePlayer(PlayerProtocol):
 
     # the Sendspin bridge of this player while it has one, set by that bridge
     sendspin_bridge: SendspinSqueezeliteBridge | None = None
-    # set once the saved power state has been restored: the state a player starts with is not a
-    # choice made by the user, so it is not saved
+    # set once the saved power state is restored: the state a player connects with is not saved
     _power_tracking: bool = False
     # the volume to return to while muted: the player is muted by setting its volume to 0 (see
     # volume_mute), so this is None when it is not muted
@@ -369,7 +367,9 @@ class SqueezelitePlayer(PlayerProtocol):
         was_powered = self._attr_powered
         self._attr_powered = self.client.powered
         if self._power_tracking and self.client.connected and self._attr_powered != was_powered:
-            self.mass.create_task(self._save_power_state(self._attr_powered))
+            self.mass.config.set_protocol_value(
+                self.protocol_id, CONF_STORED_POWER, self._attr_powered
+            )
         old_state = self._attr_playback_state
         self._attr_playback_state = STATE_MAP[self.client.state]
         if self._muted_volume is not None and self.client.volume_level != 0:
@@ -442,12 +442,8 @@ class SqueezelitePlayer(PlayerProtocol):
                 "album": media.album,
                 "artist": media.artist,
                 "image_url": media.image_url,
-                # the whole track's length: the position reported to the client is the one in
-                # the track (the provider's elapsed lookup), also after a seek, when the stream
-                # holds only the part that is left
-                "duration": (
-                    media.duration if media.duration is not None else served_duration(media, url)
-                ),
+                # the whole track, to match the position in the track that is reported
+                "duration": media.duration or media.stream_duration,
                 "source_id": media.source_id,
                 "queue_item_id": media.queue_item_id,
                 **quality_fields,
@@ -733,33 +729,6 @@ class SqueezelitePlayer(PlayerProtocol):
             visualisation=SlimVisualisationType(visualization), disabled=not display_enabled
         )
 
-    async def _restore_power(self) -> None:
-        """Power the player on again, unless it was switched off before it disconnected."""
-        # As on LMS: a player that was on comes back on after it reboots, loses its connection or
-        # Music Assistant restarts, and one that was switched off stays off. A player with no saved
-        # state comes up on. Going through the power command applies "Automatically play (resume on
-        # power on)": it only resumes the queue when that player setting is ticked, which is off by
-        # default.
-        # Hardware that powers itself on at boot (e.g. the Squeezebox Radio) overrides a saved off.
-        if PlayerFeature.POWER not in self.supported_features or self.player is None:
-            return
-        was_powered = await self.mass.cache.get(
-            key=self._power_cache_key,
-            provider=self.provider.instance_id,
-            category=CACHE_CATEGORY_PREV_STATE,
-        )
-        if was_powered is None or was_powered:
-            player_id = self.player.player_id
-            try:
-                await self.mass.players.cmd_power(player_id, True)
-            except MusicAssistantError as err:
-                self.logger.debug("Could not power on %s after connecting: %s", player_id, err)
-        self._power_tracking = True
-
-    @property
-    def _power_cache_key(self) -> str:
-        return f"{self.protocol_id}_power"
-
     def _save_volume_state(self, *, changed_only: bool = False) -> None:
         """
         Remember the mute and the volume for the next connection.
@@ -778,19 +747,19 @@ class SqueezelitePlayer(PlayerProtocol):
         self.mass.config.set_protocol_value(self.protocol_id, CONF_STORED_VOLUME, volume)
         self.mass.config.set_protocol_value(self.protocol_id, CONF_STORED_MUTED, muted)
 
-    async def _save_power_state(self, powered: bool) -> None:
-        """Remember the power state, next to the volume and mute, for the next connection."""
-        await self.mass.cache.set(
-            key=self._power_cache_key,
-            data=powered,
-            provider=self.provider.instance_id,
-            category=CACHE_CATEGORY_PREV_STATE,
-        )
-
     def _sync_elapsed_after_flush(self) -> None:
         """Drop an old-stream heartbeat that landed before the flush."""
         self._attr_elapsed_time = self.client.elapsed_seconds
         self._attr_elapsed_time_last_updated = time.time()
+
+    async def _restore_power(self) -> None:
+        """Power the player on again, unless it was switched off before it disconnected."""
+        # straight to the device: Music Assistant's power command would also apply auto play
+        if PlayerFeature.POWER not in self.supported_features:
+            return
+        if self.mass.config.get_protocol_value(self.protocol_id, CONF_STORED_POWER, True):
+            await self.client.power(True)
+        self._power_tracking = True
 
     def _report_delivered_format(self) -> None:
         """Add the format Music Assistant streams to the player to the metadata of its stream."""

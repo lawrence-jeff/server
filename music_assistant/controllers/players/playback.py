@@ -670,11 +670,15 @@ class PlaybackMixin(_PlayerControllerBase):
                 )
                 await self._handle_cmd_stop(group.player_id)
 
-    async def _stop_player_or_its_queue(self, player: Player) -> None:
+    async def _stop_player_or_its_queue(
+        self, player: Player, keep_sleep_timer: bool = False
+    ) -> None:
         """
         Stop the player, ending its queue when it is playing one of its own.
 
         :param player: The player to stop.
+        :param keep_sleep_timer: The stop stands in for a pause, so the sleep timer of the
+            player's queue still waits for its target once the queue resumes.
         """
         # End the queue itself, exactly as a stop command does: stopping only the device
         # leaves the queue session open, so its preloading keeps pulling audio and a
@@ -686,7 +690,9 @@ class PlaybackMixin(_PlayerControllerBase):
         if (
             active_queue := self.get_active_queue(player)
         ) and active_queue.queue_id == player.player_id:
-            await self.mass.player_queues._handle_stop(player.player_id)
+            await self.mass.player_queues._handle_stop(
+                player.player_id, keep_sleep_timer=keep_sleep_timer
+            )
             return
         await self._handle_cmd_stop(player.player_id)
 
@@ -806,6 +812,17 @@ class PlaybackMixin(_PlayerControllerBase):
                 player.group_members,
             )
             await self._activate_output_protocol(player, "native")
+        if is_fresh_start:
+            # members that kept their output in this group while it played nothing took
+            # their level and mute on their own protocol, so that output starts at them too
+            for member_protocol_id in target_player.group_members:
+                member = self.get_player_by_protocol(member_protocol_id)
+                if (
+                    member is not None
+                    and member is not player
+                    and member.active_output_protocol == member_protocol_id
+                ):
+                    await self._activate_output_protocol(member, member_protocol_id)
 
         async with own.prepare_play_media() if own else contextlib.nullcontext():
             # skip auto-play since we're about to start playback
@@ -866,6 +883,10 @@ class PlaybackMixin(_PlayerControllerBase):
                 await protocol_player.stop()
                 if len(protocol_player.group_members) <= 1:
                     self.schedule_active_output_protocol_clear(player)
+            elif (own := player.own_protocol) is not None and own.is_active_session:
+                # a group that plays nothing can still hold its members, and can be about to
+                # play on by itself with another leader: the stop ends that as well
+                await own.stop()
             return
         player.mark_stop_called()
         # Delegate to the active audio protocol if one is active
@@ -1016,7 +1037,7 @@ class PlaybackMixin(_PlayerControllerBase):
             "Player/protocol %s does not support pause, using STOP instead",
             player.name,
         )
-        await self._stop_player_or_its_queue(player)
+        await self._stop_player_or_its_queue(player, keep_sleep_timer=True)
 
     async def _resolve_currently_playing(
         self, player: Player, mass_queue: PlayerQueue | None, library_only: bool = False

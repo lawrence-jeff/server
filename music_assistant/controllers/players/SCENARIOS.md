@@ -470,6 +470,22 @@ also when they were told while that power on was under way.
   - `test_power_control.py::test_a_switch_on_that_fails_leaves_the_power_cut_as_it_was`
   - `test_power_control.py::test_a_switch_on_that_fails_keeps_a_power_cut_that_was_told_meanwhile`
 
+### AWAY-35 · A multi-channel player plays on without its subwoofer, not without its main speakers
+
+Kitchen is a multi-channel player of a left and a right Sendspin speaker and a subwoofer. The
+subwoofer drops off the network: Kitchen stays available, its left and right speaker play the full
+range, and it says the subwoofer is offline. The right speaker drops off: the left one plays both
+channels and still leaves the bass to the subwoofer. Once both main speakers are away, Kitchen is
+unavailable, although its subwoofer is still there, and it stops playing. So does a player of one
+speaker with a subwoofer without that speaker.
+
+- End-to-end: **possible with** three virtual Sendspin speakers combined into Kitchen in the lab,
+  and the bass and the channels checked in the captured audio.
+- Proven by:
+  - `tests/providers/sendspin/test_multi_channel.py::test_a_set_with_a_subwoofer_plays_on_while_a_speaker_is_away`
+  - `tests/providers/sendspin/test_multi_channel.py::test_a_set_whose_main_speakers_are_away_is_unavailable`
+  - `tests/providers/sendspin/test_multi_channel.py::test_a_playing_set_stops_once_none_of_its_main_speakers_is_left`
+
 ## Several devices on one host
 
 One host, such as a Raspberry Pi, can run several players behind one MAC and one IP address.
@@ -1850,6 +1866,16 @@ that follows switches nothing on.
   - `test_group_power_on.py::test_an_announcement_to_a_group_switches_no_member_on`
   - `test_group_power_on.py::test_an_announcement_to_a_member_switches_no_other_member_on`
 
+### GROUP-70 · An announcement to a player that leads others plays on that player alone
+
+Kitchen leads Office and plays. An announcement to Kitchen stops the group and takes Office off
+Kitchen, so only Kitchen plays the clip. Office joins Kitchen again after it, and the group plays
+on, on both.
+
+- End-to-end: **possible with** two speakers that group on their own protocol and do not announce
+  natively, and a client that sends an announcement.
+- Proven by: `test_announcements.py::test_an_announcement_to_a_leader_plays_on_the_leader_alone`
+
 ### GROUP-35 · A play, a next, a previous or a seek on a group that plays already switches no member on
 
 Downstairs plays on Kitchen and Office: Den's plug refused to switch on when it started, and
@@ -1899,14 +1925,10 @@ to switch on, and Den is a member again once it has stopped (GROUP-25).
 Downstairs plays on Kitchen and Office, without Den, whose plug works again. Kitchen and Office
 play the track out, or Kitchen plays something of its own instead: Downstairs still reads as
 playing while its queue does not play. A resume of its queue switches Den's plug on, and
-Downstairs plays on all three once Den has started up. The same holds for a universal group
-that was played while none of its plugs answered: it started on no speaker and reads as playing,
-and the next play switches all three plugs on and waits for them.
+Downstairs plays on all three once Den has started up.
 
 - End-to-end: **possible with** a power control the lab can switch and can make refuse.
-- Proven by:
-  - `test_group_power_on.py::test_a_resume_of_a_group_that_still_reads_as_playing_waits_for_its_members`
-  - `test_group_power_on.py::test_a_universal_group_that_started_without_a_member_waits_for_them_at_its_next_start`
+- Proven by: `test_group_power_on.py::test_a_resume_of_a_group_that_still_reads_as_playing_waits_for_its_members`
 
 ### GROUP-39 · A play on a member that goes to its group waits for the members of the group
 
@@ -2052,6 +2074,34 @@ against a first member that can not lead the others.
 - Proven by:
   - `test_grouping.py::test_a_sync_group_whose_leader_leaves_is_led_by_a_member_that_can_group_with_the_others`
   - `test_grouping.py::test_a_player_added_to_an_idle_sync_group_is_checked_against_the_member_that_leads`
+
+### GROUP-68 · A sync group that is stopped between two leaders stays silent
+
+Downstairs plays with Kitchen leading Office and Den. Kitchen leaves the group, which is silent and
+plays on two seconds later, with Office leading Den. When Downstairs, Office or the queue of
+Downstairs is stopped before that, or Downstairs is ungrouped, nothing plays later and Office and
+Den are free again. With fake power control, Downstairs is still on after the stop and keeps Office
+and Den. A play on Downstairs plays on from where the music stopped.
+
+- End-to-end: **possible with** three speakers that group on a protocol without a hand-over of the
+  playing leader, such as Sonos.
+- Proven by:
+  - `test_group_stop.py::test_a_sync_group_that_is_stopped_between_two_leaders_stays_silent`
+  - `test_group_stop.py::test_a_powered_sync_group_that_is_stopped_between_two_leaders_stays_on_and_silent`
+  - `test_group_stop.py::test_a_sync_group_stopped_between_two_leaders_plays_on_from_there_when_it_is_played`
+
+### GROUP-69 · A group whose music just ended lets its members go when it is stopped
+
+Downstairs, a sync group or a universal group of Kitchen and Office, plays its music to the end and
+holds its members for 10 s more. When Downstairs or Office is stopped in that time, or Downstairs
+is ungrouped, Kitchen and Office are free at once. Music that is played on Office in that time
+starts at once when Downstairs is a sync group with a fixed member list: Downstairs lets Office go
+first.
+
+- End-to-end: **yes**. Two virtual Squeezelite players.
+- Proven by:
+  - `test_group_stop.py::test_a_group_that_is_stopped_after_its_music_ended_frees_its_members`
+  - `test_group_stop.py::test_a_member_of_a_fixed_group_whose_music_ended_plays_its_own_music_at_once`
 
 ### GROUP-50 · What a member does elsewhere does not cost it its place in a sync group
 
@@ -2208,6 +2258,57 @@ plays. Kitchen plays the stream of Everywhere as any member does, and its speake
   the left and right channel checked in the captured audio.
 - Proven by: `tests/providers/sendspin/test_multi_channel.py::test_a_set_plays_in_a_universal_group`
 
+### GROUP-64 · A multi-channel player with a subwoofer splits the bass only between its own speakers
+
+Kitchen, a multi-channel player of a left and a right Sendspin speaker and a subwoofer, leads the
+Sendspin player Den. The subwoofer of Kitchen plays the bass and its other speakers leave it to the
+subwoofer, while Den plays the full range as it does on its own.
+
+- End-to-end: **possible with** three virtual Sendspin speakers combined into Kitchen and a fourth
+  as Den in the lab, and the bass checked in the captured audio of each.
+- Proven by: `tests/providers/sendspin/test_multi_channel.py::test_a_set_with_a_subwoofer_splits_the_bass_only_between_its_own_speakers`
+
+### GROUP-65 · A group none of whose members can play fails to start
+
+Downstairs, a sync group with a fixed member list or not, or a universal group of Kitchen, Office
+and Den, is played while all three are switched off and their plugs do not answer. The play fails:
+no speaker gets a command, and Downstairs and its queue stay idle, with all three as members. The
+plugs work again and the user plays another track: the plugs are switched on, and Downstairs
+plays on all three once they have started up.
+
+- End-to-end: **possible with** a power control the lab can switch and can make refuse.
+- Proven by: `test_group_power_on.py::test_a_group_none_of_whose_members_can_play_fails_and_waits_for_them_at_its_next_start`
+
+### GROUP-66 · A sync group plays on once its silent old leader lets a member go
+
+Downstairs plays with Kitchen leading over AirPlay, and Office following Kitchen on their own
+protocol. Kitchen leaves the group and answers no group command for 36 s, after which its device
+lets Office go: Downstairs then plays on, on Office. When Office leaves the group during the wait,
+it leaves at once, and nothing plays later. Nor does it when Downstairs is stopped during the wait.
+A play on Downstairs during the wait fails instead of waiting along; a later one plays.
+
+- End-to-end: **no**: the device has to be silent for that long.
+- Proven by:
+  - `test_grouping.py::test_a_sync_group_plays_on_once_its_silent_old_leader_lets_the_member_go`
+  - `test_grouping.py::test_a_member_taken_out_while_its_silent_old_leader_holds_it_does_not_start`
+  - `test_grouping.py::test_a_sync_group_stopped_while_its_silent_old_leader_holds_a_member_stays_silent`
+  - `test_grouping.py::test_a_play_does_not_wait_until_a_silent_old_leader_lets_the_new_one_go`
+
+### GROUP-67 · A leader that plays over another protocol lets its followers go before it stops
+
+Downstairs plays with Kitchen leading over AirPlay, and Office following Kitchen on their own
+protocol. Kitchen leaves the group: it first lets Office go and then stops its AirPlay receiver, as
+a device can be silent for long on a group command right after that stop. Downstairs plays on, on
+Office, two seconds later. The same order applies when both leave at once. When Kitchen plays on the
+protocol Office follows it on, it stops first and lets Office go then.
+
+- End-to-end: **possible with** two speakers that group on their own protocol and have an AirPlay
+  receiver.
+- Proven by:
+  - `test_grouping.py::test_a_sync_group_plays_on_at_once_when_its_airplay_leader_leaves`
+  - `test_grouping.py::test_a_sync_group_whose_airplay_leader_and_its_member_leave_at_once_lets_them_go`
+  - `test_grouping.py::test_a_sync_group_leader_on_its_own_protocol_stops_before_it_lets_its_members_go`
+
 ## Where playback goes
 
 A player plays through one of its outputs, and what the device plays by itself is steered
@@ -2239,6 +2340,21 @@ pause.
 - End-to-end: **possible with** a LinkPlay device that is no WiiM (the server controls a WiiM
   through its own protocol), with its DLNA renderer and a Spotify Connect session started on it.
 - Proven by: `tests/providers/wiim/test_linkplay_control.py::test_transport_commands_reach_an_app_playing_on_the_renderer`
+
+### OUTPUT-3 · A player that plays nothing keeps no output for a group it no longer has
+
+Lounge leads Study over AirPlay and the user stops the group: Lounge keeps its AirPlay receiver
+as its output, for the group. Once the user takes Study out, neither of them names its AirPlay
+receiver as its output. Study, a WiiM speaker, plays along with the Sendspin speaker Den on its
+Sendspin client; once it leaves Den's group, it no longer names that client as its output. Volume
+and mute of both go to their own protocol again.
+
+- End-to-end: **possible with** two virtual players of different kinds that each also run an
+  AirPlay receiver on their host, and a WiiM speaker with a Sendspin bridge next to a Sendspin
+  speaker.
+- Proven by:
+  - `test_outputs.py::test_a_stopped_leader_lets_go_of_its_output_once_its_group_ended`
+  - `test_outputs.py::test_a_member_lets_go_of_the_output_it_played_its_group_on_once_it_left`
 
 ## Volume
 
@@ -2324,6 +2440,20 @@ has no level of its own; only its members count.
 - End-to-end: **possible with** two players of one make that group, one of them a set of speakers.
 - Proven by: `test_grouping.py::test_a_leader_counts_its_own_level_in_the_group_volume`
 
+### VOLUME-7 · An output that plays nothing leaves volume and mute to the own protocol
+
+Lounge leads Study over AirPlay and the user stops the group. Lounge's AirPlay receiver stays its
+output for the group, but plays nothing, and an AirPlay receiver only takes a volume command while
+it streams. A volume or mute command goes to Lounge's own protocol, and the receiver gets none.
+The user turns Study down and mutes it meanwhile, which reaches Study's own protocol; when the
+group plays again, Study's receiver gets that level and mute before the music starts.
+
+- End-to-end: **possible with** two virtual players of different kinds that each also run an
+  AirPlay receiver on their host.
+- Proven by:
+  - `test_outputs.py::test_a_stopped_leader_takes_volume_on_its_own_protocol_while_it_keeps_its_group`
+  - `test_outputs.py::test_a_member_plays_again_at_the_level_it_got_while_its_group_was_stopped`
+
 ## A pause, a stop and the end of a queue
 
 A queue whose player plays its last item out is taken for ended 5 s later: it is parked on its
@@ -2353,12 +2483,14 @@ for ended after 5 s as any other.
 ### PAUSE-3 · A paused queue that is stopped at the pause timeout is not ended
 
 A speaker with a pause of its own is paused 5 s into the last track of its queue and stays
-paused. After the pause timeout of 30 s the server stops it. The queue is idle on that track at
-5 s, and a resume plays the track on from there.
+paused. After the pause timeout of 30 s the server stops it, once. The queue is idle on that
+track at 5 s, and a resume plays the track on from there.
 
 - End-to-end: **possible with** a player of the lab that has a pause of its own and plays in flow
   mode, paused for longer than the pause timeout.
-- Proven by: `test_paused_queue.py::test_a_paused_queue_that_is_stopped_at_the_pause_timeout_is_not_ended`
+- Proven by:
+  - `test_paused_queue.py::test_a_paused_queue_that_is_stopped_at_the_pause_timeout_is_not_ended`
+  - `test_paused_queue.py::test_a_pause_command_is_watched_once`
 
 ### PAUSE-4 · A play that starts as an ended queue is settled plays
 
@@ -2487,3 +2619,21 @@ leaves the queue as it is: on its last track, not ended.
 - End-to-end: **no**: it needs a command that hangs for two minutes.
 - Proven by:
   `test_stopped_queue.py::test_a_queue_that_played_out_on_a_player_that_stays_busy_keeps_its_place`
+
+### PAUSE-14 · A queue paused at its speaker is stopped at the pause timeout
+
+A speaker with a pause of its own plays its queue and is paused 5 s in at the device itself, by
+its own app or a remote. After the pause timeout of 30 s the server stops it, as it stops a queue
+paused through the server, and a resume plays the track on from where it was paused. That is
+also so when the queue was paused through the server and played on at the device before. A queue
+that plays on at the device within the pause timeout is not stopped. Neither is another source,
+such as Spotify, that took the speaker over, before or during the pause, and is paused there.
+
+- End-to-end: **possible with** a player of the lab that has a pause of its own and can be paused
+  at the device, paused for longer than the pause timeout.
+- Proven by:
+  - `test_paused_queue.py::test_a_pause_at_the_speaker_stops_its_queue_at_the_pause_timeout`
+  - `test_paused_queue.py::test_a_queue_stopped_after_a_pause_at_the_speaker_resumes_from_that_pause`
+  - `test_paused_queue.py::test_a_queue_played_on_at_the_speaker_within_the_pause_timeout_is_not_stopped`
+  - `test_paused_queue.py::test_another_source_paused_at_the_speaker_is_not_stopped`
+  - `test_paused_queue.py::test_a_source_that_takes_over_a_paused_speaker_is_not_stopped`

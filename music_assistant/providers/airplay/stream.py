@@ -50,7 +50,8 @@ from music_assistant.providers.airplay.constants import (
     StreamingProtocol,
 )
 from music_assistant.providers.airplay.helpers import (
-    CLI_CLOCK_OFFSET_NS,
+    cli_clock_args,
+    cli_clock_time,
     default_buffer_depth,
     generate_active_remote_id,
     get_cli_binary,
@@ -207,6 +208,9 @@ class AirPlayStream:
         # post-commit correction log level (a corrected join is the routine
         # landing path, a corrected origin start is a loud signal).
         self._start_was_join = False
+        # Whether the stream awaits its first state report since connecting or the last
+        # START. A receiver can echo a play command for that start before it arrives.
+        self.start_pending: bool = False
         # Receiver storm guard state: last-honored monotonic time per remote
         # transport command, plus a counter of suppressed repeats.
         self._remote_command_last: dict[str, float] = {}
@@ -344,6 +348,9 @@ class AirPlayStream:
         # A fresh cliairplay process re-anchors from scratch, so drop any shift
         # carried on this stream object.
         self.reset_reanchor_shift()
+        # Covers the echo a receiver sends before START, e.g. while the group awaits
+        # its members' clock readiness.
+        self.start_pending = True
         args = await self._build_cli_args(use_shared_ptp)
         self.player.logger.debug("Starting cliairplay for player %s", self.player.protocol_id)
         self._cli_proc = AsyncProcess(args, stdin=True, stdout=True, stderr=True, name="cliairplay")
@@ -355,7 +362,7 @@ class AirPlayStream:
         except BaseException:
             try:
                 await self._cleanup_failed_start()
-            except Exception as err:
+            except Exception as err:  # noqa: BLE001 - cleanup must not hide the start error
                 self.player.logger.warning("Failed to clean up cliairplay startup: %s", err)
             raise
 
@@ -702,6 +709,7 @@ class AirPlayStream:
         # the previous anchor (this also covers the warm-seek FLUSH->refill->START
         # path) to keep the server and binary baselines aligned.
         self.reset_reanchor_shift()
+        self.start_pending = True
         # Whatever was pending belongs to the anchor being replaced here; a later
         # report describes what this start cycle was handed.
         self.audio_pending_ms = 0
@@ -1009,14 +1017,21 @@ class AirPlayStream:
             leader_player = sync_leader.player if sync_leader else None
         else:
             leader_player = owner.player if was_leader else None
+        leaving: asyncio.Task[None] | None = None
         if leader_player is not None and owner.player is not None:
-            self.mass.create_task(self._leave_group(leader_player, owner.player.player_id))
+            leaving = self.mass.create_task(
+                self._leave_group(leader_player, owner.player.player_id)
+            )
         if rejoin and rejoin_candidates and not self._receiver_closed:
             # the group (or its successor) may still be playing:
             # schedule bounded attempts to re-join it
-            owner.schedule_group_rejoin(rejoin_candidates)
+            if was_leader:
+                # it leads the group until it has left it, which waits for other commands
+                owner.schedule_group_rejoin(rejoin_candidates, after=leaving)
+            else:
+                owner.schedule_group_rejoin(rejoin_candidates)
         if (
-            owner is not player
+            (owner is not player or player.speakers)
             and not was_leader
             and not owner.synced_to
             and (session := self.session)
@@ -1178,8 +1193,6 @@ class AirPlayStream:
             str(self.pcm_format.sample_rate),
             "--bitdepth",
             str(self.pcm_format.bit_depth),
-            "--clock-offset-ns",
-            str(CLI_CLOCK_OFFSET_NS),
         ]
         if timing_arg:
             args += ["--timing", timing_arg]
@@ -1309,6 +1322,10 @@ class AirPlayStream:
             args += ["--debug", "10"]
         elif self.prov.logger.isEnabledFor(logging.DEBUG):
             args += ["--debug", "5"]
+
+        # Read after the last await: the process exists before anything else can run,
+        # and from then on it pins the rate of the timeline it was given.
+        args += cli_clock_args(self.mass.timeline_clock)
 
         # Audio is fed continuously on the process stdin; the binary reads it into
         # a single ring buffer for the whole session lifetime (flushed and
@@ -1623,6 +1640,7 @@ class AirPlayStream:
             else:
                 self._update_elapsed(millis / 1000)
         elif "[STATUS] paused" in line:
+            self.start_pending = False
             player.set_state_from_stream(state=PlaybackState.PAUSED, stream=self)
         elif "[STATUS] started " in line:
             try:
@@ -1739,6 +1757,7 @@ class AirPlayStream:
         elapsed_time += self._start_position
         # The binary only emits this status while actually playing, so it is
         # also the signal that drives the player into the PLAYING state.
+        self.start_pending = False
         self.player.set_state_from_stream(
             state=PlaybackState.PLAYING, elapsed_time=elapsed_time, stream=self
         )
@@ -1801,7 +1820,7 @@ class AirPlayStream:
                 image_format="JPEG",
                 flatten_transparency=True,
             )
-        except Exception as err:
+        except Exception as err:  # noqa: BLE001 - artwork is optional, playback goes on without it
             self.player.logger.debug("Could not prepare artwork: %s", err)
             return None
 
@@ -1831,7 +1850,8 @@ class AirPlayStream:
         """
         Send a RAOP progress anchor once an acknowledged start becomes audible.
 
-        :param audible_unix_ms: Acknowledged audible start instant in Unix milliseconds.
+        :param audible_unix_ms: Acknowledged audible start instant on the cliairplay
+            timeline, in unix milliseconds.
         :param generation: Start generation that owns this progress update.
         """
         # Live inputs do not necessarily have media metadata, so the normal
@@ -1840,8 +1860,9 @@ class AirPlayStream:
         # PROGRESS that arrives before the session streams, so wait until the
         # audible instant, and discard updates belonging to a stopped/flushed/old
         # start. An ASAP start without a usable ack reports 0: treat it as now.
-        audible = audible_unix_ms / 1000 if audible_unix_ms > 0 else time.time()
-        await asyncio.sleep(max(0, audible - time.time()) + 0.1)
+        clock = self.mass.timeline_clock
+        audible = audible_unix_ms / 1000 if audible_unix_ms > 0 else cli_clock_time(clock)
+        await asyncio.sleep(max(0, audible - cli_clock_time(clock)) + 0.1)
         async with self._metadata_lock:
             if (
                 generation != self._progress_anchor_generation
@@ -1849,7 +1870,7 @@ class AirPlayStream:
                 or not self.connected
             ):
                 return
-            progress = int(self._start_position + max(0, time.time() - audible))
+            progress = int(self._start_position + max(0, cli_clock_time(clock) - audible))
             if await self.send_cli_command(f"PROGRESS={progress}"):
                 self._last_progress_sent = progress
 
@@ -1903,7 +1924,7 @@ class AirPlayStream:
                 await stdout_reader_task
             except asyncio.CancelledError:
                 pass
-            except Exception as err:
+            except Exception as err:  # noqa: BLE001 - cleanup must not abort, the kill below still runs
                 self.player.logger.debug("cliairplay stdout reader cleanup failed: %s", err)
         try:
             if self._cli_proc and not self._cli_proc.closed:
@@ -2358,9 +2379,30 @@ class AirPlayStream:
         )
 
     async def _leave_group(self, leader: Player, player_id: str) -> None:
-        """Take a player out of the group of its sync leader, on the server's own behalf."""
+        """
+        Take a player out of the group it plays in, on the server's own behalf.
+
+        :param leader: The player that leads the group.
+        :param player_id: Id of the player that leaves, which can be the leader itself.
+        """
         players = self.mass.players
-        async with players.get_player_lock(leader.player_id, PlayerLockPurpose.PLAYBACK):
+        if leader.player_id != player_id:
+            async with players.get_player_lock(leader.player_id, PlayerLockPurpose.PLAYBACK):
+                await players._handle_set_members(leader, player_ids_to_remove=[player_id])
+            return
+        async with players.get_group_and_player_lock(player_id):
+            owner = self.player.owner or self.player
+            if self.player.stream is not self or not owner.group_members:
+                # a command that came first restarted the stream or took the leadership away
+                return
+            group = players.get_player(leader.active_group) if leader.active_group else None
+            if (
+                not self._receiver_closed
+                and group
+                and group.own_protocol
+                and await group.own_protocol.on_session_leader_lost(owner)
+            ):
+                return
             await players._handle_set_members(leader, player_ids_to_remove=[player_id])
 
 

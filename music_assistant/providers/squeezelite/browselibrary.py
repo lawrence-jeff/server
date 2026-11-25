@@ -1976,7 +1976,7 @@ class BrowseLibraryHandler:
             icon_id = _menu_icon("browselibrary")
             try:
                 title, icon_id = await self._popup_details(slim_command.kwargs.get("uri"), None)
-            except Exception:  # the failed item may not be describable either
+            except Exception:  # noqa: BLE001 - the failed item may not be describable either
                 title = ""
             self._slimproto.cli.push_show_briefly(
                 slim_command.player_id,

@@ -125,7 +125,7 @@ def _hass(mass: MusicAssistant) -> Any:
     """Return Music Assistant's Home Assistant plugin, or None if it is not set up."""
     try:
         return mass.get_provider("hass")
-    except Exception:  # not set up, or the lookup differs: treat as absent
+    except Exception:  # noqa: BLE001 - not set up, or the lookup differs: treat as absent
         return None
 
 

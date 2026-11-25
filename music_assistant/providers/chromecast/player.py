@@ -28,6 +28,7 @@ from pychromecast import IDLE_APP_ID
 from pychromecast.const import CAST_TYPE_CHROMECAST
 from pychromecast.controllers.media import (
     MEDIA_PLAYER_ERROR_CODES,
+    STREAM_TYPE_BUFFERED,
     STREAM_TYPE_LIVE,
 )
 from pychromecast.controllers.multizone import MultizoneController
@@ -58,6 +59,7 @@ from .constants import (
     DASHBOARD_KEEPALIVE_SUFFIXES,
     MASS_APP_ID,
     SENDSPIN_CAST_APP_ID,
+    get_cast_output_codec_entry,
 )
 from .helpers import (
     CastStatusListener,
@@ -89,6 +91,9 @@ class ChromecastPlayer(PlayerProtocol):
     # a quit that is already on the wire cannot be recalled, so a receiver that
     # still reports our app is no longer proof that the session is usable
     app_quit_sent: bool = False
+    # whether the playback the receiver last reported was a Music Assistant session,
+    # taken while it plays: once it ends the receiver may no longer say what it played
+    _playing_own_session: bool = False
     # Cast reports the running app accurately, and only a foreign app is listed as source
     _attr_trusts_reported_source = True
     # the client of the device, connected at every attach
@@ -170,13 +175,16 @@ class ChromecastPlayer(PlayerProtocol):
 
     async def get_config_entries(self) -> list[ConfigEntry]:
         """Return all (provider/player specific) Config Entries for the given player (if any)."""
+        output_codec_entry = get_cast_output_codec_entry(self.cast_info.model_name)
         if self.type == PlayerType.GROUP:
             return [
+                output_codec_entry,
                 *CAST_PLAYER_CONFIG_ENTRIES,
                 CONF_ENTRY_SAMPLE_RATES_CAST_GROUP,
             ]
 
         return [
+            output_codec_entry,
             *CAST_PLAYER_CONFIG_ENTRIES,
             CONF_ENTRY_SAMPLE_RATES_CAST,
             CONF_ENTRY_DEFER_IDLE_VOLUME,
@@ -841,6 +849,8 @@ class ChromecastPlayer(PlayerProtocol):
         :param is_playing: Whether the receiver is really playing audio.
         """
         prev_state = self._attr_playback_state
+        if is_playing or status.player_is_paused:
+            self._playing_own_session = self._is_own_session(status)
         if is_playing:
             self._attr_playback_state = PlaybackState.PLAYING
             self.set_current_media(uri=status.content_id or "", clear_all=True)
@@ -856,11 +866,15 @@ class ChromecastPlayer(PlayerProtocol):
                 prev_state in (PlaybackState.PLAYING, PlaybackState.PAUSED)
                 and self.type != PlayerType.GROUP
                 and self.active_cast_group is None
+                and self._playing_own_session
             ):
                 # Playback that ends on its own never gets a stop command (the queue ran
                 # out, or an announcement finished), so without this the device would stay
                 # claimed forever. A cast group is left alone: quitting its app is what its
                 # power control does, and a group member follows the group's session.
+                # Playback another party cast through the Default Media Receiver is left
+                # to the receiver's own idle timeout: quitting it ends that party's session,
+                # and its next cast then has to start a new one, with the connect chime.
                 self._schedule_app_release()
 
     def _update_elapsed_time(self, status: MediaStatus, is_playing: bool) -> None:
@@ -1065,9 +1079,14 @@ class ChromecastPlayer(PlayerProtocol):
 
     def _create_cc_media_item(self, media: PlayerMedia, stream_url: str) -> dict[str, Any]:
         """Create CC media item from MA PlayerMedia."""
-        # Always use LIVE stream type because MA streams are real-time encoded by FFmpeg,
-        # so they are not seekable and don't have a known content length.
-        stream_type = STREAM_TYPE_LIVE
+        is_flow = "/flow/" in stream_url
+        # a flow stream carries on into the next track, so it has no length of its own
+        duration = None if is_flow else served_duration(media, stream_url)
+        # receivers show a "LIVE" label for a live stream, which only fits media without an end
+        has_end = is_flow or (
+            duration is not None
+            and media.media_type not in (MediaType.RADIO, MediaType.AUDIO_SOURCE)
+        )
         metadata = {
             "metadataType": 3,
             "albumName": media.album or "",
@@ -1084,9 +1103,9 @@ class ChromecastPlayer(PlayerProtocol):
                 "queue_item_id": media.queue_item_id or stream_url,
             },
             "contentType": f"audio/{file_ext}",
-            "streamType": stream_type,
+            "streamType": STREAM_TYPE_BUFFERED if has_end else STREAM_TYPE_LIVE,
             "metadata": metadata,
-            "duration": served_duration(media, stream_url),
+            "duration": duration,
         }
 
     def _handle_receiver_command(self, command: str) -> None:
